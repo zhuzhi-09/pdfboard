@@ -99,6 +99,15 @@ namespace AnnotationBundle {
 bool write(const QString &bundlePath, const QByteArray &pdfBytes,
            const QJsonObject &annotations, QString *errorOut)
 {
+    // A bundle is only ever a .dpz. Refusing every other target is what keeps
+    // 保存 from ever overwriting the document it came from: even if a caller
+    // hands us the wrong path (a .docx, the original .pdf), the source file
+    // stays untouchable and the failure is visible instead of destructive.
+    if (!bundlePath.endsWith(QStringLiteral(".dpz"), Qt::CaseInsensitive)) {
+        setError(errorOut, QStringLiteral("批注包只能保存为 .dpz（拒绝写入 %1）").arg(bundlePath));
+        return false;
+    }
+
     const QByteArray json = QJsonDocument(annotations).toJson(QJsonDocument::Indented);
 
     QVector<Entry> entries;

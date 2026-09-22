@@ -693,6 +693,22 @@ void MainWindow::saveDocumentAs()
 
     QString err;
     if (inject) {
+        // Never write over the document being annotated: the export target must
+        // be a different file (the dialog suggests <basename>-已批注.pdf).
+        const auto sameFile = [](const QString &a, const QString &b) {
+            if (a.isEmpty() || b.isEmpty())
+                return false;
+            return QFileInfo(a).absoluteFilePath().compare(QFileInfo(b).absoluteFilePath(),
+                                                          Qt::CaseInsensitive) == 0;
+        };
+        if (sameFile(path, info.wordPath) || sameFile(path, info.sourcePdf)) {
+            AppLog::write(QStringLiteral("save"),
+                          QStringLiteral("拒绝把源文件当作导出目标：%1").arg(path));
+            statusBar()->showMessage(
+                QStringLiteral("不能用源文件本身作为导出目标，请换一个文件名"), 8000);
+            return;
+        }
+
         // Injecting never changes the open document's own bundle state.
         QElapsedTimer timer;
         timer.start();

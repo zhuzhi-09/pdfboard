@@ -1,4 +1,5 @@
 #include "MainWindow.h"
+#include "AnnotationBundle.h"
 #include "AppLog.h"
 #include "AppSettings.h"
 #include "HomePage.h"
@@ -836,6 +837,40 @@ static int runDocxSelfTest()
     const bool has = WordConvert::hasConverter();
     check("hasConverter: returns a bool", int(has || !has), 1);
     check("hasConverter: cached second call", int(WordConvert::hasConverter() == has), 1);
+
+    // A bundle must never be written anywhere but a .dpz. That guard is what
+    // stops 保存 from overwriting the document it was made from - the failure
+    // has to be visible instead of destructive.
+    {
+        const QString guard = QDir(QDir::tempPath())
+                                  .filePath(QStringLiteral("pdfboard-guard-source.docx"));
+        const QByteArray original = QByteArrayLiteral("ORIGINAL SOURCE BYTES");
+        {
+            QFile seed(guard);
+            seed.open(QIODevice::WriteOnly | QIODevice::Truncate);
+            seed.write(original);
+        }
+        QString guardErr;
+        const bool wrote = AnnotationBundle::write(
+            guard, QByteArrayLiteral("%PDF-1.4 fake"), QJsonObject(), &guardErr);
+        check("guard: refuses non-.dpz target", wrote ? 0 : 1, 1);
+        check("guard: error explains why", guardErr.isEmpty() ? 0 : 1, 1);
+        QFile back(guard);
+        back.open(QIODevice::ReadOnly);
+        check("guard: source file untouched", back.readAll() == original ? 1 : 0, 1);
+        back.close();
+        QFile::remove(guard);
+
+        const QString dpz = QDir(QDir::tempPath())
+                                .filePath(QStringLiteral("pdfboard-guard-target.dpz"));
+        QFile::remove(dpz);
+        QString okErr;
+        const bool okWrote = AnnotationBundle::write(
+            dpz, QByteArrayLiteral("%PDF-1.4 fake"), QJsonObject(), &okErr);
+        check("guard: .dpz target still works", okWrote ? 1 : 0, 1);
+        check("guard: .dpz file created", QFileInfo::exists(dpz) ? 1 : 0, 1);
+        QFile::remove(dpz);
+    }
 
     out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")
                     : QStringLiteral("[selftest] %1 CHECK(S) FAILED").arg(failed));
