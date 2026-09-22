@@ -1,9 +1,13 @@
 #include "MainWindow.h"
 #include "AppLog.h"
+#include "AppSettings.h"
 #include "MemProbe.h"
 #include "PdfCanvas.h"
 
 #include <QApplication>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
 #include <QGuiApplication>
 #include <QScreen>
 #include <QElapsedTimer>
@@ -291,6 +295,62 @@ static int runInkSelfTest(const QString &path)
     return failed == 0 ? 0 : 3;
 }
 
+// Headless self test:  pdfboard.exe --selftest-log
+// Locks the rule that once made the settings switch dead: PDFBOARD_LOG decides
+// the startup default and the file's location, but never whether the user may
+// turn logging off again.
+static int runLogSelfTest()
+{
+    int failed = 0;
+    auto check = [&failed](const char *what, int got, int want) {
+        const bool ok = (got == want);
+        if (!ok)
+            ++failed;
+        out(QStringLiteral("[selftest] %1: got %2 want %3 -> %4")
+                .arg(QString::fromLatin1(what), -28)
+                .arg(got).arg(want)
+                .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+    };
+
+    // Leave the machine exactly as we found it.
+    const bool savedPref = AppSettings::debugLogEnabled();
+    const QByteArray savedEnv = qgetenv("PDFBOARD_LOG");
+
+    const QString tmp = QDir(QDir::tempPath())
+                            .filePath(QStringLiteral("pdfboard-selftest-log.log"));
+    QFile::remove(tmp);
+    qputenv("PDFBOARD_LOG", tmp.toLocal8Bit());
+
+    AppLog::applySettings();
+    check("env var: startup is ON", AppLog::isEnabled() ? 1 : 0, 1);
+    check("env var: path is used", AppLog::logFilePath() == tmp ? 1 : 0, 1);
+
+    // The reported bug: this used to stay ON, so the switch never moved.
+    AppLog::setEnabled(false, nullptr);
+    check("switch OFF beats env", AppLog::isEnabled() ? 1 : 0, 0);
+    check("switch OFF is stored", AppSettings::debugLogEnabled() ? 1 : 0, 0);
+
+    const qint64 before = QFileInfo(tmp).size();
+    AppLog::write(QStringLiteral("selftest"), QStringLiteral("must not be written"));
+    check("switch OFF: no writes", QFileInfo(tmp).size() > before ? 1 : 0, 0);
+
+    AppLog::setEnabled(true, nullptr);
+    check("switch ON resumes", AppLog::isEnabled() ? 1 : 0, 1);
+    check("switch ON: writes again", QFileInfo(tmp).size() > before ? 1 : 0, 1);
+
+    if (savedEnv.isEmpty())
+        qunsetenv("PDFBOARD_LOG");
+    else
+        qputenv("PDFBOARD_LOG", savedEnv);
+    AppSettings::setDebugLogEnabled(savedPref, nullptr);
+    AppLog::applySettings();
+    check("preference restored", AppSettings::debugLogEnabled() == savedPref ? 1 : 0, 1);
+
+    out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")
+                    : QStringLiteral("[selftest] %1 CHECK(S) FAILED").arg(failed));
+    return failed == 0 ? 0 : 3;
+}
+
 int main(int argc, char **argv)
 {
     QApplication app(argc, argv);
@@ -322,13 +382,15 @@ int main(int argc, char **argv)
                           .arg(scr->devicePixelRatio()));
     const int benchIdx = args.indexOf(QStringLiteral("--bench"));
     const int stIdx = args.indexOf(QStringLiteral("--selftest-ink"));
+    const int logIdx = args.indexOf(QStringLiteral("--selftest-log"));
 
     // The shipping build is a GUI executable (no console window when the user
     // double-clicks it). The console-based modes still need their output, so
     // attach to the launching terminal - but only when stdout was NOT already
     // redirected, otherwise we would clobber the caller's capture.
     if ((benchIdx >= 0 && benchIdx + 1 < args.size())
-        || (stIdx >= 0 && stIdx + 1 < args.size())) {
+        || (stIdx >= 0 && stIdx + 1 < args.size())
+        || logIdx >= 0) {
         attachConsoleForCli();
     }
 
@@ -337,6 +399,9 @@ int main(int argc, char **argv)
 
     if (stIdx >= 0 && stIdx + 1 < args.size())
         return runInkSelfTest(args.at(stIdx + 1));
+
+    if (logIdx >= 0)
+        return runLogSelfTest();
 
     MainWindow w;
     w.show();

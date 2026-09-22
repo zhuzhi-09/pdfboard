@@ -54,6 +54,7 @@ private:
     QPushButton     *m_resetSaveDir  = nullptr;
     QAbstractButton *m_debugLog      = nullptr;
     QLabel          *m_logPathLabel  = nullptr;
+    QLabel          *m_logEnvNote    = nullptr;
     QPushButton     *m_openLogDir    = nullptr;
     int              m_maxColumn = 0;
 };

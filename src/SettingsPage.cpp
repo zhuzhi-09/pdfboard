@@ -433,6 +433,14 @@ void SettingsPage::buildUi()
         m_logPathLabel->setFont(Theme::scaledFont(logRow->font(), 0.95, QFont::Normal));
         m_logPathLabel->setWordWrap(true);
         logTexts->addWidget(m_logPathLabel);
+
+        // Why the switch can start out ON, and why that is not the setting.
+        m_logEnvNote = new QLabel(logRow);
+        m_logEnvNote->setObjectName(QStringLiteral("settingsRowBody"));
+        m_logEnvNote->setFont(Theme::scaledFont(logRow->font(), 0.95, QFont::Normal));
+        m_logEnvNote->setWordWrap(true);
+        m_logEnvNote->setVisible(false);
+        logTexts->addWidget(m_logEnvNote);
         h->addLayout(logTexts, 1);
 
         m_openLogDir = new QPushButton(QStringLiteral("打开日志文件夹"), logRow);
@@ -520,6 +528,15 @@ void SettingsPage::refreshLogPath()
         : QStringLiteral("已关闭（不写入任何日志）"));
     if (m_openLogDir)
         m_openLogDir->setEnabled(on);
+
+    if (m_logEnvNote) {
+        const QString env = AppLog::envOverridePath();
+        m_logEnvNote->setVisible(!env.isEmpty());
+        if (!env.isEmpty())
+            m_logEnvNote->setText(QStringLiteral(
+                "本次由环境变量 PDFBOARD_LOG 指定路径：%1（只决定启动时默认开启，"
+                "上面的开关随时可以关闭）").arg(QDir::toNativeSeparators(env)));
+    }
 }
 
 bool SettingsPage::eventFilter(QObject *, QEvent *event)

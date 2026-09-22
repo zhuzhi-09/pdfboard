@@ -18,16 +18,28 @@ bool    g_enabled = false;
 QMutex  g_mutex;
 QtMessageHandler g_previous = nullptr;
 
+// Set once somebody works the switch on the settings page. PDFBOARD_LOG is a
+// startup default for machines we cannot click through - it must never make the
+// switch dead, so an explicit click outranks it from that moment on.
+bool g_envSuppressed = false;
+
 // Rotate rather than grow forever: one previous run is kept as "<file>.1".
 constexpr qint64 kMaxBytes = 2 * 1024 * 1024;
+
+// Path asked for by the PDFBOARD_LOG environment variable (empty when unset).
+QString envPath()
+{
+    const QByteArray env = qgetenv("PDFBOARD_LOG");
+    return env.isEmpty() ? QString() : QString::fromLocal8Bit(env);
+}
 
 QString resolvePath()
 {
     // The environment override wins, so a supporter can ask for a log at a
     // known place on a machine whose settings we cannot click through.
-    const QByteArray env = qgetenv("PDFBOARD_LOG");
+    const QString env = envPath();
     if (!env.isEmpty())
-        return QString::fromLocal8Bit(env);
+        return env;
 
     const QString base =
         QStandardPaths::writableLocation(QStandardPaths::AppLocalDataLocation);
@@ -36,10 +48,16 @@ QString resolvePath()
 
 void openFileLocked()
 {
-    if (g_file.isOpen())
-        return;
-
     const QString path = resolvePath();
+
+    // Also handles a path that changed while running (the environment override
+    // being set or cleared), so the resolved path always wins.
+    if (g_file.isOpen()) {
+        if (g_path == path)
+            return;
+        g_file.close();
+    }
+
     QDir().mkpath(QFileInfo(path).absolutePath());
 
     if (QFileInfo(path).size() > kMaxBytes) {
@@ -104,10 +122,14 @@ void installHandlerOnce()
 
 void AppLog::applySettings()
 {
-    const bool want = AppSettings::debugLogEnabled()
-                      || !qgetenv("PDFBOARD_LOG").isEmpty();
-    if (!want) {
+    // ON when the user asked for it, or when PDFBOARD_LOG asked for it and no
+    // click has overridden that yet.
+    const bool envForces = !envPath().isEmpty() && !g_envSuppressed;
+    if (!AppSettings::debugLogEnabled() && !envForces) {
+        QMutexLocker lock(&g_mutex);
         g_enabled = false;
+        if (g_file.isOpen())
+            g_file.close();      // "off" must not keep the file locked
         return;
     }
 
@@ -123,6 +145,10 @@ bool AppLog::setEnabled(bool on, QString *errorOut)
 {
     if (!AppSettings::setDebugLogEnabled(on, errorOut))
         return false;
+
+    // A click here outranks PDFBOARD_LOG for the rest of the session. Without
+    // this the switch snapped straight back on and could never be turned off.
+    g_envSuppressed = !on;
     applySettings();
     if (on)
         write(QStringLiteral("log"),
@@ -143,6 +169,11 @@ QString AppLog::logFilePath()
 QString AppLog::logDirectory()
 {
     return QFileInfo(resolvePath()).absolutePath();
+}
+
+QString AppLog::envOverridePath()
+{
+    return envPath();
 }
 
 void AppLog::write(const QString &category, const QString &message)

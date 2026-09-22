@@ -118,6 +118,10 @@ build\pdfboard.exe --bench some.pdf
 记录内容：启动环境（Qt 版本、程序路径、屏幕与 DPI）、文档打开/关闭耗时与页数、**慢页渲染**、缓存淘汰、缩放稳定值、墨迹编辑与保存/导出结果、以及 Qt 的所有警告。
 **不记录**文档内容，也不记录批注坐标。日志默认位置：`%LOCALAPPDATA%\PDFBoard\logs\pdfboard.log`（超过 2 MB 自动轮转为 `.1`）。
 
+`PDFBOARD_LOG` 只决定**本次启动默认是否开启**以及日志写到哪个文件，**不会锁住设置里的开关**：
+用它启动后依然可以在「设置 → 调试」里随手关掉（设置页会注明该变量正在生效）；下次再用同一个终端启动时它又会是开启的。
+关闭开关同时会释放日志文件的句柄，不会出现「明明关了却一直占着文件」。
+
 ## 环境要求
 
 | 依赖 | 版本 |
@@ -162,6 +166,9 @@ build\pdfboard.exe "D:\课件\选必2综合练习三.dpz"
 ```powershell
 # 墨迹 / 擦除 / 撤销 / 缩放 的确定性断言（不依赖鼠标输入）
 build\pdfboard.exe --selftest-ink path\to\test.pdf
+
+# 诊断日志开关与 PDFBOARD_LOG 优先级的回归断言（不需要文档，不改动你的设置）
+build\pdfboard.exe --selftest-log
 
 # 渲染耗时与内存基准
 build\pdfboard.exe --bench path\to\test.pdf
