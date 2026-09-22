@@ -321,6 +321,10 @@ const QString kAlertValue = QStringLiteral("AlertIfNotDefault");
 const QString kNoCheckValue = QStringLiteral("DoNotCheckIfWordIsDefaultApp");
 constexpr int kAlertSilenced = 0;
 constexpr int kNoCheckSilenced = 1;
+// Word's documented default for the switch itself: the "Tell me if Microsoft
+// Word isn't the default program" checkbox is on, and no
+// DoNotCheckIfWordIsDefaultApp value exists at all.
+constexpr int kAlertDefault = 1;
 
 QString wordOptionsKey(const QString &version)
 {
@@ -386,6 +390,27 @@ bool silencedValueFor(const QString &name, int *value)
     if (name == kNoCheckValue) {
         *value = kNoCheckSilenced;
         return true;
+    }
+    return false;
+}
+
+// True when some Office version's options currently hold the values a
+// silencing write leaves behind: AlertIfNotDefault = 0 (the switch itself) or
+// DoNotCheckIfWordIsDefaultApp = 1 (its older sibling). Read-only; the
+// backup-less path of restoreWordNag() uses it to tell "modified by an older
+// build or by hand" apart from "never touched".
+bool currentNagIsSilenced()
+{
+    for (const QString &version : officeVersionKeys()) {
+        const QSettings options(wordOptionsKey(version), QSettings::NativeFormat);
+        if (options.contains(kAlertValue)
+            && options.value(kAlertValue).toInt() == kAlertSilenced) {
+            return true;
+        }
+        if (options.contains(kNoCheckValue)
+            && options.value(kNoCheckValue).toInt() == kNoCheckSilenced) {
+            return true;
+        }
     }
     return false;
 }
@@ -617,13 +642,45 @@ bool WordConvert::restoreWordNag(QString *errorOut)
         return false;
     };
 
-    const QString json = nagBackupJson();
-    if (json.isEmpty())
-        return fail(QStringLiteral("没有可恢复的 Word 设置备份"));
+    const QJsonDocument document = QJsonDocument::fromJson(nagBackupJson().toUtf8());
+    const bool haveBackup = document.isObject() && !document.object().isEmpty();
 
-    const QJsonDocument document = QJsonDocument::fromJson(json.toUtf8());
-    if (!document.isObject() || document.object().isEmpty())
-        return fail(QStringLiteral("Word 设置备份已损坏，无法恢复"));
+    if (!haveBackup) {
+        // Nothing recorded to replay. When the current values still look like a
+        // silencing write (an older build, or a manual edit), Word's documented
+        // defaults are the best restore available: AlertIfNotDefault back to 1
+        // and no DoNotCheckIfWordIsDefaultApp value. Only values that actually
+        // exist are touched - nothing is invented, no key is created.
+        if (!currentNagIsSilenced())
+            return fail(QStringLiteral("没有可恢复的 Word 设置备份"));
+
+        for (const QString &version : officeVersionKeys()) {
+            QSettings options(wordOptionsKey(version), QSettings::NativeFormat);
+            bool changed = false;
+            if (options.contains(kAlertValue)
+                && options.value(kAlertValue).toInt() == kAlertSilenced) {
+                options.setValue(kAlertValue, kAlertDefault);
+                changed = true;
+            }
+            if (options.contains(kNoCheckValue)
+                && options.value(kNoCheckValue).toInt() == kNoCheckSilenced) {
+                options.remove(kNoCheckValue);
+                changed = true;
+            }
+            if (changed)
+                options.sync();
+        }
+
+        AppLog::write(QStringLiteral("open"),
+                      QStringLiteral("已把 Word 的提醒设置恢复为默认（无备份记录）"));
+        // Success with a notice, not an error: the nag WILL come back, and the
+        // settings page reports exactly that through the status bar.
+        if (errorOut) {
+            *errorOut = QStringLiteral(
+                "没有备份记录：已恢复为 Word 默认设置（会重新提醒）");
+        }
+        return true;
+    }
 
     const QVariantMap recorded = decodeNagBackup(document.object());
     for (auto it = recorded.constBegin(); it != recorded.constEnd(); ++it) {
@@ -651,6 +708,15 @@ bool WordConvert::restoreWordNag(QString *errorOut)
     if (errorOut)
         errorOut->clear();
     return true;
+}
+
+WordConvert::NagRestoreMode WordConvert::nagRestoreMode()
+{
+    if (wordNagBackupExists())
+        return NagRestoreMode::FromBackup;
+    if (currentNagIsSilenced())
+        return NagRestoreMode::ToDefaults;
+    return NagRestoreMode::None;
 }
 
 bool WordConvert::wordNagBackupExists()

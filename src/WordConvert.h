@@ -59,13 +59,35 @@ bool convertToPdf(const QString &src, QString *pdfOut, QString *errorOut);
 // version key exists.
 bool silenceWordNag(QString *errorOut = nullptr);
 
-// Restores from the backup: a value that existed is written back with its
-// original data, a value that did not exist is deleted, then the backup is
-// removed. Returns false with a Chinese message when there is no usable backup.
+// What 恢复 Word 设置 would do right now. It decides the settings row (button
+// enabled state, body text, confirmation) and the way restoreWordNag() works.
+enum class NagRestoreMode {
+    None,        // no backup and the values look untouched: nothing to restore
+    FromBackup,  // WordNagBackup exists: exact replay of the pre-write state
+    ToDefaults,  // no backup, but the values look like a silencing write (an
+                 // older build or a manual edit): Word's documented defaults
+                 // are the only restore left, and the nag comes back
+};
+
+// FromBackup > ToDefaults > None, judged from OUR backup plus a READ-ONLY look
+// at the current Word option values.
+NagRestoreMode nagRestoreMode();
+
+// Restores according to nagRestoreMode():
+//   * FromBackup: a value that existed is written back with its original data,
+//     a value that did not exist is deleted, then the backup is removed.
+//   * ToDefaults: with no backup but the values still looking silenced,
+//     AlertIfNotDefault is set back to 1 and DoNotCheckIfWordIsDefaultApp is
+//     deleted - but only where those values actually exist. Success hands back
+//     a Chinese NOTICE through `errorOut` ("没有备份记录：已恢复为 Word 默认设置
+//     （会重新提醒）"), because the nag will pop again; the settings page shows
+//     it in the status bar. That is the only success path that leaves
+//     `errorOut` non-empty - every other success clears it.
+//   * None: fails with a Chinese message and touches nothing.
 bool restoreWordNag(QString *errorOut = nullptr);
 
 // True when a backup exists, whether or not the values it describes are
-// currently in place (the settings page enables its 恢复 button on this).
+// currently in place (nagRestoreMode() uses it for FromBackup).
 bool wordNagBackupExists();
 
 // True when a backup exists AND every recorded option value currently holds

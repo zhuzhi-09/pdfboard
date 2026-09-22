@@ -1146,15 +1146,37 @@ static int runDocxSelfTest()
               int(WordConvert::decodeNagBackup(reparsed) == recorded), 1);
     }
 
-    // --- Word nag restore with no backup ------------------------------------
-    // Never touches Word's real option values: it temporarily takes THIS APP's
-    // backup value out (keeping the exact original variant), so the restore
-    // below really has none, and puts it back afterwards. The Word option keys
-    // themselves are only ever READ, by the snapshots around the call.
+    // --- Word nag restore mode and the no-backup path -----------------------
+    // Machine-independent: everything asserted here depends only on OUR
+    // registry. The dummy backup below lives in HKCU\Software\PDFBoard and is
+    // never handed to restoreWordNag(), so no Word key is ever written; the
+    // Word option keys themselves are only READ, by the snapshots.
+    //
+    // On a machine whose REAL Word option values already look silenced the
+    // no-backup restore would (by design) write those keys - exactly what a
+    // self test must never do - so the failing-restore assertions below run
+    // only in the None case and the test prints why it skipped them otherwise.
     {
         QSettings rawNag(QStringLiteral("HKEY_CURRENT_USER\\Software\\PDFBoard"),
                          QSettings::NativeFormat);
         const QVariant savedBackup = rawNag.value(QStringLiteral("WordNagBackup"));
+
+        // A recorded backup means FromBackup, whatever Word itself holds.
+        {
+            QVariantMap recorded;
+            QVariantMap entry;
+            entry.insert(QStringLiteral("exists"), true);
+            entry.insert(QStringLiteral("value"), 1);
+            recorded.insert(QStringLiteral("16.0|AlertIfNotDefault"), entry);
+            rawNag.setValue(QStringLiteral("WordNagBackup"),
+                            QString::fromUtf8(
+                                QJsonDocument(WordConvert::encodeNagBackup(recorded))
+                                    .toJson(QJsonDocument::Compact)));
+            rawNag.sync();
+            check("nag mode: backup -> FromBackup",
+                  int(WordConvert::nagRestoreMode()
+                      == WordConvert::NagRestoreMode::FromBackup), 1);
+        }
 
         rawNag.remove(QStringLiteral("WordNagBackup"));
         rawNag.sync();
@@ -1166,11 +1188,20 @@ static int runDocxSelfTest()
               int(WordConvert::wordNagSilenced()), 0);
 
         const QMap<QString, QVariantMap> optionsBefore = wordOptionSnapshot();
+        const WordConvert::NagRestoreMode mode = WordConvert::nagRestoreMode();
+        check("nag mode: no backup never FromBackup",
+              int(mode != WordConvert::NagRestoreMode::FromBackup), 1);
 
-        QString restoreErr;
-        const bool restored = WordConvert::restoreWordNag(&restoreErr);
-        check("nag restore: fails without backup", int(restored), 0);
-        check("nag restore: error explains", int(!restoreErr.isEmpty()), 1);
+        if (mode == WordConvert::NagRestoreMode::None) {
+            QString restoreErr;
+            const bool restored = WordConvert::restoreWordNag(&restoreErr);
+            check("nag restore: fails without backup", int(restored), 0);
+            check("nag restore: error explains", int(!restoreErr.isEmpty()), 1);
+        } else {
+            out(QStringLiteral("[selftest] nag restore: skipped, this machine's Word "
+                               "values look silenced (mode=%1); restoring would write "
+                               "real Word keys").arg(int(mode)));
+        }
 
         const QMap<QString, QVariantMap> optionsAfter = wordOptionSnapshot();
         check("nag restore: Word options untouched",

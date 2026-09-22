@@ -91,10 +91,12 @@ private:
     QPushButton  *m_wordSegments[3] = {};
 
     // The Word nag fix: the toggle persists AppSettings::wordNagFixEnabled and
-    // the button restores Word's two option values from the backup recorded by
-    // the first silencing write (disabled while there is no backup).
+    // the button restores according to WordConvert::nagRestoreMode() (exact
+    // backup replay / Word defaults / disabled while nothing was modified).
+    // m_wordNagNote is the row's state line, kept in sync by refreshWordNag().
     QAbstractButton *m_wordNagFix     = nullptr;
     QPushButton     *m_restoreWordNag = nullptr;
+    QLabel          *m_wordNagNote    = nullptr;
 
     int           m_maxColumn = 0;
 };

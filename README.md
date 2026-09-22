@@ -65,7 +65,7 @@
 
 ```powershell
 package.cmd
-# 产物：dist\PDFBoard-1.4.3-setup.exe   （自带 Qt 运行库，约 17 MB）
+# 产物：dist\PDFBoard-1.4.4-setup.exe   （自带 Qt 运行库，约 17 MB）
 ```
 
 安装器做这些事（全部**当前用户**范围，不需要管理员）：
@@ -81,9 +81,9 @@ package.cmd
 **静默部署**（供教室集中管理客户端调用）：
 
 ```bat
-PDFBoard-1.4.3-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+PDFBoard-1.4.4-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 rem 不要桌面快捷方式：
-PDFBoard-1.4.3-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
+PDFBoard-1.4.4-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 ```
 
 > 卸载时若程序正在运行，静默模式下无法提示关闭，会残留被占用的文件（Windows 常见行为）。先退出程序再卸载即可完全清除。
@@ -97,7 +97,7 @@ PDFBoard-1.4.3-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 - 手动触发（Actions → nightly → Run workflow）
 
 产物发布到固定的 **`nightly` 预发布**（每次覆盖同名文件，不会越堆越多）：
-`PDFBoard-nightly-setup.exe` / `PDFBoard-nightly-portable.zip`，版本号形如 `1.4.3-nightly.<提交号>`。
+`PDFBoard-nightly-setup.exe` / `PDFBoard-nightly-portable.zip`，版本号形如 `1.4.4-nightly.<提交号>`。
 
 ### 稳定版发布
 
@@ -112,11 +112,11 @@ PDFBoard-1.4.3-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 ```powershell
 # 1. 改版本号：installer/pdfboard.iss 的 AppVersion + assets/app.rc 的 FILEVERSION/FileVersion
 # 2. 提交推送
-git commit -am "chore: 版本号 1.4.3"
+git commit -am "chore: 版本号 1.4.4"
 git push
 # 3. 打标签并推送，CI 自动出正式 Release
-git tag v1.4.3
-git push origin v1.4.3
+git tag v1.4.4
+git push origin v1.4.4
 ```
 
 ### 代码签名（可选）
