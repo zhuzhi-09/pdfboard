@@ -66,11 +66,20 @@ jobs:
         shell: pwsh
         run: choco install innosetup --no-progress -y
 
+      # runner 的 PATH 里 MinGW 排在前面，CMake 会误选 g++ 去链接 MSVC 版 Qt。
+      # 先进入 MSVC 开发环境，让 cl.exe 优先生效。
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
       - name: Configure and build
         shell: pwsh
         run: |
           cmake -S . -B build -G Ninja `
             -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER=cl `
+            -DCMAKE_CXX_COMPILER=cl `
             -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR"
           cmake --build build
           if ($LASTEXITCODE -ne 0) { throw "build failed" }
