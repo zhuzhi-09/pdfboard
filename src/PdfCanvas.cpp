@@ -423,7 +423,12 @@ QImage PdfCanvas::imageFor(int page)
         return {};
 
     const PageGeom &g = m_geom.at(page);
-    QSize target(qMax(1, int(g.w)), qMax(1, int(g.h)));
+    // The layout is in logical units, but the bitmap must be rasterized at
+    // DEVICE resolution, otherwise a 150%/200%/250% display shows an upscaled
+    // (soft) page. Tagging the image with the ratio lets QPainter map it 1:1
+    // when it draws into the logical rect.
+    const qreal dpr = qMax<qreal>(1.0, viewport() ? viewport()->devicePixelRatioF() : 1.0);
+    QSize target(qMax(1, int(qRound(g.w * dpr))), qMax(1, int(qRound(g.h * dpr))));
 
     // Safety cap so a single enormous page cannot blow the budget in one shot.
     // ~48 MB = 12 Mpx; A4 stays un-capped up to about 2.9x zoom on a 1366 px
@@ -438,6 +443,7 @@ QImage PdfCanvas::imageFor(int page)
     QElapsedTimer t;
     t.start();
     QImage img = m_doc->render(page, target);
+    img.setDevicePixelRatio(dpr);
     m_lastRenderMs = t.elapsed();
     m_lastRenderSize = img.size();
     emit renderMeasured(m_lastRenderMs, m_lastRenderSize);
@@ -1420,6 +1426,16 @@ void PdfCanvas::zoomOut()
 
 bool PdfCanvas::event(QEvent *e)
 {
+    // Moving the window to a display with a different scale factor invalidates
+    // every cached page bitmap (they are rasterized at the device resolution).
+    if (e->type() == QEvent::DevicePixelRatioChange) {
+        invalidateRenders();
+        relayout();
+        viewport()->update();
+        AppLog::write(QStringLiteral("view"),
+                      QStringLiteral("缩放因子变化：DPR %1")
+                          .arg(viewport()->devicePixelRatioF(), 0, 'f', 2));
+    }
     // Pinch to zoom. On Windows a two-finger pinch arrives as a native gesture
     // (both touchscreen and precision touchpad), so it does not disturb the
     // single-point ink path.
