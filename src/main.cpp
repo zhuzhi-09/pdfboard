@@ -8,11 +8,16 @@
 #include "Theme.h"
 
 #include <QApplication>
+#include <QByteArray>
 #include <QColor>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QHash>
+#include <QList>
+#include <QLocalServer>
+#include <QLocalSocket>
 #include <QMouseEvent>
 #include <QScreen>
 #include <QElapsedTimer>
@@ -21,6 +26,7 @@
 #include <QPointF>
 #include <QScrollBar>
 #include <QSettings>
+#include <QSharedPointer>
 #include <QSize>
 #include <QSizeF>
 #include <QString>
@@ -744,6 +750,96 @@ static int runHomeSelfTest()
     return failed == 0 ? 0 : 3;
 }
 
+// Single-instance plumbing: the first process owns a named local socket and
+// every later launch hands its document paths over before exiting, so opening a
+// file never pops up a second window. QtNetwork backs this; no WinAPI needed.
+
+static QString instanceServerName()
+{
+    return QStringLiteral("PDFBoard.SingleInstance");
+}
+
+// The .pdf/.dpz paths in argv, in order. Option-like arguments (--bench,
+// --selftest-*) are never documents and are not forwarded.
+static QStringList documentPathsFrom(const QStringList &args)
+{
+    QStringList paths;
+    for (int i = 1; i < args.size(); ++i) {
+        const QString &a = args.at(i);
+        if (a.startsWith(QLatin1Char('-')))
+            continue;
+        if (a.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)
+            || a.endsWith(QStringLiteral(".dpz"), Qt::CaseInsensitive)) {
+            paths.append(a);
+        }
+    }
+    return paths;
+}
+
+// A second launch: hand the paths to the running window and leave without ever
+// constructing one. Returns false when nobody is listening on the name, which
+// means this process is the first instance.
+static bool forwardToRunningInstance(const QStringList &args)
+{
+    QLocalSocket socket;
+    socket.connectToServer(instanceServerName());
+    if (!socket.waitForConnected(500))
+        return false;
+
+    // Empty when there are no paths: the running window just comes to front.
+    socket.write(documentPathsFrom(args).join(QLatin1Char('\n')).toUtf8());
+    socket.flush();
+    socket.waitForBytesWritten(500);
+    socket.disconnectFromServer();
+    return true;
+}
+
+// The first launch answers later launches: their paths are opened as tabs in
+// this window (openPath dedupes and focuses), then the window is raised. A
+// failed listen() is not fatal - the app keeps its plain single-window startup.
+static void serveLaterLaunches(MainWindow &w)
+{
+    const QString name = instanceServerName();
+
+    // Only reached when nobody answered on the name: clear a socket a crashed
+    // instance left behind so listen() starts clean.
+    QLocalServer::removeServer(name);
+
+    auto *server = new QLocalServer(&w);
+    server->setSocketOptions(QLocalServer::UserAccessOption);
+    if (!server->listen(name))
+        return;
+
+    // One buffer per connection: a payload may arrive in several chunks.
+    auto buffers = QSharedPointer<QHash<QLocalSocket *, QByteArray>>::create();
+
+    QObject::connect(server, &QLocalServer::newConnection, server,
+                     [server, &w, buffers]() {
+        while (QLocalSocket *socket = server->nextPendingConnection()) {
+            QObject::connect(socket, &QLocalSocket::readyRead, socket,
+                             [socket, buffers]() {
+                (*buffers)[socket].append(socket->readAll());
+            });
+            QObject::connect(socket, &QLocalSocket::disconnected, socket,
+                             [socket, &w, buffers]() {
+                QByteArray payload = buffers->take(socket);
+                payload.append(socket->readAll());   // any residue left unread
+                const QList<QByteArray> lines = payload.split('\n');
+                for (const QByteArray &line : lines) {
+                    const QString path = QString::fromUtf8(line);
+                    if (!path.isEmpty())
+                        w.openPath(path);
+                }
+                // Windows may refuse a focus steal; alert() nudges the taskbar.
+                w.raise();
+                w.activateWindow();
+                QApplication::alert(&w);
+                socket->deleteLater();
+            });
+        }
+    });
+}
+
 int main(int argc, char **argv)
 {
     QApplication app(argc, argv);
@@ -826,8 +922,15 @@ int main(int argc, char **argv)
     if (homeIdx >= 0)
         return runHomeSelfTest();
 
+    // With a window already running, this process only hands its paths over and
+    // exits: a file association, autostart or second command line must never
+    // open another window. Done after the CLI modes so they stay independent.
+    if (forwardToRunningInstance(args))
+        return 0;
+
     MainWindow w;
     w.show();
+    serveLaterLaunches(w);
 
     // Optional: open a document passed on the command line - either a plain PDF
     // or a .dpz annotation bundle (this is also the "double-click to open" path
