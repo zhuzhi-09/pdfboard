@@ -96,11 +96,17 @@ jobs:
           Copy-Item "$env:QT_ROOT_DIR/translations/*zh_CN.qm" dist/stage/translations/ -ErrorAction SilentlyContinue
 
       # 出门前的门禁：确定性自测（在 dist/stage 里跑，Qt 运行库就在旁边，不依赖 runner 的 PATH）
+      # 用 Start-Process 显式取进程退出码：直接 `& exe` 时 pwsh 的 $LASTEXITCODE 在 CI 里不可靠，
+      # 曾把 ALL PASS 的自测误判成失败。
       - name: Self test
         shell: pwsh
         run: |
-          & dist/stage/pdfboard.exe --selftest-log
-          if ($LASTEXITCODE -ne 0) { throw "self test failed" }
+          $p = Start-Process -FilePath "dist/stage/pdfboard.exe" -ArgumentList "--selftest-log" `
+                             -NoNewWindow -Wait -PassThru
+          "selftest exit code: 0x{0:X8} ({1})" -f $p.ExitCode, $p.ExitCode | Write-Host
+          if ($p.ExitCode -ne 0) {
+            throw ("self test failed (exit 0x{0:X8})" -f $p.ExitCode)
+          }
 
       - name: Sign app executable (optional)
         if: steps.signing.outputs.enabled == 'true'
