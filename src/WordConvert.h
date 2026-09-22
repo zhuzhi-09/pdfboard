@@ -24,6 +24,12 @@ bool isWordDoc(const QString &path);
 // registration lookup only - the application is never launched to probe.
 bool hasConverter();
 
+// True when .docx is actually associated with Word. Word shows its modal
+// "not the default program" dialog - the one that blocks Open/Export and
+// refuses Quit - exactly in the opposite case, so this only makes the failure
+// message precise (nothing is blocked up front).
+bool wordIsDefaultHandler();
+
 // Exports `src` to a cached PDF under the temp dir and returns its path. The
 // cache key is the source path, its size and its mtime, so an unchanged
 // document is reused and an edited one is re-exported. Returns false and sets

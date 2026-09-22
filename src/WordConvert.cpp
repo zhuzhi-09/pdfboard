@@ -7,6 +7,7 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QSettings>
 
 #include <oaidl.h>
 #include <objbase.h>
@@ -338,6 +339,23 @@ QString runExport(const QString &src, const QString &part)
         failure = QStringLiteral("无法关闭 Word/WPS 警告");
     }
 
+    // Word pops a modal "Microsoft Word is not the default program for viewing
+    // and editing documents" dialog when it starts on a machine where the .docx
+    // default was never chosen. While that dialog is up, Open/Export are blocked
+    // and Quit() is refused - which is exactly what surfaced as 转换失败.
+    // Options.AlertIfNotDefault is the documented object-model switch behind that
+    // nag, so clearing it here keeps the export headless. Best effort: if the
+    // server does not expose it we carry on and let the caller's retry handle it.
+    if (failure.isEmpty()) {
+        ComVariant optionsValue;
+        if (SUCCEEDED(getProperty(app, L"Options", optionsValue.out()))
+            && optionsValue.isDispatch()) {
+            ComDispatch options;
+            options.reset(optionsValue.takeDispatch());
+            putProperty(options, L"AlertIfNotDefault", false);
+        }
+    }
+
     if (failure.isEmpty()) {
         ComVariant value;
         if (FAILED(getProperty(app, L"Documents", value.out())) || !value.isDispatch())
@@ -390,6 +408,18 @@ QString runExport(const QString &src, const QString &part)
 }
 
 }   // namespace
+
+bool WordConvert::wordIsDefaultHandler()
+{
+    // Windows stores the user's explicit choice under UserChoice; its absence
+    // (or a non-Word ProgID) is the state in which Word nags.
+    QSettings choice(
+        QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion"
+                       "\\Explorer\\FileExts\\.docx\\UserChoice"),
+        QSettings::NativeFormat);
+    const QString progId = choice.value(QStringLiteral("ProgId")).toString();
+    return progId.startsWith(QStringLiteral("Word."), Qt::CaseInsensitive);
+}
 
 bool WordConvert::isWordDoc(const QString &path)
 {
@@ -459,6 +489,15 @@ bool WordConvert::convertToPdf(const QString &src, QString *pdfOut, QString *err
     timer.start();
 
     QString failure = runExport(src, part);
+    if (!failure.isEmpty()) {
+        // One retry: on a machine where Word nagged with its "not the default
+        // program" dialog, the attempt above has just cleared that option, so
+        // the second run gets through. Cheap (only on failure) and it turns a
+        // first-time failure into a working conversion.
+        AppLog::write(QStringLiteral("open"),
+                      QStringLiteral("Word 转换首次失败，重试一次：%1").arg(failure));
+        failure = runExport(src, part);
+    }
     if (failure.isEmpty() && !QFileInfo::exists(part))
         failure = QStringLiteral("导出未生成文件");
     if (failure.isEmpty() && !QFile::rename(part, out))

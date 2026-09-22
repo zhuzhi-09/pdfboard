@@ -558,7 +558,16 @@ void MainWindow::openPath(const QString &path)
         if (!WordConvert::convertToPdf(path, &tempPath, &err)) {
             AppLog::write(QStringLiteral("open"),
                           QStringLiteral("Word 文档转换失败：%1（%2）").arg(path, err));
-            statusBar()->showMessage(QStringLiteral("打开失败：Word 文档转换失败"), 8000);
+            // Two different causes, two different fixes: Word's "not the default
+            // program" nag (fix the association) or a stuck Word instance
+            // holding a modal dialog (close Word / reboot). Both are actionable.
+            const QString hint =
+                WordConvert::wordIsDefaultHandler()
+                    ? QStringLiteral("Word 里可能有对话框或卡住的实例："
+                                     "请关闭所有 Word 窗口（或重启）后重试")
+                    : QStringLiteral("请把 .docx 的默认程序设为 Word"
+                                     "（设置 → 默认应用），或先用「用 Word 打开」");
+            statusBar()->showMessage(QStringLiteral("转换失败：%1").arg(hint), 12000);
             return;
         }
         statusBar()->clearMessage();
