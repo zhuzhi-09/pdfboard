@@ -1,0 +1,160 @@
+#  Nightly 自动构建
+#
+#  触发：推送到 main / 每天一次 / 手动
+#  产物：安装器 + 便携版，发布到固定的 "nightly" 预发布（每次覆盖，不堆积）
+#  说明：产物文件名为固定名，便于覆盖；具体提交号写在发布说明里。
+name: nightly
+
+on:
+  push:
+    branches: [main]
+    # 只改文档就不必重新打包
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".gitignore"
+  schedule:
+    - cron: "0 18 * * *"        # 每天 UTC 18:00（北京时间次日 02:00）
+  workflow_dispatch:
+
+permissions:
+  contents: write               # 创建/更新 Release 需要
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      QT_VERSION: 6.8.3
+      QT_ARCH: win64_msvc2022_64
+      INNO_DIR: "C:\\Program Files (x86)\\Inno Setup 6"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compute version
+        id: ver
+        shell: pwsh
+        run: |
+          $sha = "${{ github.sha }}".Substring(0, 7)
+          $base = (Select-String -Path installer/pdfboard.iss -Pattern 'AppVersion\s+"([\d.]+)"').Matches[0].Groups[1].Value
+          "version=$base-nightly.$sha" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          "sha=$sha" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: ${{ env.QT_ARCH }}
+          modules: qtpdf
+          cache: true
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Configure and build
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR"
+          cmake --build build
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
+
+      - name: Stage runtime
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/stage | Out-Null
+          Copy-Item build/pdfboard.exe dist/stage/
+          & "$env:QT_ROOT_DIR/bin/windeployqt.exe" --release --no-system-d3d-compiler --compiler-runtime dist/stage/pdfboard.exe
+          if ($LASTEXITCODE -ne 0) { throw "windeployqt failed" }
+
+      # 代码签名是可选步骤：仓库里配置了签名密钥才会执行，没配置就跳过
+      # （fork 本仓库的人不会因为缺少密钥而构建失败）。
+      #   secrets.SIGN_PFX_BASE64 - .pfx 证书的 base64
+      #   secrets.SIGN_PFX_PASS   - .pfx 的密码
+      - name: Sign app executable (optional)
+        if: ${{ secrets.SIGN_PFX_BASE64 != '' }}
+        shell: pwsh
+        env:
+          SIGN_PFX_BASE64: ${{ secrets.SIGN_PFX_BASE64 }}
+          SIGN_PFX_PASS: ${{ secrets.SIGN_PFX_PASS }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_PFX_BASE64))
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" |
+                       Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          & $signtool sign /fd SHA256 /f $pfx /p $env:SIGN_PFX_PASS `
+                           /tr http://timestamp.digicert.com /td SHA256 dist/stage/pdfboard.exe
+          if ($LASTEXITCODE -ne 0) { throw "signing the app failed" }
+
+      - name: Build installer
+        shell: pwsh
+        run: |
+          $iscc = Join-Path $env:INNO_DIR "ISCC.exe"
+          & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" `
+                  "/DOutputBase=PDFBoard-nightly-setup" `
+                  "installer/pdfboard.iss"
+          if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+
+      - name: Sign installer (optional)
+        if: ${{ secrets.SIGN_PFX_BASE64 != '' }}
+        shell: pwsh
+        env:
+          SIGN_PFX_BASE64: ${{ secrets.SIGN_PFX_BASE64 }}
+          SIGN_PFX_PASS: ${{ secrets.SIGN_PFX_PASS }}
+        run: |
+          $pfx = Join-Path $env:RUNNER_TEMP "cert.pfx"
+          [IO.File]::WriteAllBytes($pfx, [Convert]::FromBase64String($env:SIGN_PFX_BASE64))
+          $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" |
+                       Sort-Object FullName -Descending | Select-Object -First 1).FullName
+          & $signtool sign /fd SHA256 /f $pfx /p $env:SIGN_PFX_PASS `
+                           /tr http://timestamp.digicert.com /td SHA256 dist/PDFBoard-nightly-setup.exe
+          if ($LASTEXITCODE -ne 0) { throw "signing the installer failed" }
+
+      - name: Build portable zip
+        shell: pwsh
+        run: |
+          $ver = "${{ steps.ver.outputs.version }}"
+          New-Item -ItemType Directory -Force dist/portable | Out-Null
+          Copy-Item dist/stage/* dist/portable -Recurse -Force
+          $note = @"
+          大屏 PDF 批注 — 便携版（nightly $ver）
+
+          1) 解压到任意文件夹，直接运行 pdfboard.exe，无需安装。
+          2) 需要 Windows 10/11 64 位；Qt 运行库已随包附带。
+          3) 文件关联可在应用内「设置 → 文件关联」一键注册。
+          4) 这是自动构建的夜间版本，可能不稳定；正式版见 Releases 中的版本标签。
+
+          架构：${{ steps.ver.outputs.sha }}    构建时间：$(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC
+          "@
+          [System.IO.File]::WriteAllText((Join-Path (Resolve-Path dist/portable) "便携版说明.txt"),
+                                          $note, (New-Object System.Text.UTF8Encoding($true)))
+          Compress-Archive -Path "dist/portable/*" -DestinationPath "dist/PDFBoard-nightly-portable.zip" -Force
+
+      - name: Publish rolling nightly release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: nightly
+          name: "Nightly build (${{ steps.ver.outputs.version }})"
+          prerelease: true
+          files: |
+            dist/PDFBoard-nightly-setup.exe
+            dist/PDFBoard-nightly-portable.zip
+          body: |
+            > 这是**自动构建的夜间版本**，随 `main` 的每次提交更新，可能不稳定。
+            > 稳定版本请看 Releases 里的版本标签（如 `v1.0.0`）。
+
+            **提交**：`${{ github.sha }}`
+            **版本号**：`${{ steps.ver.outputs.version }}`
+            **构建时间**：${{ github.event.repository.updated_at }}
+            **变更**：${{ github.event.head_commit.message || '（定时或手动触发）' }}
+
+            | 下载 | 说明 |
+            |---|---|
+            | `PDFBoard-nightly-setup.exe` | 安装版：注册到「应用和功能」，可静默部署 `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART` |
+            | `PDFBoard-nightly-portable.zip` | 便携版：解压即用，不写系统 |
+
+            需要 Windows 10/11 64 位；Qt 运行库已随包附带。

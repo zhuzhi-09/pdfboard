@@ -10,10 +10,19 @@
 ; ---------------------------------------------------------------------------
 
 #define AppName      "大屏 PDF 批注"
-#define AppVersion   "1.0.0"
 #define AppPublisher "PDFBoard"
 #define AppExe       "pdfboard.exe"
 #define StageDir     "..\dist\stage"
+
+; These two can be overridden from the command line - the nightly workflow
+; passes /DAppVersion=... /DOutputBase=... so its artifacts do not collide with
+; the tagged releases. Local builds keep the plain version below.
+#ifndef AppVersion
+  #define AppVersion "1.0.0"
+#endif
+#ifndef OutputBase
+  #define OutputBase "PDFBoard-" + AppVersion + "-setup"
+#endif
 
 [Setup]
 ; AppId 必须在所有版本间保持不变，否则升级会装成两份。
@@ -28,7 +37,7 @@ DisableProgramGroupPage=yes
 UninstallDisplayName={#AppName}
 UninstallDisplayIcon={app}\{#AppExe}
 OutputDir=..\dist
-OutputBaseFilename=PDFBoard-{#AppVersion}-setup
+OutputBaseFilename={#OutputBase}
 SetupIconFile=..\assets\pdfboard.ico
 Compression=lzma2/max
 SolidCompression=yes
