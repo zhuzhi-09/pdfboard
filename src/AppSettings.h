@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QString>
+#include <QStringList>
 
 // Non-UI application settings.
 //
@@ -36,6 +37,16 @@ bool setDefaultSavePath(const QString &dir, QString *errorOut = nullptr);
 // write anything to disk unless the user asks for it.
 bool debugLogEnabled();
 bool setDebugLogEnabled(bool on, QString *errorOut = nullptr);
+
+// Recent documents (最近项目), most recent first. Only the PATH is remembered:
+// a file is never copied, moved or renamed. The list is capped at 8 entries and
+// duplicates are matched case-insensitively (Windows paths).
+QStringList recentFiles();
+// Adds `path` to the front, dropping any existing equal entry first.
+// An empty path is a no-op, not an error.
+bool addRecentFile(const QString &path, QString *errorOut = nullptr);
+bool removeRecentFile(const QString &path, QString *errorOut = nullptr);
+bool clearRecentFiles(QString *errorOut = nullptr);
 
 // Appearance preference: 0 = follow the system (default), 1 = light, 2 = dark.
 // Anything else stored in the registry reads back as 0.

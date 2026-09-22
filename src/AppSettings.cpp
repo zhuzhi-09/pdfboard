@@ -18,6 +18,10 @@ const QString kAppKey = QStringLiteral("HKEY_CURRENT_USER\\Software\\PDFBoard");
 const QString kSavePathValue = QStringLiteral("DefaultSavePath");
 const QString kDebugLogValue = QStringLiteral("DebugLog");
 const QString kThemeModeValue = QStringLiteral("ThemeMode");
+const QString kRecentFilesValue = QStringLiteral("RecentFiles");
+
+// 最近项目 keeps at most this many paths; the oldest entry is dropped first.
+constexpr int kRecentFilesMax = 8;
 
 // The executable path exactly as Windows wants it in the Run key: native
 // separators, wrapped in quotes so a path with spaces keeps working.
@@ -135,6 +139,80 @@ bool AppSettings::setDebugLogEnabled(bool on, QString *errorOut)
     if (errorOut)
         errorOut->clear();
     return true;
+}
+
+QStringList AppSettings::recentFiles()
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    const QStringList stored = s.value(kRecentFilesValue).toStringList();
+
+    // Read-side hygiene: trim, drop empties and fold duplicates so a manually
+    // edited registry value can never show the same document twice.
+    QStringList cleaned;
+    cleaned.reserve(stored.size());
+    for (const QString &path : stored) {
+        const QString trimmed = path.trimmed();
+        if (!trimmed.isEmpty() && !cleaned.contains(trimmed, Qt::CaseInsensitive))
+            cleaned.append(trimmed);
+    }
+    return cleaned;
+}
+
+// Shared write path: an empty list removes the value instead of storing an
+// empty one, matching how setDefaultSavePath treats "no preference".
+static bool writeRecentFiles(const QStringList &list, QString *errorOut)
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    if (list.isEmpty())
+        s.remove(kRecentFilesValue);
+    else
+        s.setValue(kRecentFilesValue, list);
+    s.sync();
+
+    if (s.status() != QSettings::NoError) {
+        if (errorOut)
+            *errorOut = QStringLiteral("无法写入注册表（最近项目）");
+        return false;
+    }
+    if (errorOut)
+        errorOut->clear();
+    return true;
+}
+
+bool AppSettings::addRecentFile(const QString &path, QString *errorOut)
+{
+    const QString trimmed = path.trimmed();
+    if (trimmed.isEmpty()) {
+        if (errorOut)
+            errorOut->clear();
+        return true;                     // nothing to remember: not an error
+    }
+
+    QStringList list = recentFiles();
+    for (qsizetype i = list.size() - 1; i >= 0; --i) {
+        if (list.at(i).compare(trimmed, Qt::CaseInsensitive) == 0)
+            list.removeAt(i);            // move to front, keep one entry only
+    }
+    list.prepend(trimmed);
+    while (list.size() > kRecentFilesMax)
+        list.removeLast();
+    return writeRecentFiles(list, errorOut);
+}
+
+bool AppSettings::removeRecentFile(const QString &path, QString *errorOut)
+{
+    const QString trimmed = path.trimmed();
+    QStringList list = recentFiles();
+    for (qsizetype i = list.size() - 1; i >= 0; --i) {
+        if (list.at(i).compare(trimmed, Qt::CaseInsensitive) == 0)
+            list.removeAt(i);
+    }
+    return writeRecentFiles(list, errorOut);
+}
+
+bool AppSettings::clearRecentFiles(QString *errorOut)
+{
+    return writeRecentFiles(QStringList(), errorOut);
 }
 
 int AppSettings::themeMode()

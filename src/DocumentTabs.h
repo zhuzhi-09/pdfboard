@@ -10,11 +10,14 @@
 // floating toolbar island, above the status bar).
 //
 // One chip per open document: the file name (middle elided when long) plus a
-// close "x". The active chip is a surface card with an accent underline; a "+"
-// button pinned at the right end opens a new document, and a non-closeable
-// Settings chip (gear glyph + 「设置」) sits right before it. When the chips
-// overflow the strip scrolls horizontally (wheel or drag) instead of squashing
-// them; the Settings chip stays pinned, so it is reachable with zero documents.
+// close "x". The active chip is a surface card with an accent underline. Two
+// non-document chips are pinned OUTSIDE the scrolling document-chip list, so
+// the chip index -> document index mapping stays exact: a leading "+" chip that
+// returns to the home page, and a trailing 「打开」 chip that opens a new
+// document, with the non-closeable Settings chip (gear glyph + 「设置」) right
+// before it. When the chips overflow the strip scrolls horizontally (wheel or
+// drag) instead of squashing them; both pinned chips stay reachable with zero
+// documents open.
 //
 // The whole strip is painted in one widget - no child buttons - so it stays a
 // single slim row and scrolling is just an offset. Every metric derives from
@@ -39,6 +42,11 @@ public:
     void setSettingsActive(bool on);
     bool isSettingsActive() const { return m_settingsActive; }
 
+    // The leading "+" home chip highlights the same way while the home page is
+    // the visible page.
+    void setHomeActive(bool on);
+    bool isHomeActive() const { return m_homeActive; }
+
     QSize sizeHint() const override;
     QSize minimumSizeHint() const override;
 
@@ -47,6 +55,7 @@ signals:
     void closeRequested(int index);
     void addRequested();
     void settingsRequested();   // the Settings chip was activated
+    void homeRequested();       // the leading "+" home chip was activated
 
 protected:
     void paintEvent(QPaintEvent *e) override;
@@ -73,6 +82,7 @@ private:
     int  chipAt(const QPoint &pos) const;   // -1 when not on a chip
     QRect addRect() const { return m_addRect; }
     QRect settingsInner() const;            // painted box of the Settings chip
+    QRect homeInner() const;                // painted box of the leading "+" chip
 
     QVector<Chip> m_chips;
     QStringList   m_titles;
@@ -83,6 +93,7 @@ private:
     bool m_hoverClose = false;
     bool m_hoverAdd = false;
     bool m_hoverSettings = false;
+    bool m_hoverHome = false;
 
     bool   m_pressed = false;
     bool   m_dragging = false;
@@ -100,9 +111,13 @@ private:
     int m_textMaxW  = 180;
     int m_iconBox   = 24;
     int m_settingsW = 96;
+    int m_homeW     = 48;
     int m_content   = 0;        // total scrolling content width (last relayout)
+    int m_chipsLeft = 0;        // left edge of the scrolling chip area
     int m_chipsRight = 0;       // right edge of the scrolling chip area
+    QRect m_homeRect;           // pinned "+" home chip (leading)
     QRect m_addRect;
     QRect m_settingsRect;       // pinned zone between the chips and "+"
     bool m_settingsActive = false;
+    bool m_homeActive = false;
 };

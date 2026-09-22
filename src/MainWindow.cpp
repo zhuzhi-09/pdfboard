@@ -3,6 +3,7 @@
 #include "AppLog.h"
 #include "AppSettings.h"
 #include "DocumentTabs.h"
+#include "HomePage.h"
 #include "PdfCanvas.h"
 #include "PdfExport.h"
 #include "InkToolbar.h"
@@ -172,11 +173,14 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_tabs, &DocumentTabs::closeRequested, this, &MainWindow::onTabCloseRequested);
     connect(m_tabs, &DocumentTabs::addRequested,    this, &MainWindow::onOpen);
     connect(m_tabs, &DocumentTabs::settingsRequested, this, &MainWindow::onSettings);
+    connect(m_tabs, &DocumentTabs::homeRequested,     this, &MainWindow::showHomePage);
 
-    // One blank canvas at startup: it shows the empty state, and the first
-    // document reuses it instead of adding a tab.
-    m_active = createCanvas();
-    m_stack->setCurrentWidget(m_active);
+    // The home page is the startup page. It owns no canvas, so there is no
+    // floating toolbar island on it; it requests opens through its signals.
+    m_homePage = new HomePage(m_stack);
+    m_stack->addWidget(m_homePage);
+    connect(m_homePage, &HomePage::openRequested, this, &MainWindow::onOpen);
+    connect(m_homePage, &HomePage::openPathRequested, this, &MainWindow::openPath);
 
     // The settings page is one more page of the stack, next to the canvases.
     // It is not a document: it stays out of m_canvases and closing tabs never
@@ -242,8 +246,9 @@ MainWindow::MainWindow(QWidget *parent)
     statusBar()->addWidget(m_inkLabel);
     statusBar()->addPermanentWidget(m_memLabel);
 
-    wireActiveCanvas(m_active);
-    updateTitle();
+    // No document is open at startup: show the home page (neutral status bar,
+    // app-name title, no active canvas).
+    showHomePage();
 
     auto *memTimer = new QTimer(this);
     memTimer->setInterval(1500);
@@ -343,14 +348,10 @@ void MainWindow::changeEvent(QEvent *event)
     if (event->type() != QEvent::WindowStateChange)
         return;
 
-    // The island's fullscreen button mirrors the real window state. m_active can
-    // be the blank startup canvas, which is not part of m_canvases yet.
+    // The island's fullscreen button mirrors the real window state. Every
+    // canvas is a document now, so m_canvases is the complete list.
     for (PdfCanvas *canvas : m_canvases) {
         if (InkToolbar *bar = canvas->toolbar())
-            bar->setFullscreenActive(isFullScreen());
-    }
-    if (m_active && !m_canvases.contains(m_active)) {
-        if (InkToolbar *bar = m_active->toolbar())
             bar->setFullscreenActive(isFullScreen());
     }
 }
@@ -378,13 +379,12 @@ void MainWindow::applyTheme()
     if (statusBar())
         statusBar()->setStyleSheet(statusSheet());
 
-    // Every open document, plus the blank startup canvas that is not part of
-    // m_canvases yet (the same pattern changeEvent uses).
+    // Every open document canvas, then the non-document pages.
     for (PdfCanvas *canvas : m_canvases)
         canvas->applyTheme();
-    if (m_active && !m_canvases.contains(m_active))
-        m_active->applyTheme();
 
+    if (m_homePage)
+        m_homePage->applyTheme();
     if (m_settingsPage)
         m_settingsPage->refreshTheme();
     if (m_tabs)
@@ -462,23 +462,25 @@ void MainWindow::openPath(const QString &path)
         tabTitle = QFileInfo(path).fileName();
     }
 
-    // An untouched empty canvas is reused instead of adding a tab.
-    const bool reuse = (m_active && m_active->pdfPath().isEmpty());
-    PdfCanvas *canvas = reuse ? m_active : createCanvas();
+    // Every document gets its own canvas and its own tab: the old "reuse the
+    // blank startup canvas" special case went away with the blank canvas.
+    PdfCanvas *canvas = createCanvas();
 
     QString err;
     if (!canvas->openPdf(tempPath, &err)) {
         AppLog::write(QStringLiteral("open"),
                       QStringLiteral("打开失败：%1（%2）").arg(path, err));
-        if (!reuse) {
-            m_stack->removeWidget(canvas);
-            delete canvas;
-        }
+        m_stack->removeWidget(canvas);
+        delete canvas;
         statusBar()->showMessage(QStringLiteral("打开失败：%1").arg(err), 8000);
         return;
     }
     if (bundle)
         canvas->importInk(annotations);
+
+    // 最近项目 remembers the user-visible path only; the file itself is never
+    // copied anywhere (bundles are read in place too).
+    AppSettings::addRecentFile(path);
 
     AppLog::write(QStringLiteral("open"),
                   QStringLiteral("%1：%2 页，%3 ms，批注 %4 条")
@@ -687,14 +689,16 @@ void MainWindow::onTabCurrentChanged(int index)
         return;
 
     PdfCanvas *next = m_canvases.at(index);
-    const bool wasSettings = m_settingsVisible;
+    const bool wasOverlay = m_settingsVisible || m_homeVisible;
 
-    // Activating a document chip always leaves the settings page (and clears
-    // the gear chip's highlight).
+    // Activating a document chip always leaves the settings / home page (and
+    // clears their chip highlights).
     m_settingsVisible = false;
+    m_homeVisible = false;
     m_tabs->setSettingsActive(false);
+    m_tabs->setHomeActive(false);
 
-    if (next == m_active && !wasSettings) {
+    if (next == m_active && !wasOverlay) {
         wireActiveCanvas(next);
         updateTitle();
         return;
@@ -723,26 +727,29 @@ void MainWindow::onTabCloseRequested(int index)
     if (index < m_docs.size())
         m_docs.removeAt(index);
 
-    // The strip selects the neighbour and reports it through currentChanged.
+    // The strip selects the neighbour and reports it through currentChanged
+    // (silent while the settings / home page is up).
     m_tabs->removeTab(index);
 
     if (m_canvases.isEmpty()) {
-        // Closing the last tab keeps one canvas alive in its empty state. When
-        // the settings page is the visible one, it stays exactly where it is.
+        // The last document went away: the home page takes its place. When the
+        // settings page is the visible one, it stays exactly where it is.
+        if (canvas == m_active)
+            m_active = nullptr;
         canvas->closePdf();
-        m_active = canvas;
-        if (!m_settingsVisible) {
-            m_stack->setCurrentWidget(canvas);
-            wireActiveCanvas(canvas);
-            updateTitle();
-        }
+        m_stack->removeWidget(canvas);
+        delete canvas;
+        if (m_settingsVisible)
+            wireActiveCanvas(nullptr);       // status bar was already neutral
+        else
+            showHomePage();
         return;
     }
 
     if (wasActive) {
         const int next = qMin(index, int(m_canvases.size()) - 1);
-        if (m_settingsVisible) {
-            // Stay on the settings page: only remember which document is next.
+        if (m_settingsVisible || m_homeVisible) {
+            // Stay on the overlay page: only remember which document is next.
             m_active = m_canvases.at(next);
         } else {
             if (m_tabs->currentIndex() != next)
@@ -795,6 +802,10 @@ void MainWindow::updateTitle()
         setWindowTitle(QStringLiteral("设置 — 大屏 PDF 批注"));
         return;
     }
+    if (m_homeVisible) {
+        setWindowTitle(QStringLiteral("大屏 PDF 批注"));
+        return;
+    }
 
     const QString name = docTitle(m_active);
     setWindowTitle(name.isEmpty()
@@ -804,20 +815,37 @@ void MainWindow::updateTitle()
 
 // The island's 「设置」 button and the tab strip's Settings chip both land here.
 // The chip doubles as a toggle: pressing it while the page is already up
-// returns to the page the user came from - including the blank canvas.
+// returns to the page the user came from - a document, or the home page when
+// no document is open.
 void MainWindow::onSettings()
 {
     if (m_settingsVisible) {
-        showCanvasPage(m_active);
+        showCanvasPage(m_active);        // falls back to the home page on null
         return;
     }
     showSettingsPage();
 }
 
+void MainWindow::showHomePage()
+{
+    m_homeVisible = true;
+    m_settingsVisible = false;
+    m_tabs->setSettingsActive(false);
+    m_tabs->setHomeActive(true);
+    m_stack->setCurrentWidget(m_homePage);
+    // No document is active while the home page is up: the status bar shows the
+    // neutral values and the hidden canvases keep their rendered pages.
+    wireActiveCanvas(nullptr);
+    updateTitle();
+    m_homePage->refresh();
+}
+
 void MainWindow::showSettingsPage()
 {
     m_settingsVisible = true;
+    m_homeVisible = false;
     m_tabs->setSettingsActive(true);
+    m_tabs->setHomeActive(false);
     m_stack->setCurrentWidget(m_settingsPage);
     // No document is active while the settings page is up: the status bar shows
     // the neutral values and the hidden canvas keeps its rendered pages.
@@ -827,10 +855,14 @@ void MainWindow::showSettingsPage()
 
 void MainWindow::showCanvasPage(PdfCanvas *canvas)
 {
-    if (!canvas)
+    if (!canvas) {
+        showHomePage();                  // no document to return to
         return;
+    }
     m_settingsVisible = false;
+    m_homeVisible = false;
     m_tabs->setSettingsActive(false);
+    m_tabs->setHomeActive(false);
     m_active = canvas;
     m_stack->setCurrentWidget(canvas);
     wireActiveCanvas(canvas);

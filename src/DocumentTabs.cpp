@@ -55,6 +55,10 @@ DocumentTabs::DocumentTabs(QWidget *parent)
     m_textMaxW = int(m.touch * 4.5);
     m_iconBox  = qMin(qMax(m.icon, int(m_chipH * 0.55)), int(m_chipH * 0.62));
 
+    // The leading "+" home chip: a square-ish touch target, its own pinned
+    // zone, never part of the document chip list (see relayout).
+    m_homeW    = qMax(m_chipH, int(m.touch * 0.9));
+
     // The Settings chip (gear glyph + 「设置」) is pinned between the scrolling
     // document chips and "+", so it is reachable with zero documents open. Its
     // zone must budget the strip padding, the inner padding, the glyph and the
@@ -66,12 +70,14 @@ DocumentTabs::DocumentTabs(QWidget *parent)
 
 QSize DocumentTabs::sizeHint() const
 {
-    return QSize(m_settingsW + m_addW + int(Theme::Space6 * 6), m_chipH + 2 * m_stripPad);
+    return QSize(m_homeW + m_gap + m_settingsW + m_addW + int(Theme::Space6 * 6),
+                 m_chipH + 2 * m_stripPad);
 }
 
 QSize DocumentTabs::minimumSizeHint() const
 {
-    return QSize(m_settingsW + m_addW + Theme::Space6, m_chipH + 2 * m_stripPad);
+    return QSize(m_homeW + m_gap + m_settingsW + m_addW + Theme::Space6,
+                 m_chipH + 2 * m_stripPad);
 }
 
 void DocumentTabs::addTab(const QString &title)
@@ -88,8 +94,10 @@ void DocumentTabs::removeTab(int index)
 
     m_titles.removeAt(index);
 
-    // While the settings page is up no document is active: the selection is
-    // adjusted silently so closing chips cannot pull the host off that page.
+    // While the settings page or the home page is up no document page is
+    // visible: the selection is adjusted silently so closing chips cannot pull
+    // the host off that page.
+    const bool overlayActive = m_settingsActive || m_homeActive;
     if (m_titles.isEmpty()) {
         const bool hadCurrent = (m_current >= 0);
         m_current = -1;
@@ -97,7 +105,7 @@ void DocumentTabs::removeTab(int index)
         m_hoverClose = false;
         relayout();
         update();
-        if (hadCurrent && !m_settingsActive)
+        if (hadCurrent && !overlayActive)
             emit currentChanged(-1);
         return;
     }
@@ -107,7 +115,7 @@ void DocumentTabs::removeTab(int index)
         --m_current;
         relayout();
         update();
-        if (!m_settingsActive)
+        if (!overlayActive)
             emit currentChanged(m_current);
     } else if (index == m_current) {
         // Activate the right neighbour (or the new last chip).
@@ -115,7 +123,7 @@ void DocumentTabs::removeTab(int index)
         ensureChipVisible(m_current);
         relayout();
         update();
-        if (!m_settingsActive)
+        if (!overlayActive)
             emit currentChanged(m_current);
     } else {
         relayout();
@@ -144,9 +152,10 @@ void DocumentTabs::setCurrentIndex(int index)
     }
 
     index = qBound(0, index, int(m_titles.size()) - 1);
-    const bool wasSettings = m_settingsActive;
+    const bool wasOverlay = m_settingsActive || m_homeActive;
     m_settingsActive = false;           // activating a document clears the gear
-    if (index == m_current && !wasSettings) {
+    m_homeActive = false;               // ... and the leading "+" highlight
+    if (index == m_current && !wasOverlay) {
         update();
         return;
     }
@@ -165,6 +174,14 @@ void DocumentTabs::setSettingsActive(bool on)
     if (m_settingsActive == on)
         return;
     m_settingsActive = on;
+    update();
+}
+
+void DocumentTabs::setHomeActive(bool on)
+{
+    if (m_homeActive == on)
+        return;
+    m_homeActive = on;
     update();
 }
 
@@ -194,22 +211,29 @@ void DocumentTabs::relayout()
     if (!pending.isEmpty())
         content += m_gap * int(pending.size() - 1);
 
-    // The "+" zone is pinned outside the scrolling area, and the Settings chip
-    // is pinned right before it: chips scroll, both keep their place.
-    const int addW = qMin(m_addW, qMax(0, width()));
+    // The leading "+" home chip is pinned to the far LEFT; the 「打开」 chip and
+    // the Settings chip are pinned to the right. Only the document chips in
+    // between scroll. m_chipsLeft / m_chipsRight border that scrolling window:
+    // the home chip enters the geometry ONLY here, so m_chips still holds
+    // exactly one item per m_titles and every index stays a document index.
+    const int homeW = qMin(m_homeW, qMax(0, width()));
+    m_homeRect = QRect(0, 0, homeW, height());
+
+    const int addW = qMin(m_addW, qMax(0, width() - m_homeRect.width()));
     m_addRect = QRect(width() - addW, 0, addW, height());
 
     const int settingsW = qMin(m_settingsW, qMax(0, m_addRect.left() - m_gap));
     m_settingsRect = QRect(m_addRect.left() - settingsW, 0, settingsW, height());
 
-    const int avail = qMax(0, m_settingsRect.left() - m_gap);
-    m_chipsRight = avail;
+    m_chipsLeft = m_homeRect.right() + 1 + m_gap;
+    m_chipsRight = qMax(m_chipsLeft, m_settingsRect.left() - m_gap);
+    const int avail = qMax(0, m_chipsRight - m_chipsLeft);
     m_content = content;
     m_scroll = qBound(0, m_scroll, qMax(0, m_content - avail));
 
     m_chips.clear();
     m_chips.reserve(pending.size());
-    int x = m_stripPad - m_scroll;
+    int x = m_chipsLeft + m_stripPad - m_scroll;
     for (const Pending &item : pending) {
         Chip chip;
         chip.title = item.title;
@@ -226,7 +250,7 @@ void DocumentTabs::relayout()
 
 int DocumentTabs::maxScroll() const
 {
-    return qMax(0, m_content - m_chipsRight);
+    return qMax(0, m_content - (m_chipsRight - m_chipsLeft));
 }
 
 void DocumentTabs::setScroll(int value)
@@ -243,18 +267,20 @@ void DocumentTabs::ensureChipVisible(int index)
 {
     if (index < 0 || index >= m_chips.size())
         return;
-    const int avail = m_chipsRight;
+    const int left = m_chipsLeft + m_stripPad;
+    const int right = m_chipsRight - m_stripPad;
     const QRect r = m_chips.at(index).rect;
-    if (r.left() < m_stripPad)
-        m_scroll -= (m_stripPad - r.left());
-    else if (r.right() > avail - m_stripPad)
-        m_scroll += (r.right() - (avail - m_stripPad));
+    if (r.left() < left)
+        m_scroll -= (left - r.left());
+    else if (r.right() > right)
+        m_scroll += (r.right() - right);
 }
 
 int DocumentTabs::chipAt(const QPoint &pos) const
 {
-    // The pinned Settings chip wins over any document chip scrolled under it.
-    if (pos.x() < 0 || pos.x() >= m_chipsRight)
+    // The pinned home / Settings chips win over any document chip scrolled
+    // under them: only the scrolling window between them is hit-testable.
+    if (pos.x() < m_chipsLeft || pos.x() >= m_chipsRight)
         return -1;
     for (int i = 0; i < m_chips.size(); ++i) {
         if (m_chips.at(i).rect.contains(pos))
@@ -267,6 +293,12 @@ QRect DocumentTabs::settingsInner() const
 {
     return QRect(m_settingsRect.left() + m_stripPad, m_stripPad,
                  qMax(0, m_settingsRect.width() - 2 * m_stripPad), m_chipH);
+}
+
+QRect DocumentTabs::homeInner() const
+{
+    return QRect(m_homeRect.left() + m_stripPad, m_stripPad,
+                 qMax(0, m_homeRect.width() - 2 * m_stripPad), m_chipH);
 }
 
 void DocumentTabs::paintEvent(QPaintEvent *)
@@ -289,13 +321,15 @@ void DocumentTabs::paintEvent(QPaintEvent *)
 
     // --- chips (clipped to the scrolling area) ------------------------------
     p.save();
-    p.setClipRect(QRect(0, 0, m_chipsRight, height()));
+    p.setClipRect(QRect(m_chipsLeft, 0, qMax(0, m_chipsRight - m_chipsLeft), height()));
     for (int i = 0; i < m_chips.size(); ++i) {
         const Chip &chip = m_chips.at(i);
-        if (chip.rect.right() < 0 || chip.rect.left() > m_chipsRight)
+        if (chip.rect.right() < m_chipsLeft || chip.rect.left() > m_chipsRight)
             continue;
 
-        const bool active = (i == m_current) && !m_settingsActive;
+        // No document chip looks active while a non-document page (settings or
+        // home) is the visible one.
+        const bool active = (i == m_current) && !m_settingsActive && !m_homeActive;
         const bool hovered = (i == m_hoverChip);
         const QRectF box = QRectF(chip.rect).adjusted(0.5, 0.5, -0.5, -0.5);
 
@@ -335,6 +369,50 @@ void DocumentTabs::paintEvent(QPaintEvent *)
         drawCloseMark(p, closeBox, markColor, markStroke);
     }
     p.restore();
+
+    // --- pinned leading "+" home chip ---------------------------------------
+    const QRectF homeBox(homeInner());
+    if (homeBox.width() > 4.0) {
+        const QRectF box = homeBox.adjusted(0.5, 0.5, -0.5, -0.5);
+        if (m_homeActive) {
+            p.setPen(QPen(pal.surfaceEdge, 1.0));
+            p.setBrush(pal.surface);
+            p.drawRoundedRect(box, radius, radius);
+
+            const qreal barH = qMax<qreal>(2.0, m_chipH * 0.07);
+            const QRectF bar(box.left() + m_padX, box.bottom() - barH - m_stripPad * 0.5,
+                             qMax<qreal>(1.0, box.width() - 2.0 * m_padX), barH);
+            p.setPen(Qt::NoPen);
+            p.setBrush(pal.accent);
+            p.drawRoundedRect(bar, barH / 2.0, barH / 2.0);
+        } else if (m_hoverHome) {
+            p.setPen(Qt::NoPen);
+            p.setBrush(pal.surfaceHover);
+            p.drawRoundedRect(box, radius, radius);
+        }
+
+        // A plus glyph, not a document chip: "+ returns to the home page".
+        const QColor ink = m_homeActive ? pal.accent
+                                        : (m_hoverHome ? pal.text : pal.textMuted);
+        const qreal plus = qMin<qreal>(m_iconBox, homeBox.height() * 0.42);
+        const QPointF centre = homeBox.center();
+        const QRectF glyphBox(centre.x() - plus / 2.0, centre.y() - plus / 2.0,
+                              plus, plus);
+        const qreal stroke = qMax<qreal>(1.8, plus * 0.16);
+        p.setPen(QPen(ink, stroke, Qt::SolidLine, Qt::RoundCap));
+        p.drawLine(QPointF(glyphBox.left(), glyphBox.center().y()),
+                   QPointF(glyphBox.right(), glyphBox.center().y()));
+        p.drawLine(QPointF(glyphBox.center().x(), glyphBox.top()),
+                   QPointF(glyphBox.center().x(), glyphBox.bottom()));
+    }
+
+    // Hairline between the pinned home chip and the scrolling chips.
+    if (m_homeRect.right() + 1 < m_chipsLeft) {
+        p.setPen(QPen(pal.divider, 1.0));
+        p.drawLine(QPointF(m_homeRect.right() + 0.5, m_stripPad + m_chipH * 0.18),
+                   QPointF(m_homeRect.right() + 0.5,
+                           height() - m_stripPad - m_chipH * 0.18));
+    }
 
     // --- pinned Settings chip (no close "x") --------------------------------
     const QRectF sInner(settingsInner());
@@ -431,24 +509,29 @@ void DocumentTabs::mouseMoveEvent(QMouseEvent *e)
     const bool close = (chip >= 0) && m_chips.at(chip).closeRect.contains(pos);
     const bool add = m_addRect.contains(pos);
     const bool settings = settingsInner().contains(pos);
+    const bool home = homeInner().contains(pos);
     if (chip != m_hoverChip || close != m_hoverClose || add != m_hoverAdd
-        || settings != m_hoverSettings) {
+        || settings != m_hoverSettings || home != m_hoverHome) {
         m_hoverChip = chip;
         m_hoverClose = close;
         m_hoverAdd = add;
         m_hoverSettings = settings;
+        m_hoverHome = home;
         update();
     }
 
     if (settings)
         setToolTip(QStringLiteral("设置"));
+    else if (home)
+        setToolTip(QStringLiteral("主页"));
     else if (chip >= 0)
         setToolTip(m_chips.at(chip).title);
     else if (add)
         setToolTip(QStringLiteral("新建标签"));
     else
         setToolTip(QString());
-    setCursor((chip >= 0 || add || settings) ? Qt::PointingHandCursor : Qt::ArrowCursor);
+    setCursor((chip >= 0 || add || settings || home) ? Qt::PointingHandCursor
+                                                     : Qt::ArrowCursor);
 }
 
 void DocumentTabs::mouseReleaseEvent(QMouseEvent *e)
@@ -464,6 +547,12 @@ void DocumentTabs::mouseReleaseEvent(QMouseEvent *e)
     }
 
     const QPoint pos = e->position().toPoint();
+    if (homeInner().contains(pos)) {
+        // The chip lights up through the host (MainWindow::showHomePage), which
+        // also owns the page switch - identical to the Settings chip.
+        emit homeRequested();
+        return;
+    }
     if (m_addRect.contains(pos)) {
         emit addRequested();
         return;
@@ -507,5 +596,6 @@ void DocumentTabs::leaveEvent(QEvent *e)
     m_hoverClose = false;
     m_hoverAdd = false;
     m_hoverSettings = false;
+    m_hoverHome = false;
     update();
 }

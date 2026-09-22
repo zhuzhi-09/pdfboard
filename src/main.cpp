@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 #include "AppLog.h"
 #include "AppSettings.h"
+#include "HomePage.h"
 #include "InkToolbar.h"
 #include "MemProbe.h"
 #include "PdfCanvas.h"
@@ -617,6 +618,132 @@ static int runThemeSelfTest()
     return failed == 0 ? 0 : 3;
 }
 
+// Headless home-page self test:  pdfboard.exe --selftest-home
+// Pure greeting / quote-filter helpers plus the recent-files registry
+// round-trip. No network calls, and the real machine state (the env var and
+// the stored recent list) is snapshotted and restored.
+static int runHomeSelfTest()
+{
+    int failed = 0;
+    auto check = [&failed](const char *what, int got, int want) {
+        const bool ok = (got == want);
+        if (!ok)
+            ++failed;
+        out(QStringLiteral("[selftest] %1: got %2 want %3 -> %4")
+                .arg(QString::fromLatin1(what), -28)
+                .arg(got).arg(want)
+                .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+    };
+
+    // --- greeting buckets ---------------------------------------------------
+    check("greeting 2h is late night",
+          HomePage::greetingForHour(2, QStringLiteral("老师"))
+                  == QStringLiteral("夜深了，老师，该睡了") ? 1 : 0, 1);
+    check("greeting 4h is late night",
+          HomePage::greetingForHour(4, QStringLiteral("老师"))
+                  == QStringLiteral("夜深了，老师，该睡了") ? 1 : 0, 1);
+    check("greeting 5h is morning",
+          HomePage::greetingForHour(5, QStringLiteral("老师"))
+                  == QStringLiteral("早上好，老师，今天看些什么？") ? 1 : 0, 1);
+    check("greeting 6h is morning",
+          HomePage::greetingForHour(6, QStringLiteral("老师"))
+                  == QStringLiteral("早上好，老师，今天看些什么？") ? 1 : 0, 1);
+    check("greeting 12h is noon",
+          HomePage::greetingForHour(12, QStringLiteral("老师"))
+                  == QStringLiteral("中午好，老师，今天看些什么？") ? 1 : 0, 1);
+    check("greeting 15h is afternoon",
+          HomePage::greetingForHour(15, QStringLiteral("老师"))
+                  == QStringLiteral("下午好，老师，今天看些什么？") ? 1 : 0, 1);
+    check("greeting 21h is evening",
+          HomePage::greetingForHour(21, QStringLiteral("老师"))
+                  == QStringLiteral("晚上好，老师，今天看些什么？") ? 1 : 0, 1);
+
+    // %USERNAME% is used when set, 老师 when empty.
+    const QByteArray savedUser = qgetenv("USERNAME");
+    qputenv("USERNAME", QByteArray());
+    check("empty USERNAME -> 老师",
+          HomePage::userName() == QStringLiteral("老师") ? 1 : 0, 1);
+    if (savedUser.isEmpty())
+        qunsetenv("USERNAME");
+    else
+        qputenv("USERNAME", savedUser);
+    check("USERNAME restored", qgetenv("USERNAME") == savedUser ? 1 : 0, 1);
+
+    // --- classroom quote filter ---------------------------------------------
+    check("filter: classical line ok",
+          HomePage::isQuoteAcceptable(
+              QStringLiteral("书山有路勤为径，学海无涯苦作舟")) ? 1 : 0, 1);
+    check("filter: >60 chars rejected",
+          HomePage::isQuoteAcceptable(QString(61, QChar(0x597D))) ? 1 : 0, 0);
+    check("filter: http rejected",
+          HomePage::isQuoteAcceptable(QStringLiteral("详见 http://example.com")) ? 1 : 0, 0);
+    check("filter: blocked word rejected",
+          HomePage::isQuoteAcceptable(QStringLiteral("某某赌博平台欢迎你")) ? 1 : 0, 0);
+    // 死 occurs in perfectly appropriate classical poetry: no single-character
+    // filtering may reject it.
+    check("filter: 死 is not blocked",
+          HomePage::isQuoteAcceptable(
+              QStringLiteral("人生自古谁无死，留取丹心照汗青")) ? 1 : 0, 1);
+
+    // --- recent files (real registry: snapshot, test, restore) --------------
+    const QStringList savedRecent = AppSettings::recentFiles();
+
+    AppSettings::clearRecentFiles(nullptr);
+    check("recent: clear empties",
+          int(AppSettings::recentFiles().size()), 0);
+
+    const QString a = QStringLiteral("D:\\dev\\selftest-home\\A.pdf");
+    const QString b = QStringLiteral("D:\\dev\\selftest-home\\B.pdf");
+    AppSettings::addRecentFile(a, nullptr);
+    AppSettings::addRecentFile(b, nullptr);
+    AppSettings::addRecentFile(a, nullptr);          // A,B,A -> [A,B]
+    check("recent: dedupe keeps 2",
+          int(AppSettings::recentFiles().size()), 2);
+    check("recent: A moved to front",
+          AppSettings::recentFiles().value(0) == a ? 1 : 0, 1);
+    check("recent: B stays second",
+          AppSettings::recentFiles().value(1) == b ? 1 : 0, 1);
+
+    // Windows paths compare case-insensitively.
+    const QString aUpper = QStringLiteral("d:\\DEV\\SELFTEST-HOME\\a.PDF");
+    AppSettings::addRecentFile(aUpper, nullptr);
+    check("recent: case-insensitive dedupe",
+          int(AppSettings::recentFiles().size()), 2);
+    check("recent: new spelling wins",
+          AppSettings::recentFiles().value(0) == aUpper ? 1 : 0, 1);
+
+    for (int i = 1; i <= 10; ++i) {
+        AppSettings::addRecentFile(
+            QStringLiteral("D:\\dev\\selftest-home\\P%1.pdf").arg(i), nullptr);
+    }
+    check("recent: capped at 8", int(AppSettings::recentFiles().size()), 8);
+    check("recent: newest first",
+          AppSettings::recentFiles().value(0)
+                  == QStringLiteral("D:\\dev\\selftest-home\\P10.pdf") ? 1 : 0, 1);
+    check("recent: oldest evicted",
+          AppSettings::recentFiles().contains(
+              QStringLiteral("D:\\dev\\selftest-home\\P1.pdf")) ? 0 : 1, 1);
+
+    const QString p10 = QStringLiteral("D:\\dev\\selftest-home\\P10.pdf");
+    check("recent: remove succeeds",
+          AppSettings::removeRecentFile(p10, nullptr) ? 1 : 0, 1);
+    check("recent: removed entry gone",
+          AppSettings::recentFiles().contains(p10) ? 0 : 1, 1);
+    check("recent: size after remove",
+          int(AppSettings::recentFiles().size()), 7);
+
+    // Put the machine back exactly as we found it (an empty list stays empty).
+    AppSettings::clearRecentFiles(nullptr);
+    for (qsizetype i = savedRecent.size() - 1; i >= 0; --i)
+        AppSettings::addRecentFile(savedRecent.at(i), nullptr);
+    check("recent: stored list restored",
+          AppSettings::recentFiles() == savedRecent ? 1 : 0, 1);
+
+    out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")
+                    : QStringLiteral("[selftest] %1 CHECK(S) FAILED").arg(failed));
+    return failed == 0 ? 0 : 3;
+}
+
 int main(int argc, char **argv)
 {
     QApplication app(argc, argv);
@@ -666,6 +793,7 @@ int main(int argc, char **argv)
     const int logIdx = args.indexOf(QStringLiteral("--selftest-log"));
     const int uiIdx = args.indexOf(QStringLiteral("--selftest-ui"));
     const int themeIdx = args.indexOf(QStringLiteral("--selftest-theme"));
+    const int homeIdx = args.indexOf(QStringLiteral("--selftest-home"));
 
     // The shipping build is a GUI executable (no console window when the user
     // double-clicks it). The console-based modes still need their output, so
@@ -675,7 +803,8 @@ int main(int argc, char **argv)
         || (stIdx >= 0 && stIdx + 1 < args.size())
         || logIdx >= 0
         || uiIdx >= 0
-        || themeIdx >= 0) {
+        || themeIdx >= 0
+        || homeIdx >= 0) {
         attachConsoleForCli();
     }
 
@@ -693,6 +822,9 @@ int main(int argc, char **argv)
 
     if (themeIdx >= 0)
         return runThemeSelfTest();
+
+    if (homeIdx >= 0)
+        return runHomeSelfTest();
 
     MainWindow w;
     w.show();

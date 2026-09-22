@@ -4,7 +4,7 @@ project(PDFBoard LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Pdf)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Pdf Network)
 qt_standard_project_setup()
 
 qt_add_executable(pdfboard
@@ -30,6 +30,8 @@ qt_add_executable(pdfboard
     src/AppLog.cpp
     src/SettingsPage.h
     src/SettingsPage.cpp
+    src/HomePage.h
+    src/HomePage.cpp
     src/IconPainter.h
     src/IconPainter.cpp
     src/Theme.h
@@ -38,6 +40,7 @@ qt_add_executable(pdfboard
 target_link_libraries(pdfboard PRIVATE
     Qt6::Widgets
     Qt6::Pdf
+    Qt6::Network
 psapi
 dwmapi
 version

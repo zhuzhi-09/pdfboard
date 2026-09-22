@@ -4,6 +4,7 @@
 #include <QVector>
 
 class DocumentTabs;
+class HomePage;
 class PdfCanvas;
 class SettingsPage;
 class QEvent;
@@ -58,6 +59,7 @@ private:
 
     PdfCanvas *createCanvas();              // builds + wires one document canvas
     void       wireActiveCanvas(PdfCanvas *canvas);
+    void       showHomePage();              // switch the stack to the home page
     void       showSettingsPage();          // switch the stack to the settings page
     void       showCanvasPage(PdfCanvas *canvas);   // switch back to a document page
     void       refreshStatus();
@@ -72,11 +74,17 @@ private:
     QVector<PdfCanvas *>    m_canvases;     // open documents, in tab order
     QVector<DocumentInfo>   m_docs;         // parallel to m_canvases
     bool                    m_fullscreenWasMaximized = false;
-    PdfCanvas *m_active       = nullptr;    // the visible canvas (doc or blank)
+    // The document canvas the user last worked on. NULL while the home page is
+    // shown with no document open - every use must be null-safe.
+    PdfCanvas *m_active       = nullptr;
     PdfCanvas *m_statusCanvas = nullptr;    // the canvas the status bar follows
 
-    // The settings page is one more page of the stack. It is NOT a document:
-    // it never enters m_canvases, and closing tabs never touches it.
+    // The home page and the settings page are pages of the stack, NOT
+    // documents: they never enter m_canvases, and closing tabs never touches
+    // them. The app starts on the home page and returns to it when the last
+    // document is closed.
+    HomePage     *m_homePage     = nullptr;
+    bool          m_homeVisible  = false;
     SettingsPage *m_settingsPage   = nullptr;
     bool          m_settingsVisible = false;
 
