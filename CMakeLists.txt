@@ -32,6 +32,8 @@ qt_add_executable(pdfboard
     src/SettingsPage.cpp
     src/HomePage.h
     src/HomePage.cpp
+    src/WordConvert.h
+    src/WordConvert.cpp
     src/IconPainter.h
     src/IconPainter.cpp
     src/Theme.h

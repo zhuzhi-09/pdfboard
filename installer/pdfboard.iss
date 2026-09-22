@@ -5,8 +5,8 @@
 ; 产物：dist\PDFBoard-<版本>-setup.exe
 ;
 ; 静默安装（供教室集中管理客户端调用）：
-;   PDFBoard-1.2.2-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
-;   PDFBoard-1.2.2-setup.exe /VERYSILENT /NORESTART /TASKS=""      ; 不建桌面快捷方式
+;   PDFBoard-1.3.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+;   PDFBoard-1.3.0-setup.exe /VERYSILENT /NORESTART /TASKS=""      ; 不建桌面快捷方式
 ; ---------------------------------------------------------------------------
 
 #define AppName      "大屏 PDF 批注"
@@ -18,7 +18,7 @@
 ; passes /DAppVersion=... /DOutputBase=... so its artifacts do not collide with
 ; the tagged releases. Local builds keep the plain version below.
 #ifndef AppVersion
-  #define AppVersion "1.2.2"
+  #define AppVersion "1.3.0"
 #endif
 #ifndef OutputBase
   #define OutputBase "PDFBoard-" + AppVersion + "-setup"

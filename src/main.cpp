@@ -6,6 +6,7 @@
 #include "MemProbe.h"
 #include "PdfCanvas.h"
 #include "Theme.h"
+#include "WordConvert.h"
 
 #include <QApplication>
 #include <QByteArray>
@@ -750,6 +751,97 @@ static int runHomeSelfTest()
     return failed == 0 ? 0 : 3;
 }
 
+// Headless Word-conversion self test:  pdfboard.exe --selftest-docx
+// Pure pieces of the .docx path (extension filter, cache key) plus the export
+// failure paths. No Word/WPS is needed and no automation is ever started, so
+// this passes on every machine and in CI; when a converter IS installed the
+// failure checks still prove nothing is launched and nothing is left behind.
+static int runDocxSelfTest()
+{
+    int failed = 0;
+    auto check = [&failed](const char *what, int got, int want) {
+        const bool ok = (got == want);
+        if (!ok)
+            ++failed;
+        out(QStringLiteral("[selftest] %1: got %2 want %3 -> %4")
+                .arg(QString::fromLatin1(what), -28)
+                .arg(got).arg(want)
+                .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+    };
+
+    // --- extension filter ---------------------------------------------------
+    check("isWordDoc: .docx",
+          int(WordConvert::isWordDoc(QStringLiteral("D:\\课件\\第1课.docx"))), 1);
+    check("isWordDoc: .doc",
+          int(WordConvert::isWordDoc(QStringLiteral("D:\\课件\\第1课.doc"))), 1);
+    check("isWordDoc: .DOCX",
+          int(WordConvert::isWordDoc(QStringLiteral("D:\\课件\\第1课.DOCX"))), 1);
+    check("isWordDoc: .pdf rejected",
+          int(WordConvert::isWordDoc(QStringLiteral("D:\\课件\\第1课.pdf"))), 0);
+    check("isWordDoc: .dpz rejected",
+          int(WordConvert::isWordDoc(QStringLiteral("D:\\课件\\第1课.dpz"))), 0);
+    check("isWordDoc: .txt rejected",
+          int(WordConvert::isWordDoc(QStringLiteral("D:\\课件\\第1课.txt"))), 0);
+    check("isWordDoc: no extension",
+          int(WordConvert::isWordDoc(QStringLiteral("D:\\课件\\第一课"))), 0);
+
+    // --- cache key ----------------------------------------------------------
+    const QString src = QStringLiteral("D:\\课件\\第1课.docx");
+    const QString cached = WordConvert::tempPdfPathFor(src, 1234, 5000);
+    check("cache key: deterministic",
+          int(cached == WordConvert::tempPdfPathFor(src, 1234, 5000)), 1);
+    check("cache key: size changes it",
+          int(cached != WordConvert::tempPdfPathFor(src, 1235, 5000)), 1);
+    check("cache key: mtime changes it",
+          int(cached != WordConvert::tempPdfPathFor(src, 1234, 5001)), 1);
+    check("cache key: path changes it",
+          int(cached != WordConvert::tempPdfPathFor(QStringLiteral("D:\\课件\\第2课.docx"),
+                                                    1234, 5000)), 1);
+    check("cache key: temp .pdf name",
+          int(cached.contains(QStringLiteral("pdfboard"))
+              && cached.endsWith(QStringLiteral(".pdf"))), 1);
+
+    // --- export failure paths -----------------------------------------------
+    // Snapshot the cache first, so the assertion holds even when a real
+    // converter exists on this machine and other Word PDFs are cached there.
+    const QDir cache(QDir(QDir::tempPath()).filePath(QStringLiteral("pdfboard")));
+    const QStringList before = cache.entryList({QStringLiteral("word-*")}, QDir::Files);
+
+    // Non-Word input is rejected immediately, before any converter check.
+    QString pdfOut = QStringLiteral("sentinel");
+    QString err;
+    const QString notWord = QDir(QDir::tempPath())
+                                .filePath(QStringLiteral("pdfboard-selftest-docx.pdf"));
+    const bool pdfRejected = WordConvert::convertToPdf(notWord, &pdfOut, &err);
+    check("convert: .pdf rejected", int(pdfRejected), 0);
+    check("convert: .pdf error reported", int(!err.isEmpty()), 1);
+    check("convert: .pdf no output", int(pdfOut.isEmpty()), 1);
+
+    // A missing .docx fails with a reason and leaves nothing in the cache.
+    const QString missing = QDir(QDir::tempPath())
+                                .filePath(QStringLiteral("pdfboard-selftest-docx-missing.docx"));
+    QFile::remove(missing);
+    pdfOut = QStringLiteral("sentinel");
+    err.clear();
+    const bool converted = WordConvert::convertToPdf(missing, &pdfOut, &err);
+    check("convert: missing input fails", int(converted), 0);
+    check("convert: error reported", int(!err.isEmpty()), 1);
+    check("convert: no output on failure", int(pdfOut.isEmpty()), 1);
+    const QStringList after = cache.entryList({QStringLiteral("word-*")}, QDir::Files);
+    check("convert: nothing left in temp", int(after == before), 1);
+
+    // --- probe --------------------------------------------------------------
+    // May be true or false depending on the machine; it must answer, be cached
+    // and never crash.
+    const bool has = WordConvert::hasConverter();
+    check("hasConverter: returns a bool", int(has || !has), 1);
+    check("hasConverter: cached second call", int(WordConvert::hasConverter() == has), 1);
+
+    out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")
+                    : QStringLiteral("[selftest] %1 CHECK(S) FAILED").arg(failed));
+    return failed == 0 ? 0 : 3;
+}
+
 // Single-instance plumbing: the first process owns a named local socket and
 // every later launch hands its document paths over before exiting, so opening a
 // file never pops up a second window. QtNetwork backs this; no WinAPI needed.
@@ -769,7 +861,8 @@ static QStringList documentPathsFrom(const QStringList &args)
         if (a.startsWith(QLatin1Char('-')))
             continue;
         if (a.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)
-            || a.endsWith(QStringLiteral(".dpz"), Qt::CaseInsensitive)) {
+            || a.endsWith(QStringLiteral(".dpz"), Qt::CaseInsensitive)
+            || WordConvert::isWordDoc(a)) {
             paths.append(a);
         }
     }
@@ -890,6 +983,7 @@ int main(int argc, char **argv)
     const int uiIdx = args.indexOf(QStringLiteral("--selftest-ui"));
     const int themeIdx = args.indexOf(QStringLiteral("--selftest-theme"));
     const int homeIdx = args.indexOf(QStringLiteral("--selftest-home"));
+    const int docxIdx = args.indexOf(QStringLiteral("--selftest-docx"));
 
     // The shipping build is a GUI executable (no console window when the user
     // double-clicks it). The console-based modes still need their output, so
@@ -900,7 +994,8 @@ int main(int argc, char **argv)
         || logIdx >= 0
         || uiIdx >= 0
         || themeIdx >= 0
-        || homeIdx >= 0) {
+        || homeIdx >= 0
+        || docxIdx >= 0) {
         attachConsoleForCli();
     }
 
@@ -922,6 +1017,9 @@ int main(int argc, char **argv)
     if (homeIdx >= 0)
         return runHomeSelfTest();
 
+    if (docxIdx >= 0)
+        return runDocxSelfTest();
+
     // With a window already running, this process only hands its paths over and
     // exits: a file association, autostart or second command line must never
     // open another window. Done after the CLI modes so they stay independent.
@@ -932,15 +1030,16 @@ int main(int argc, char **argv)
     w.show();
     serveLaterLaunches(w);
 
-    // Optional: open a document passed on the command line - either a plain PDF
-    // or a .dpz annotation bundle (this is also the "double-click to open" path
-    // used by the file association).
+    // Optional: open a document passed on the command line - a plain PDF, a
+    // .dpz annotation bundle or a Word document (converted on the fly). This is
+    // also the "double-click to open" path used by the file association.
     for (int i = 1; i < args.size(); ++i) {
         const QString &a = args.at(i);
         if (a.startsWith(QLatin1Char('-')))
             continue;
         if (a.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)
-            || a.endsWith(QStringLiteral(".dpz"), Qt::CaseInsensitive)) {
+            || a.endsWith(QStringLiteral(".dpz"), Qt::CaseInsensitive)
+            || WordConvert::isWordDoc(a)) {
             w.openPath(a);
             break;
         }

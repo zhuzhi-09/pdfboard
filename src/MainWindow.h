@@ -52,9 +52,10 @@ private:
     // Per-document bookkeeping that lives alongside each canvas, in tab order.
     struct DocumentInfo {
         QString bundlePath;   // `.dpz` path (empty for a plain-PDF document)
+        QString wordPath;     // source `.docx`/`.doc` (empty for PDF / `.dpz`)
         QString sourcePdf;    // the PDF the canvas actually opened
         QString title;        // tab strip title
-        QString tempPdf;      // temp PDF extracted from a bundle (may be empty)
+        QString tempPdf;      // temp PDF backing the document (may be empty)
     };
 
     PdfCanvas *createCanvas();              // builds + wires one document canvas

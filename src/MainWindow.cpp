@@ -10,9 +10,11 @@
 #include "MemProbe.h"
 #include "SettingsPage.h"
 #include "Theme.h"
+#include "WordConvert.h"
 
 #include <QAction>
 #include <QAbstractButton>
+#include <QApplication>
 #include <QCryptographicHash>
 #include <QDialog>
 #include <QDir>
@@ -110,7 +112,8 @@ QString statusSheet()
         .arg(Theme::px(Theme::Space3 - 2));
 }
 
-// True when the mime data carries at least one local PDF or `.dpz` bundle.
+// True when the mime data carries at least one local PDF, `.dpz` bundle or
+// Word document.
 bool hasLocalDocument(const QMimeData *mime)
 {
     if (!mime || !mime->hasUrls())
@@ -121,7 +124,8 @@ bool hasLocalDocument(const QMimeData *mime)
             continue;
         const QString path = url.toLocalFile();
         if (path.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)
-            || path.endsWith(QStringLiteral(".dpz"), Qt::CaseInsensitive))
+            || path.endsWith(QStringLiteral(".dpz"), Qt::CaseInsensitive)
+            || WordConvert::isWordDoc(path))
             return true;
     }
     return false;
@@ -297,8 +301,10 @@ PdfCanvas *MainWindow::createCanvas()
 void MainWindow::onOpen()
 {
     const QString path = QFileDialog::getOpenFileName(
-        this, QStringLiteral("打开 PDF / 批注包"), QString(),
-        QStringLiteral("PDF 与批注包 (*.pdf *.dpz);;PDF 文件 (*.pdf);;批注包 (*.dpz);;所有文件 (*.*)"));
+        this, QStringLiteral("打开 PDF / 批注包 / Word 文档"), QString(),
+        QStringLiteral("PDF、批注包与 Word (*.pdf *.dpz *.docx *.doc);;"
+                       "PDF 文件 (*.pdf);;批注包 (*.dpz);;"
+                       "Word 文档 (*.docx *.doc);;所有文件 (*.*)"));
     if (path.isEmpty())
         return;
     openPath(path);
@@ -321,7 +327,8 @@ void MainWindow::dropEvent(QDropEvent *e)
             continue;
         const QString path = url.toLocalFile();
         if (!path.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)
-            && !path.endsWith(QStringLiteral(".dpz"), Qt::CaseInsensitive))
+            && !path.endsWith(QStringLiteral(".dpz"), Qt::CaseInsensitive)
+            && !WordConvert::isWordDoc(path))
             continue;
         e->acceptProposedAction();
         openPath(path);      // opens a new tab (or activates the existing one)
@@ -414,12 +421,15 @@ void MainWindow::openPath(const QString &path)
     QElapsedTimer timer;
     timer.start();
     const bool bundle = AnnotationBundle::isBundle(path);
+    const bool word = WordConvert::isWordDoc(path);
     const QString key = fileKey(path);
 
     // Already open somewhere? Bring that tab forward instead of opening twice.
     for (int i = 0; i < m_canvases.size(); ++i) {
         const DocumentInfo &doc = m_docs.at(i);
-        const QString open = bundle ? doc.bundlePath : doc.sourcePdf;
+        const QString open = bundle ? doc.bundlePath
+                             : !doc.wordPath.isEmpty() ? doc.wordPath
+                             : doc.sourcePdf;
         if (!open.isEmpty() && fileKey(open) == key) {
             m_tabs->setCurrentIndex(i);
             onTabCurrentChanged(i);              // idempotent safety net
@@ -432,7 +442,33 @@ void MainWindow::openPath(const QString &path)
     QString tempPath;
     QString tabTitle;
 
-    if (bundle) {
+    if (word) {
+        // The .docx itself is never touched: Word/WPS renders a PDF into the
+        // temp cache (reused while path+size+mtime are unchanged) and that PDF
+        // is what the normal pipeline sees from here on.
+        if (!WordConvert::hasConverter()) {
+            AppLog::write(QStringLiteral("open"),
+                          QStringLiteral("Word 文档打开失败：未检测到 Word/WPS（%1）").arg(path));
+            statusBar()->showMessage(
+                QStringLiteral("未检测到 Word/WPS，无法打开该 Word 文档（可先另存为 PDF）"),
+                8000);
+            return;
+        }
+
+        // The export blocks for a few seconds; say so before it starts.
+        statusBar()->showMessage(QStringLiteral("正在转换 Word 文档…"));
+        QApplication::processEvents();
+
+        QString err;
+        if (!WordConvert::convertToPdf(path, &tempPath, &err)) {
+            AppLog::write(QStringLiteral("open"),
+                          QStringLiteral("Word 文档转换失败：%1（%2）").arg(path, err));
+            statusBar()->showMessage(QStringLiteral("打开失败：Word 文档转换失败"), 8000);
+            return;
+        }
+        statusBar()->clearMessage();
+        tabTitle = QFileInfo(path).fileName();
+    } else if (bundle) {
         QString err;
         if (!AnnotationBundle::read(path, &pdfBytes, &annotations, &err)) {
             AppLog::write(QStringLiteral("open"),
@@ -478,7 +514,8 @@ void MainWindow::openPath(const QString &path)
     if (bundle)
         canvas->importInk(annotations);
 
-    // 最近项目 remembers the user-visible path only; the file itself is never
+    // 最近项目 remembers the user-visible path only - the .pdf / .dpz / .docx
+    // the user picked, never the generated temp PDF; the file itself is never
     // copied anywhere (bundles are read in place too).
     AppSettings::addRecentFile(path);
 
@@ -491,9 +528,10 @@ void MainWindow::openPath(const QString &path)
 
     DocumentInfo info;
     info.bundlePath = bundle ? path : QString();
+    info.wordPath = word ? path : QString();
     info.sourcePdf = tempPath;
     info.title = tabTitle;
-    info.tempPdf = bundle ? tempPath : QString();
+    info.tempPdf = (bundle || word) ? tempPath : QString();
 
     m_canvases.append(canvas);
     m_docs.append(info);
@@ -524,7 +562,44 @@ void MainWindow::onSave()
     if (index < 0)
         return;
 
-    const DocumentInfo &info = m_docs.at(index);
+    const DocumentInfo info = m_docs.at(index);
+
+    // A Word document has no bundle of its own yet: 保存 packs the annotations
+    // next to the .docx with the same basename. The .docx itself is never
+    // written to, copied or renamed.
+    if (!info.wordPath.isEmpty() && info.bundlePath.isEmpty()) {
+        const QFileInfo word(info.wordPath);
+        const QString target = QDir(word.absolutePath())
+                                   .filePath(word.completeBaseName() + QStringLiteral(".dpz"));
+
+        const QByteArray pdf = readPdfBytes(info.sourcePdf);
+        if (pdf.isEmpty()) {
+            AppLog::write(QStringLiteral("save"),
+                          QStringLiteral("Word 文档保存失败：无法读取源 PDF：%1")
+                              .arg(info.sourcePdf));
+            statusBar()->showMessage(QStringLiteral("保存失败：无法读取转换后的 PDF"), 8000);
+            return;
+        }
+
+        QString err;
+        if (!AnnotationBundle::write(target, pdf, m_active->exportInk(), &err)) {
+            AppLog::write(QStringLiteral("save"),
+                          QStringLiteral("Word 文档保存失败：%1（%2）").arg(target, err));
+            statusBar()->showMessage(QStringLiteral("保存失败：%1").arg(err), 8000);
+            return;
+        }
+
+        m_docs[index].bundlePath = target;
+        AppLog::write(QStringLiteral("save"),
+                      QStringLiteral("Word 文档保存批注包 %1：%2 KB，批注 %3 条")
+                          .arg(QFileInfo(target).fileName())
+                          .arg(double(QFileInfo(target).size()) / 1024.0, 0, 'f', 0)
+                          .arg(m_active->strokeCount()));
+        statusBar()->showMessage(
+            QStringLiteral("已保存 %1").arg(QFileInfo(target).fileName()), 4000);
+        return;
+    }
+
     if (info.bundlePath.isEmpty()) {
         saveDocumentAs();
         return;
@@ -563,9 +638,12 @@ void MainWindow::saveDocumentAs()
     const QString injectFilter = QStringLiteral("注入 PDF (*.pdf)");
 
     // Once a document is bundle-backed its `sourcePdf` is an internal temp copy;
-    // never suggest that path or name to the user.
-    const QString identity =
-        info.bundlePath.isEmpty() ? info.sourcePdf : info.bundlePath;
+    // never suggest that path or name to the user. A Word document is instead
+    // identified by its .docx, so the suggestion lands next to the original -
+    // the same basename, with a .dpz / -已批注.pdf suffix.
+    const QString identity = !info.bundlePath.isEmpty() ? info.bundlePath
+                             : !info.wordPath.isEmpty() ? info.wordPath
+                             : info.sourcePdf;
     const QFileInfo src(identity);
     // Prefer the user's configured save folder; fall back to the document's own
     // directory when it is unset or has gone away.
