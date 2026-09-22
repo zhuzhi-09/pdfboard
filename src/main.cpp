@@ -17,10 +17,12 @@
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QHash>
+#include <QJsonDocument>
 #include <QJsonObject>
 #include <QList>
 #include <QLocalServer>
 #include <QLocalSocket>
+#include <QMap>
 #include <QMouseEvent>
 #include <QScreen>
 #include <QElapsedTimer>
@@ -753,11 +755,35 @@ static int runHomeSelfTest()
     return failed == 0 ? 0 : 3;
 }
 
+// Read-only snapshot of every value under each Office version's
+// Word\Options key. --selftest-docx takes two of these around a failing
+// restore to prove that it touched no Word setting. Nothing here ever writes.
+static QMap<QString, QVariantMap> wordOptionSnapshot()
+{
+    QMap<QString, QVariantMap> snapshot;
+    QSettings office(QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Office"),
+                     QSettings::NativeFormat);
+    for (const QString &version : office.childGroups()) {
+        if (!version.contains(QLatin1Char('.')))
+            continue;                       // version keys look like 16.0
+        QSettings options(
+            QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Office/%1/Word/Options")
+                .arg(version),
+            QSettings::NativeFormat);
+        QVariantMap values;
+        for (const QString &name : options.allKeys())
+            values.insert(name, options.value(name));
+        snapshot.insert(version, values);
+    }
+    return snapshot;
+}
+
 // Headless Word-conversion self test:  pdfboard.exe --selftest-docx
-// Pure pieces of the .docx path (extension filter, cache key) plus the export
-// failure paths. No Word/WPS is needed and no automation is ever started, so
-// this passes on every machine and in CI; when a converter IS installed the
-// failure checks still prove nothing is launched and nothing is left behind.
+// Pure pieces of the .docx path (extension filter, cache key, the Word nag
+// backup encoding), the export failure paths and the no-backup restore. No
+// Word/WPS is needed and no automation is ever started, so this passes on
+// every machine and in CI; when a converter IS installed the failure checks
+// still prove nothing is launched and nothing is left behind.
 static int runDocxSelfTest()
 {
     int failed = 0;
@@ -1078,6 +1104,115 @@ static int runDocxSelfTest()
         const QVariant afterWord = rawWord.value(QStringLiteral("WordOpenMode"));
         check("word mode: stored value restored",
               int(savedWord.isValid() ? afterWord == savedWord : !afterWord.isValid()), 1);
+    }
+
+    // --- Word nag backup encoding (pure) ------------------------------------
+    // One recorded value that existed and one that did not: the round trip
+    // must be exact and the encoded shape must stay the documented one.
+    {
+        QVariantMap recorded;
+        {
+            QVariantMap entry;
+            entry.insert(QStringLiteral("exists"), true);
+            entry.insert(QStringLiteral("value"), 1);
+            recorded.insert(QStringLiteral("16.0|AlertIfNotDefault"), entry);
+        }
+        {
+            QVariantMap entry;
+            entry.insert(QStringLiteral("exists"), false);
+            entry.insert(QStringLiteral("value"), 0);
+            recorded.insert(QStringLiteral("16.0|DoNotCheckIfWordIsDefaultApp"), entry);
+        }
+
+        const QJsonObject encoded = WordConvert::encodeNagBackup(recorded);
+        check("nag backup: two entries", int(encoded.size()), 2);
+        const QJsonObject existed =
+            encoded.value(QStringLiteral("16.0|AlertIfNotDefault")).toObject();
+        check("nag backup: existed flag",
+              existed.value(QStringLiteral("exists")).toBool() ? 1 : 0, 1);
+        check("nag backup: original value",
+              existed.value(QStringLiteral("value")).toInt(), 1);
+        const QJsonObject missingEntry =
+            encoded.value(QStringLiteral("16.0|DoNotCheckIfWordIsDefaultApp")).toObject();
+        check("nag backup: missing flag",
+              missingEntry.value(QStringLiteral("exists")).toBool() ? 0 : 1, 1);
+        check("nag backup: round trip exact",
+              int(WordConvert::decodeNagBackup(encoded) == recorded), 1);
+
+        // The registry stores the JSON as text, so reparse it first.
+        const QJsonObject reparsed = QJsonDocument::fromJson(
+            QJsonDocument(encoded).toJson(QJsonDocument::Compact)).object();
+        check("nag backup: json round trip",
+              int(WordConvert::decodeNagBackup(reparsed) == recorded), 1);
+    }
+
+    // --- Word nag restore with no backup ------------------------------------
+    // Never touches Word's real option values: it temporarily takes THIS APP's
+    // backup value out (keeping the exact original variant), so the restore
+    // below really has none, and puts it back afterwards. The Word option keys
+    // themselves are only ever READ, by the snapshots around the call.
+    {
+        QSettings rawNag(QStringLiteral("HKEY_CURRENT_USER\\Software\\PDFBoard"),
+                         QSettings::NativeFormat);
+        const QVariant savedBackup = rawNag.value(QStringLiteral("WordNagBackup"));
+
+        rawNag.remove(QStringLiteral("WordNagBackup"));
+        rawNag.sync();
+        check("nag restore: no backup present",
+              rawNag.contains(QStringLiteral("WordNagBackup")) ? 0 : 1, 1);
+        check("nag backup: exists false",
+              int(WordConvert::wordNagBackupExists()), 0);
+        check("nag silenced: false without backup",
+              int(WordConvert::wordNagSilenced()), 0);
+
+        const QMap<QString, QVariantMap> optionsBefore = wordOptionSnapshot();
+
+        QString restoreErr;
+        const bool restored = WordConvert::restoreWordNag(&restoreErr);
+        check("nag restore: fails without backup", int(restored), 0);
+        check("nag restore: error explains", int(!restoreErr.isEmpty()), 1);
+
+        const QMap<QString, QVariantMap> optionsAfter = wordOptionSnapshot();
+        check("nag restore: Word options untouched",
+              int(optionsBefore == optionsAfter), 1);
+
+        if (savedBackup.isValid())
+            rawNag.setValue(QStringLiteral("WordNagBackup"), savedBackup);
+        else
+            rawNag.remove(QStringLiteral("WordNagBackup"));
+        rawNag.sync();
+        const QVariant afterBackup = rawNag.value(QStringLiteral("WordNagBackup"));
+        check("nag backup: value restored",
+              int(savedBackup.isValid() ? afterBackup == savedBackup
+                                        : !afterBackup.isValid()), 1);
+    }
+
+    // --- Word nag fix preference --------------------------------------------
+    {
+        QSettings rawNag(QStringLiteral("HKEY_CURRENT_USER\\Software\\PDFBoard"),
+                         QSettings::NativeFormat);
+        const QVariant savedFix = rawNag.value(QStringLiteral("WordNagFix"));
+
+        rawNag.remove(QStringLiteral("WordNagFix"));
+        rawNag.sync();
+        check("nag fix: default on", int(AppSettings::wordNagFixEnabled()), 1);
+
+        QString fixErr;
+        check("nag fix: set false",
+              int(AppSettings::setWordNagFixEnabled(false, &fixErr)), 1);
+        check("nag fix: stored false", int(AppSettings::wordNagFixEnabled()), 0);
+        check("nag fix: set true",
+              int(AppSettings::setWordNagFixEnabled(true, &fixErr)), 1);
+        check("nag fix: stored true", int(AppSettings::wordNagFixEnabled()), 1);
+
+        if (savedFix.isValid())
+            rawNag.setValue(QStringLiteral("WordNagFix"), savedFix);
+        else
+            rawNag.remove(QStringLiteral("WordNagFix"));
+        rawNag.sync();
+        const QVariant afterFix = rawNag.value(QStringLiteral("WordNagFix"));
+        check("nag fix: stored value restored",
+              int(savedFix.isValid() ? afterFix == savedFix : !afterFix.isValid()), 1);
     }
 
     out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")

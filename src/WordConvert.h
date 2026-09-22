@@ -1,6 +1,8 @@
 #pragma once
 
+#include <QJsonObject>
 #include <QString>
+#include <QVariantMap>
 
 // Read-only Word (.docx/.doc) support.
 //
@@ -35,6 +37,45 @@ bool wordIsDefaultHandler();
 // document is reused and an edited one is re-exported. Returns false and sets
 // *errorOut when no converter exists or the export fails.
 bool convertToPdf(const QString &src, QString *pdfOut, QString *errorOut);
+
+// --- the "Word is not the default program" nag fix --------------------------
+//
+// Word pops a modal "Microsoft Word is not the default program for viewing and
+// editing documents" dialog when it starts on a machine where .docx belongs to
+// another program; while the dialog is up, Open/Export fail and Quit is
+// refused. Word reads the two option values behind it when it STARTS, so they
+// have to be written into Word's own registry key before the automation
+// instance is created. Because that changes Word's settings, the pre-existing
+// state is recorded first and restoreWordNag() can put it back.
+
+// Silences the nag. On its first call it records the original state of
+// AlertIfNotDefault and DoNotCheckIfWordIsDefaultApp for every existing
+// HKCU\Software\Microsoft\Office\<ver>\Word\Options key into this app's own
+// HKCU\Software\PDFBoard value WordNagBackup (a JSON object keyed
+// "<version>|<valueName>", each {"exists": bool, "value": <int>}), then writes
+// the silenced values. An existing backup is never overwritten, so it always
+// describes the true pre-existing state; writing the silenced values again is
+// harmless (idempotent). Returns false with a Chinese message when no Office
+// version key exists.
+bool silenceWordNag(QString *errorOut = nullptr);
+
+// Restores from the backup: a value that existed is written back with its
+// original data, a value that did not exist is deleted, then the backup is
+// removed. Returns false with a Chinese message when there is no usable backup.
+bool restoreWordNag(QString *errorOut = nullptr);
+
+// True when a backup exists, whether or not the values it describes are
+// currently in place (the settings page enables its 恢复 button on this).
+bool wordNagBackupExists();
+
+// True when a backup exists AND every recorded option value currently holds
+// the silenced data that silenceWordNag() writes.
+bool wordNagSilenced();
+
+// Pure backup encoding, round-trip exact: the map keys are
+// "<version>|<valueName>" and each value is a {"exists", "value"} map.
+QJsonObject encodeNagBackup(const QVariantMap &recorded);
+QVariantMap decodeNagBackup(const QJsonObject &backup);
 
 // --- exposed for the self test (pure, no side effects) ---------------------
 

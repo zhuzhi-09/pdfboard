@@ -37,6 +37,9 @@ public:
 
 signals:
     void themeChanged();     // an appearance mode was picked and stored
+    // A transient line for the window's status bar (the Word settings restore
+    // result; the page itself owns no status bar).
+    void statusMessage(const QString &message);
 
 protected:
     bool eventFilter(QObject *, QEvent *event) override;
@@ -51,6 +54,8 @@ private slots:
     void onOpenLogDir();
     void onThemePicked(int mode);
     void onWordModePicked(int mode);
+    void onWordNagFixToggled(bool on);
+    void onRestoreWordNag();
 
 private:
     void buildUi();
@@ -58,6 +63,7 @@ private:
     void refreshSavePath();
     void refreshLogPath();
     void refreshThemeNote();
+    void refreshWordNag();
     void syncThemeSegment();
     void syncWordSegment();
 
@@ -83,6 +89,12 @@ private:
     // AppSettings::setWordOpenMode (0 每次询问 / 1 批注 / 2 用 Word 打开).
     QButtonGroup *m_wordGroup = nullptr;
     QPushButton  *m_wordSegments[3] = {};
+
+    // The Word nag fix: the toggle persists AppSettings::wordNagFixEnabled and
+    // the button restores Word's two option values from the backup recorded by
+    // the first silencing write (disabled while there is no backup).
+    QAbstractButton *m_wordNagFix     = nullptr;
+    QPushButton     *m_restoreWordNag = nullptr;
 
     int           m_maxColumn = 0;
 };

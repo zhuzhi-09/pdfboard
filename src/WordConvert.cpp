@@ -1,5 +1,6 @@
 #include "WordConvert.h"
 #include "AppLog.h"
+#include "AppSettings.h"
 
 #include <QCryptographicHash>
 #include <QDateTime>
@@ -7,7 +8,9 @@
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
+#include <QJsonDocument>
 #include <QSettings>
+#include <QStringList>
 
 #include <oaidl.h>
 #include <objbase.h>
@@ -305,6 +308,88 @@ QString tempDir()
     return QDir(QDir::tempPath()).filePath(QStringLiteral("pdfboard"));
 }
 
+// ---------------------------------------------------------------------------
+// The "Word is not the default program" option values: where they live, what
+// silencing them writes, and where the pre-existing state is recorded so the
+// change can be undone from the settings page.
+// ---------------------------------------------------------------------------
+
+const QString kOfficeKey = QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Office");
+const QString kAppKey = QStringLiteral("HKEY_CURRENT_USER\\Software\\PDFBoard");
+const QString kWordNagBackupValue = QStringLiteral("WordNagBackup");
+const QString kAlertValue = QStringLiteral("AlertIfNotDefault");
+const QString kNoCheckValue = QStringLiteral("DoNotCheckIfWordIsDefaultApp");
+constexpr int kAlertSilenced = 0;
+constexpr int kNoCheckSilenced = 1;
+
+QString wordOptionsKey(const QString &version)
+{
+    return QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Office/%1/Word/Options")
+        .arg(version);
+}
+
+// Office version keys look like "16.0"; the same filter the nag fix always
+// used keeps "Common", "ClickToRun" and friends out.
+QStringList officeVersionKeys()
+{
+    QSettings office(kOfficeKey, QSettings::NativeFormat);
+    QStringList versions;
+    for (const QString &group : office.childGroups()) {
+        if (group.contains(QLatin1Char('.')))
+            versions.append(group);
+    }
+    return versions;
+}
+
+// The raw WordNagBackup value; empty when this app has recorded none.
+QString nagBackupJson()
+{
+    QSettings app(kAppKey, QSettings::NativeFormat);
+    return app.value(kWordNagBackupValue).toString();
+}
+
+// The two recorded values for one Office version. `exists` tells a restore
+// whether to write the original data back or to delete the value.
+QVariantMap readWordOptionState(const QString &version)
+{
+    QSettings options(wordOptionsKey(version), QSettings::NativeFormat);
+    QVariantMap state;
+    for (const QString &name : { kAlertValue, kNoCheckValue }) {
+        QVariantMap entry;
+        entry.insert(QStringLiteral("exists"), options.contains(name));
+        entry.insert(QStringLiteral("value"), options.value(name).toInt());
+        state.insert(version + QLatin1Char('|') + name, entry);
+    }
+    return state;
+}
+
+// "16.0|AlertIfNotDefault" -> version + value name. Returns false for a key
+// that does not carry both halves.
+bool splitEntryKey(const QString &key, QString *version, QString *name)
+{
+    const int bar = key.indexOf(QLatin1Char('|'));
+    if (bar <= 0 || bar >= key.size() - 1)
+        return false;
+    *version = key.left(bar);
+    *name = key.mid(bar + 1);
+    return true;
+}
+
+// The silenced value of one of the two option names; false for an unknown
+// name (which a hand-edited backup could contain).
+bool silencedValueFor(const QString &name, int *value)
+{
+    if (name == kAlertValue) {
+        *value = kAlertSilenced;
+        return true;
+    }
+    if (name == kNoCheckValue) {
+        *value = kNoCheckSilenced;
+        return true;
+    }
+    return false;
+}
+
 // The whole automation conversation. Returns an empty string on success or a
 // reason for the (status-bar-only) failure. A hidden Word/WPS instance is
 // closed and quit before returning, on every path; a running WINWORD.EXE /
@@ -447,6 +532,162 @@ bool WordConvert::hasConverter()
     return available;
 }
 
+QJsonObject WordConvert::encodeNagBackup(const QVariantMap &recorded)
+{
+    QJsonObject backup;
+    for (auto it = recorded.constBegin(); it != recorded.constEnd(); ++it) {
+        const QVariantMap entry = it.value().toMap();
+        QJsonObject value;
+        value.insert(QStringLiteral("exists"),
+                     entry.value(QStringLiteral("exists")).toBool());
+        value.insert(QStringLiteral("value"),
+                     entry.value(QStringLiteral("value")).toInt());
+        backup.insert(it.key(), value);
+    }
+    return backup;
+}
+
+QVariantMap WordConvert::decodeNagBackup(const QJsonObject &backup)
+{
+    QVariantMap recorded;
+    for (auto it = backup.constBegin(); it != backup.constEnd(); ++it) {
+        const QJsonObject entry = it.value().toObject();
+        QVariantMap value;
+        value.insert(QStringLiteral("exists"),
+                     entry.value(QStringLiteral("exists")).toBool());
+        value.insert(QStringLiteral("value"),
+                     entry.value(QStringLiteral("value")).toInt());
+        recorded.insert(it.key(), value);
+    }
+    return recorded;
+}
+
+bool WordConvert::silenceWordNag(QString *errorOut)
+{
+    auto fail = [errorOut](const QString &message) {
+        if (errorOut)
+            *errorOut = message;
+        return false;
+    };
+
+    const QStringList versions = officeVersionKeys();
+    if (versions.isEmpty())
+        return fail(QStringLiteral("未找到 Office 版本注册表项，无法关闭 Word 的提醒"));
+
+    // The first call records the pre-existing state exactly once. An existing
+    // backup is never overwritten: it has to keep describing the true original
+    // state for as long as the settings page can undo the change.
+    QSettings app(kAppKey, QSettings::NativeFormat);
+    if (!app.contains(kWordNagBackupValue)) {
+        QVariantMap recorded;
+        for (const QString &version : versions)
+            recorded.insert(readWordOptionState(version));
+        app.setValue(kWordNagBackupValue,
+                     QString::fromUtf8(QJsonDocument(encodeNagBackup(recorded))
+                                           .toJson(QJsonDocument::Compact)));
+        app.sync();
+        if (app.status() != QSettings::NoError)
+            return fail(QStringLiteral("无法记录 Word 设置备份（注册表写入失败）"));
+    }
+
+    // Word reads these values at startup, so they have to be in place before
+    // the automation instance is created. Writing them again is harmless.
+    for (const QString &version : versions) {
+        QSettings options(wordOptionsKey(version), QSettings::NativeFormat);
+        options.setValue(kAlertValue, kAlertSilenced);
+        options.setValue(kNoCheckValue, kNoCheckSilenced);
+        options.sync();
+        if (options.status() != QSettings::NoError)
+            return fail(QStringLiteral("无法写入 Word 的提醒设置（注册表写入失败）"));
+    }
+
+    AppLog::write(QStringLiteral("open"),
+                  QStringLiteral("已关闭 Word 的「不是默认程序」提醒（Office %1）")
+                      .arg(versions.join(QStringLiteral(", "))));
+    if (errorOut)
+        errorOut->clear();
+    return true;
+}
+
+bool WordConvert::restoreWordNag(QString *errorOut)
+{
+    auto fail = [errorOut](const QString &message) {
+        if (errorOut)
+            *errorOut = message;
+        return false;
+    };
+
+    const QString json = nagBackupJson();
+    if (json.isEmpty())
+        return fail(QStringLiteral("没有可恢复的 Word 设置备份"));
+
+    const QJsonDocument document = QJsonDocument::fromJson(json.toUtf8());
+    if (!document.isObject() || document.object().isEmpty())
+        return fail(QStringLiteral("Word 设置备份已损坏，无法恢复"));
+
+    const QVariantMap recorded = decodeNagBackup(document.object());
+    for (auto it = recorded.constBegin(); it != recorded.constEnd(); ++it) {
+        QString version;
+        QString name;
+        if (!splitEntryKey(it.key(), &version, &name))
+            continue;                       // hand-edited backup: skip the junk
+
+        const QVariantMap entry = it.value().toMap();
+        QSettings options(wordOptionsKey(version), QSettings::NativeFormat);
+        if (entry.value(QStringLiteral("exists")).toBool())
+            options.setValue(name, entry.value(QStringLiteral("value")).toInt());
+        else
+            options.remove(name);
+        options.sync();
+    }
+
+    QSettings app(kAppKey, QSettings::NativeFormat);
+    app.remove(kWordNagBackupValue);
+    app.sync();
+    if (app.status() != QSettings::NoError)
+        return fail(QStringLiteral("无法清除 Word 设置备份（注册表写入失败）"));
+
+    AppLog::write(QStringLiteral("open"), QStringLiteral("已恢复 Word 的提醒设置"));
+    if (errorOut)
+        errorOut->clear();
+    return true;
+}
+
+bool WordConvert::wordNagBackupExists()
+{
+    const QJsonDocument document = QJsonDocument::fromJson(nagBackupJson().toUtf8());
+    return document.isObject() && !document.object().isEmpty();
+}
+
+bool WordConvert::wordNagSilenced()
+{
+    const QJsonDocument document = QJsonDocument::fromJson(nagBackupJson().toUtf8());
+    if (!document.isObject() || document.object().isEmpty())
+        return false;
+
+    const QVariantMap recorded = decodeNagBackup(document.object());
+    if (recorded.isEmpty())
+        return false;
+
+    int checked = 0;
+    for (auto it = recorded.constBegin(); it != recorded.constEnd(); ++it) {
+        QString version;
+        QString name;
+        if (!splitEntryKey(it.key(), &version, &name))
+            return false;
+
+        int expected = 0;
+        if (!silencedValueFor(name, &expected))
+            continue;                       // not one of the two options
+
+        QSettings options(wordOptionsKey(version), QSettings::NativeFormat);
+        if (!options.contains(name) || options.value(name).toInt() != expected)
+            return false;
+        ++checked;
+    }
+    return checked > 0;
+}
+
 bool WordConvert::convertToPdf(const QString &src, QString *pdfOut, QString *errorOut)
 {
     auto fail = [errorOut](const QString &message) {
@@ -491,33 +732,20 @@ bool WordConvert::convertToPdf(const QString &src, QString *pdfOut, QString *err
     // Word reads its "am I the default program?" options when it STARTS, and on
     // a machine where this app - not Word - owns .docx it will pop a modal
     // dialog that blocks Open/Export and refuses Quit. Setting the option over
-    // COM is too late (the dialog is already up), so write the two Word option
-    // values first: AlertIfNotDefault is the switch behind that nag and
-    // DoNotCheckIfWordIsDefaultApp is its older sibling. Word's own "Tell me if
-    // Microsoft Word isn't the default program" checkbox writes the same keys.
-    const auto silenceDefaultProgramNag = [] {
-        QSettings office(QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Office"),
-                         QSettings::NativeFormat);
-        for (const QString &version : office.childGroups()) {
-            if (!version.contains(QLatin1Char('.')))
-                continue;                       // version keys look like 16.0
-            QSettings options(
-                QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Office/%1/Word/Options")
-                    .arg(version),
-                QSettings::NativeFormat);
-            if (options.contains(QStringLiteral("AlertIfNotDefault"))
-                && options.value(QStringLiteral("AlertIfNotDefault")).toInt() == 0) {
-                continue;                       // already silenced
-            }
-            options.setValue(QStringLiteral("AlertIfNotDefault"), 0);
-            options.setValue(QStringLiteral("DoNotCheckIfWordIsDefaultApp"), 1);
-            options.sync();
+    // COM is too late (the dialog is already up), so the registry write below
+    // MUST stay before runExport() creates the automation instance: it clears
+    // AlertIfNotDefault and sets DoNotCheckIfWordIsDefaultApp, the same keys
+    // Word's own "Tell me if Microsoft Word isn't the default program" checkbox
+    // writes. silenceWordNag() records the previous state first, so the user
+    // can undo it from the settings page; the toggle there can also turn the
+    // whole thing off. Best effort: when the write fails the conversion still
+    // runs and reports its own reason.
+    if (AppSettings::wordNagFixEnabled()) {
+        QString nagError;
+        if (!silenceWordNag(&nagError))
             AppLog::write(QStringLiteral("open"),
-                          QStringLiteral("已关闭 Word 的「不是默认程序」提醒（Office %1）")
-                              .arg(version));
-        }
-    };
-    silenceDefaultProgramNag();
+                          QStringLiteral("Word 提醒开关未写入：%1").arg(nagError));
+    }
 
     QString failure = runExport(src, part);
     if (!failure.isEmpty()) {

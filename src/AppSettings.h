@@ -63,4 +63,12 @@ bool setThemeMode(int mode, QString *errorOut = nullptr);
 int  wordOpenMode();
 bool setWordOpenMode(int mode, QString *errorOut = nullptr);
 
+// The Word nag fix: ON by default, because a conversion on a machine where
+// this app owns .docx would otherwise fail behind Word's "not the default
+// program" dialog. When ON, a conversion first writes Word's own two option
+// values (after recording the previous state; see
+// WordConvert::restoreWordNag). When OFF the conversion just runs as before.
+bool wordNagFixEnabled();
+bool setWordNagFixEnabled(bool on, QString *errorOut = nullptr);
+
 }   // namespace AppSettings

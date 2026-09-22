@@ -245,6 +245,15 @@ MainWindow::MainWindow(QWidget *parent)
     // Picking 系统 / 浅色 / 深色 in the settings page re-applies the theme
     // everywhere. 系统 additionally follows the live OS colour scheme.
     connect(m_settingsPage, &SettingsPage::themeChanged, this, &MainWindow::applyTheme);
+
+    // The settings page reports the Word-settings restore through the window's
+    // status bar; the page itself owns no status bar.
+    connect(m_settingsPage, &SettingsPage::statusMessage, this,
+            [this](const QString &message) {
+                if (statusBar())
+                    statusBar()->showMessage(message, 6000);
+            });
+
     connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged,
             this, &MainWindow::onSystemColorSchemeChanged);
 

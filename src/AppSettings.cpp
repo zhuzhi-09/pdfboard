@@ -20,6 +20,7 @@ const QString kSavePathValue = QStringLiteral("DefaultSavePath");
 const QString kDebugLogValue = QStringLiteral("DebugLog");
 const QString kThemeModeValue = QStringLiteral("ThemeMode");
 const QString kWordOpenModeValue = QStringLiteral("WordOpenMode");
+const QString kWordNagFixValue = QStringLiteral("WordNagFix");
 const QString kRecentFilesValue = QStringLiteral("RecentFiles");
 
 // 最近项目 keeps at most this many paths; the oldest entry is dropped first.
@@ -295,6 +296,28 @@ bool AppSettings::setWordOpenMode(int mode, QString *errorOut)
     if (s.status() != QSettings::NoError) {
         if (errorOut)
             *errorOut = QStringLiteral("无法写入注册表（Word 文档打开方式）");
+        return false;
+    }
+    if (errorOut)
+        errorOut->clear();
+    return true;
+}
+
+bool AppSettings::wordNagFixEnabled()
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    return s.value(kWordNagFixValue, true).toBool();
+}
+
+bool AppSettings::setWordNagFixEnabled(bool on, QString *errorOut)
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    s.setValue(kWordNagFixValue, on);
+    s.sync();
+
+    if (s.status() != QSettings::NoError) {
+        if (errorOut)
+            *errorOut = QStringLiteral("无法写入注册表（Word 提醒设置）");
         return false;
     }
     if (errorOut)

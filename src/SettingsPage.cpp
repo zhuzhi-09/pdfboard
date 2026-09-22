@@ -4,6 +4,7 @@
 #include "AppLog.h"
 #include "IconPainter.h"
 #include "Theme.h"
+#include "WordConvert.h"
 
 #include <QAbstractButton>
 #include <QButtonGroup>
@@ -186,6 +187,9 @@ QString pageSheet(const QFont &font)
                " padding: %9 %10; }"
                "QPushButton:hover { background: %11; }"
                "QPushButton:pressed { background: %12; }"
+               // A disabled button (no backup to restore, no log file to open)
+               // keeps its surface but greys out, so the state is visible.
+               "QPushButton:disabled { color: %16; }"
                "QPushButton#settingsPrimary {"
                " color: %13;"
                " background: %14;"
@@ -219,7 +223,8 @@ QString pageSheet(const QFont &font)
         .arg(Theme::rgba(c.surfacePressed))
         .arg(Theme::rgba(c.onAccent))
         .arg(Theme::rgba(c.accent))
-        .arg(Theme::rgba(c.accentHover));
+        .arg(Theme::rgba(c.accentHover))
+        .arg(Theme::rgba(c.textDisabled));
 }
 
 // A rounded card with a hairline border. Rows go into `col`; the caller
@@ -428,6 +433,44 @@ void SettingsPage::buildUi()
                                             QStringLiteral("打开 Word 文档时"),
                                             QStringLiteral("每次询问 / 批注 / 用 Word 打开"),
                                             segments, Theme::Space4, Theme::Space4));
+        wordOpen.col->addWidget(makeRowSeparator(wordOpen.frame));
+
+        // The nag fix: a toggle that persists AppSettings::wordNagFixEnabled,
+        // with the 恢复 button right below it. The button only becomes usable
+        // once a backup from the first silencing write exists.
+        auto *nagTrailing = new QWidget(wordOpen.frame);
+        auto *nv = new QVBoxLayout(nagTrailing);
+        nv->setContentsMargins(0, 0, 0, 0);
+        nv->setSpacing(Theme::Space2);
+
+        m_wordNagFix = new ToggleSwitch(nagTrailing);
+        m_wordNagFix->setToolTip(
+            QStringLiteral("转换前关闭 Word 启动时的「不是默认程序」提醒"));
+        {
+            const QSignalBlocker block(m_wordNagFix);
+            m_wordNagFix->setChecked(AppSettings::wordNagFixEnabled());
+        }
+        nv->addWidget(m_wordNagFix, 0, Qt::AlignRight);
+
+        m_restoreWordNag = new QPushButton(QStringLiteral("恢复 Word 设置"), nagTrailing);
+        m_restoreWordNag->setCursor(Qt::PointingHandCursor);
+        m_restoreWordNag->setFont(Theme::chromeFont(font()));
+        m_restoreWordNag->setMinimumHeight(int(m.touch * 0.72));
+        nv->addWidget(m_restoreWordNag, 0, Qt::AlignRight);
+
+        wordOpen.col->addWidget(makeTextRow(
+            wordOpen.frame,
+            QStringLiteral("关闭 Word 的「不是默认程序」提醒"),
+            QStringLiteral("转换 Word 文档需要它：会写入 Word 自己的两个开关值"
+                           "（HKCU\\Software\\Microsoft\\Office\\<版本>\\Word\\Options），"
+                           "可用右侧按钮恢复。"),
+            nagTrailing, Theme::Space3, Theme::Space3));
+
+        connect(m_wordNagFix, &QAbstractButton::toggled,
+                this, &SettingsPage::onWordNagFixToggled);
+        connect(m_restoreWordNag, &QPushButton::clicked,
+                this, &SettingsPage::onRestoreWordNag);
+        refreshWordNag();
     }
     col->addWidget(wordOpen.frame);
 
@@ -810,6 +853,7 @@ void SettingsPage::refreshTheme()
 
     syncThemeSegment();
     syncWordSegment();
+    refreshWordNag();
     refreshThemeNote();
     update();
 }
@@ -876,6 +920,66 @@ void SettingsPage::onWordModePicked(int mode)
         return;
     }
     syncWordSegment();
+}
+
+void SettingsPage::onWordNagFixToggled(bool on)
+{
+    QString err;
+    if (!AppSettings::setWordNagFixEnabled(on, &err)) {
+        QMessageBox::warning(this, QStringLiteral("设置失败"), err);
+        const QSignalBlocker block(m_wordNagFix);
+        m_wordNagFix->setChecked(AppSettings::wordNagFixEnabled());
+        return;
+    }
+    refreshWordNag();
+}
+
+// Restoring only ever acts on OUR backup: WordConvert writes the recorded
+// values back itself and refuses when there is none. The dialog is modal on
+// purpose - the one action that touches Word's own settings deserves a
+// confirmation.
+void SettingsPage::onRestoreWordNag()
+{
+    if (!WordConvert::wordNagBackupExists()) {
+        refreshWordNag();
+        return;
+    }
+
+    const QMessageBox::StandardButton answer = QMessageBox::question(
+        this, QStringLiteral("恢复 Word 设置"),
+        QStringLiteral("把 Word 的两个「不是默认程序」开关值恢复到本程序第一次写入"
+                       "之前的状态：\n改动过的写回原值，原本不存在的删除。\n\n是否继续？"),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (answer != QMessageBox::Yes)
+        return;
+
+    QString err;
+    if (!WordConvert::restoreWordNag(&err)) {
+        QMessageBox::warning(this, QStringLiteral("恢复失败"), err);
+        refreshWordNag();
+        return;
+    }
+    refreshWordNag();
+    emit statusMessage(QStringLiteral("已恢复 Word 的「不是默认程序」开关"));
+}
+
+void SettingsPage::refreshWordNag()
+{
+    if (!m_restoreWordNag)
+        return;
+
+    const bool canRestore = WordConvert::wordNagBackupExists();
+    m_restoreWordNag->setEnabled(canRestore);
+    if (!canRestore) {
+        m_restoreWordNag->setToolTip(
+            QStringLiteral("当前没有可恢复的备份；进行一次 Word 转换后可用"));
+    } else if (WordConvert::wordNagSilenced()) {
+        m_restoreWordNag->setToolTip(
+            QStringLiteral("当前 Word 的提醒已由本程序关闭，点击恢复原值"));
+    } else {
+        m_restoreWordNag->setToolTip(
+            QStringLiteral("把 Word 的两个开关值恢复到本程序第一次写入之前的状态"));
+    }
 }
 
 bool SettingsPage::eventFilter(QObject *, QEvent *event)
