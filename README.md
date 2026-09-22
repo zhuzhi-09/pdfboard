@@ -81,6 +81,31 @@ PDFBoard-1.0.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 
 > 卸载时若程序正在运行，静默模式下无法提示关闭，会残留被占用的文件（Windows 常见行为）。先退出程序再卸载即可完全清除。
 
+## 自动构建（Nightly）
+
+[`.github/workflows/nightly.yml`](.github/workflows/nightly.yml) 会在以下时机自动构建**安装器 + 便携版**：
+
+- 推送到 `main`（只改文档除外）
+- 每天一次（UTC 18:00）
+- 手动触发（Actions → nightly → Run workflow）
+
+产物发布到固定的 **`nightly` 预发布**（每次覆盖同名文件，不会越堆越多）：
+`PDFBoard-nightly-setup.exe` / `PDFBoard-nightly-portable.zip`，版本号形如 `1.0.0-nightly.<提交号>`。
+稳定版本仍以版本标签（如 `v1.0.0`）发布。
+
+### 代码签名（可选）
+
+Windows 上签名能显著减少「未知发布者」警告与杀软误报。workflow 内置了签名步骤，**配好密钥即自动生效**，没配就跳过（fork 不会因此失败）：
+
+| 仓库 Secret | 内容 |
+|---|---|
+| `SIGN_PFX_BASE64` | 代码签名证书 `.pfx` 的 base64（`certutil -encode` 或 `[Convert]::ToBase64String()`） |
+| `SIGN_PFX_PASS` | 该 `.pfx` 的密码 |
+
+配好后，**应用 exe 与安装器**都会被 `signtool` 签名并加时间戳。
+
+> 证书选择提醒：**OV** 证书约 $150–300/年（2023 起私钥必须放在 HSM/云签名服务或 USB token 内）；**EV** 更贵，且自 2024 年起两者在 SmartScreen 上都需要逐步积累信誉，不再有"EV 立刻免警告"的特权。自签名证书对 SmartScreen **无效**，只适合内部测试。
+
 ## 诊断日志
 
 默认**关闭**，程序不会写任何日志。在「设置 → 调试」里打开，或临时用环境变量指定路径：
