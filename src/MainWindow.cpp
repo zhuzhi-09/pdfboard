@@ -590,6 +590,11 @@ void MainWindow::onSave()
         }
 
         m_docs[index].bundlePath = target;
+        // The document is bundle-backed from now on: the tab switches to the
+        // .dpz and later saves go to it, exactly like a bundle opened as one.
+        m_docs[index].title = QFileInfo(target).fileName();
+        m_tabs->setTabTitle(index, m_docs.at(index).title);
+        updateTitle();
         AppLog::write(QStringLiteral("save"),
                       QStringLiteral("Word 文档保存批注包 %1：%2 KB，批注 %3 条")
                           .arg(QFileInfo(target).fileName())
