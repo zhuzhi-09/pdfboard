@@ -1,0 +1,23 @@
+# Build output
+build/
+out/
+dist/
+
+# CMake / Qt
+CMakeCache.txt
+CMakeFiles/
+*.user
+*.autosave
+
+# Logs and local artifacts
+*.log
+
+# Internal planning notes (deliberately not published)
+.omo/
+
+# Editors / OS
+.vscode/
+.idea/
+*.swp
+Thumbs.db
+Desktop.ini
