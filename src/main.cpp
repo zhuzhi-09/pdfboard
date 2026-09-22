@@ -1,23 +1,30 @@
 #include "MainWindow.h"
 #include "AppLog.h"
 #include "AppSettings.h"
+#include "InkToolbar.h"
 #include "MemProbe.h"
 #include "PdfCanvas.h"
+#include "Theme.h"
 
 #include <QApplication>
+#include <QColor>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QMouseEvent>
 #include <QScreen>
 #include <QElapsedTimer>
 #include <QImage>
 #include <QPdfDocument>
 #include <QPointF>
+#include <QScrollBar>
+#include <QSettings>
 #include <QSize>
 #include <QSizeF>
 #include <QString>
 #include <QStringList>
+#include <QToolButton>
 #include <QTranslator>
 #include <QLibraryInfo>
 #include <QLocale>
@@ -290,6 +297,139 @@ static int runInkSelfTest(const QString &path)
     check("drag sweep: strokes", canvas.strokeCount(), 2);
     out(QStringLiteral("[selftest] after drag sweep: %1").arg(canvas.testStrokeSummary(0)));
 
+    // Island drag (a separate feature): InkToolbar::moveBy moves the island and
+    // must be inert for ink - no stroke, no undo entry. The island moves by
+    // exactly the delta while the target stays inside the viewport, and is
+    // clamped otherwise. 自由移动's own pan semantics are covered right after.
+    {
+        InkToolbar *bar = canvas.toolbar();
+        check("island drag: toolbar exists", bar ? 1 : 0, 1);
+        if (bar) {
+            canvas.setTool(PdfCanvas::InkTool::Move);
+            check("move: tool is Move",
+                  canvas.tool() == PdfCanvas::InkTool::Move ? 1 : 0, 1);
+
+            // Anchor at the top-left clamp so the +40/+30 delta below lands far
+            // away from every edge and cannot be absorbed by the clamp.
+            bar->moveBy(QPoint(-100000, -100000));
+            const QPoint before = bar->pos();
+            const int strokesBefore = canvas.strokeCount();
+            const int undoBefore = canvas.undoDepth();
+            bar->moveBy(QPoint(40, 30));
+            out(QStringLiteral("[selftest] island drag: toolbar %1,%2 -> %3,%4 (viewport %5x%6)")
+                    .arg(before.x()).arg(before.y())
+                    .arg(bar->pos().x()).arg(bar->pos().y())
+                    .arg(canvas.viewport()->width()).arg(canvas.viewport()->height()));
+            check("island drag: delta applied",
+                  (bar->pos() - before) == QPoint(40, 30) ? 1 : 0, 1);
+            check("island drag: no ink", canvas.strokeCount(), strokesBefore);
+            check("island drag: no undo entry", canvas.undoDepth(), undoBefore);
+
+            bar->moveBy(QPoint(100000, 100000));
+            const QSize host = canvas.viewport()->size();
+            const QRect island(bar->pos(), bar->size());
+            out(QStringLiteral("[selftest] island drag: huge move -> %1,%2 island %3x%4")
+                    .arg(island.x()).arg(island.y())
+                    .arg(island.width()).arg(island.height()));
+            check("island drag: clamped inside host",
+                  (island.left() >= 0 && island.top() >= 0
+                   && island.right() < host.width()
+                   && island.bottom() < host.height()) ? 1 : 0, 1);
+
+            canvas.setTool(PdfCanvas::InkTool::Pen);
+            check("move: back to pen",
+                  canvas.tool() == PdfCanvas::InkTool::Pen ? 1 : 0, 1);
+        }
+    }
+
+    // Free move (自由移动) mode: a left-button drag pans the view on BOTH axes
+    // and must stay inert for ink and for the toolbar island.
+    {
+        canvas.setTool(PdfCanvas::InkTool::Move);
+        check("free move: tool is Move",
+              canvas.tool() == PdfCanvas::InkTool::Move ? 1 : 0, 1);
+
+        // Zoom in so both scroll bars get a usable range: at fit width the
+        // horizontal range is zero and the X assertion would be vacuous.
+        const QSize vs = canvas.testViewportSize();
+        canvas.testZoomAt(QPointF(vs.width() / 2.0, vs.height() / 2.0), 2.0);
+
+        QScrollBar *vb = canvas.verticalScrollBar();
+        QScrollBar *hb = canvas.horizontalScrollBar();
+        check("free move: v-scroll range", vb->maximum() > vb->minimum() ? 1 : 0, 1);
+        check("free move: h-scroll range", hb->maximum() > hb->minimum() ? 1 : 0, 1);
+        // Park both in the middle so the drag has room in either direction.
+        vb->setValue((vb->minimum() + vb->maximum()) / 2);
+        hb->setValue((hb->minimum() + hb->maximum()) / 2);
+
+        const int vBefore = vb->value();
+        const int hBefore = hb->value();
+        const QPoint barBefore = canvas.toolbar()->pos();
+        const int strokesBefore = canvas.strokeCount();
+        const int undoBefore = canvas.undoDepth();
+
+        const QPointF from(vs.width() / 2.0, vs.height() / 2.0);
+        canvas.testFreeMoveDrag(from, from + QPointF(60, 40));
+
+        out(QStringLiteral("[selftest] free move: scroll v %1->%2 h %3->%4")
+                .arg(vBefore).arg(vb->value()).arg(hBefore).arg(hb->value()));
+        check("free move: pan X by delta", hb->value() - hBefore, -60);
+        check("free move: pan Y by delta", vb->value() - vBefore, -40);
+        check("free move: no ink", canvas.strokeCount(), strokesBefore);
+        check("free move: no undo entry", canvas.undoDepth(), undoBefore);
+        check("free move: island unmoved",
+              (canvas.toolbar()->pos() == barBefore) ? 1 : 0, 1);
+
+        canvas.setTool(PdfCanvas::InkTool::Pen);
+    }
+
+    // The island can be dragged from anywhere on it, its buttons included: a
+    // press only arms a drag, a move shorter than startDragDistance() is still a
+    // tap, and once it becomes a drag the release must not click the button.
+    if (InkToolbar *bar = canvas.toolbar()) {
+        canvas.setTool(PdfCanvas::InkTool::Pen);
+        const PdfCanvas::InkTool toolBefore = canvas.tool();
+
+        QToolButton *eraser = nullptr;
+        for (QToolButton *b : bar->findChildren<QToolButton *>()) {
+            if (b->text() == QStringLiteral("橡皮"))
+                eraser = b;
+        }
+        check("drag anywhere: eraser found", eraser ? 1 : 0, 1);
+
+        if (eraser) {
+            // Park the island away from the clamp edges: the checks above left it
+            // pinned to the bottom-right corner, where nothing can move further.
+            bar->moveBy(QPoint(-2000, -2000));      // clamps to (0, 0)
+
+            const QPoint start = eraser->rect().center();
+            const QPoint barBefore = bar->pos();
+            const int strokesBefore = canvas.strokeCount();
+
+            auto send = [eraser](QEvent::Type type, const QPoint &pos,
+                                 Qt::MouseButton button, Qt::MouseButtons buttons) {
+                QMouseEvent ev(type, QPointF(pos), QPointF(pos), button, buttons,
+                               Qt::NoModifier);
+                QApplication::sendEvent(eraser, &ev);
+            };
+
+            // NB: not "small"/"far" - windows.h defines both as legacy macros.
+            const QPoint tinyMove(qMax(2, QApplication::startDragDistance() / 3), 0);
+            send(QEvent::MouseButtonPress, start, Qt::LeftButton, Qt::LeftButton);
+            send(QEvent::MouseMove, start + tinyMove, Qt::NoButton, Qt::LeftButton);
+            check("drag anywhere: tap is not a drag", (bar->pos() == barBefore) ? 1 : 0, 1);
+
+            const int beyond = QApplication::startDragDistance() + Theme::Space5;
+            send(QEvent::MouseMove, start + QPoint(beyond, beyond), Qt::NoButton, Qt::LeftButton);
+            check("drag anywhere: far move drags", (bar->pos() != barBefore) ? 1 : 0, 1);
+
+            send(QEvent::MouseButtonRelease, start + QPoint(beyond, beyond),
+                 Qt::LeftButton, Qt::NoButton);
+            check("drag anywhere: click swallowed", (canvas.tool() == toolBefore) ? 1 : 0, 1);
+            check("drag anywhere: no ink", canvas.strokeCount(), strokesBefore);
+        }
+    }
+
     out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")
                     : QStringLiteral("[selftest] %1 CHECK(S) FAILED").arg(failed));
     return failed == 0 ? 0 : 3;
@@ -351,6 +491,120 @@ static int runLogSelfTest()
     return failed == 0 ? 0 : 3;
 }
 
+// Headless UI-geometry self test:  pdfboard.exe --selftest-ui
+// Pure maths, no widgets: the island metrics must shrink to 80% (font and
+// floors together), and the drag clamp must keep the bar inside the viewport
+// even when the host is smaller than the island.
+static int runUiSelfTest()
+{
+    int failed = 0;
+    auto check = [&failed](const char *what, int got, int want) {
+        const bool ok = (got == want);
+        if (!ok)
+            ++failed;
+        out(QStringLiteral("[selftest] %1: got %2 want %3 -> %4")
+                .arg(QString::fromLatin1(what), -28)
+                .arg(got).arg(want)
+                .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+    };
+
+    const QFont f = QApplication::font();
+    const Theme::Metrics full = Theme::metrics(f, 1.0);
+    const Theme::Metrics island = Theme::metrics(f, Theme::IslandScale);
+
+    check("island scale: touch shrinks", full.touch > island.touch ? 1 : 0, 1);
+    check("island scale: touch ~80%",
+          qAbs(island.touch * 100 / full.touch - 80) <= 3 ? 1 : 0, 1);
+    check("clamp: negative -> 0,0",
+          (InkToolbar::clampToolbarPos(QPoint(-50, -50), QSize(800, 600), QSize(100, 50))
+               == QPoint(0, 0)) ? 1 : 0, 1);
+    check("clamp: overflow -> max",
+          (InkToolbar::clampToolbarPos(QPoint(900, 900), QSize(800, 600), QSize(100, 50))
+               == QPoint(700, 550)) ? 1 : 0, 1);
+    check("clamp: host smaller -> 0,0",
+          (InkToolbar::clampToolbarPos(QPoint(50, 50), QSize(800, 600), QSize(900, 700))
+               == QPoint(0, 0)) ? 1 : 0, 1);
+
+    out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")
+                    : QStringLiteral("[selftest] %1 CHECK(S) FAILED").arg(failed));
+    return failed == 0 ? 0 : 3;
+}
+
+// Headless theme self test:  pdfboard.exe --selftest-theme
+// Locks the runtime-switchable appearance: the stored preference round-trips,
+// out-of-range registry values fall back to 系统, the dark palette is really
+// darker than the light one, and 系统 resolves to the live OS scheme.
+static int runThemeSelfTest()
+{
+    int failed = 0;
+    auto check = [&failed](const char *what, int got, int want) {
+        const bool ok = (got == want);
+        if (!ok)
+            ++failed;
+        out(QStringLiteral("[selftest] %1: got %2 want %3 -> %4")
+                .arg(QString::fromLatin1(what), -28)
+                .arg(got).arg(want)
+                .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+    };
+
+    // Leave the machine exactly as we found it: the registry value and the
+    // in-process theme mode are both snapshotted and restored.
+    QSettings raw(QStringLiteral("HKEY_CURRENT_USER\\Software\\PDFBoard"),
+                  QSettings::NativeFormat);
+    const QVariant savedValue = raw.value(QStringLiteral("ThemeMode"));
+    const Theme::Mode savedMode = Theme::mode();
+
+    raw.remove(QStringLiteral("ThemeMode"));
+    raw.sync();
+    check("default mode is System", AppSettings::themeMode(), 0);
+
+    raw.setValue(QStringLiteral("ThemeMode"), 7);
+    raw.sync();
+    check("out-of-range reads as System", AppSettings::themeMode(), 0);
+
+    check("set 1 succeeds", AppSettings::setThemeMode(1, nullptr) ? 1 : 0, 1);
+    check("stored 1 reads back", AppSettings::themeMode(), 1);
+    check("set 2 succeeds", AppSettings::setThemeMode(2, nullptr) ? 1 : 0, 1);
+    check("stored 2 reads back", AppSettings::themeMode(), 2);
+
+    // The dark palette must really invert the two ends of the scale.
+    const Theme::Palette lightPal = Theme::makeLightPalette();
+    Theme::setMode(Theme::Mode::Dark);
+    check("dark mode is applied", Theme::mode() == Theme::Mode::Dark ? 1 : 0, 1);
+    check("dark: desk is darker",
+          qGray(Theme::light().desk.rgb()) < qGray(lightPal.desk.rgb()) ? 1 : 0, 1);
+    check("dark: text is lighter",
+          qGray(Theme::light().text.rgb()) > qGray(lightPal.text.rgb()) ? 1 : 0, 1);
+
+    // 系统 resolves to whatever this machine asks for, and the palette matches
+    // the matching factory - honest on both light and dark Windows.
+    Theme::setMode(Theme::Mode::System);
+    check("system resolves to OS scheme",
+          Theme::resolvedMode() == Theme::systemMode() ? 1 : 0, 1);
+    const Theme::Palette expected = (Theme::systemMode() == Theme::Mode::Dark)
+                                        ? Theme::makeDarkPalette()
+                                        : Theme::makeLightPalette();
+    check("system: palette matches factory",
+          Theme::light().desk == expected.desk ? 1 : 0, 1);
+
+    if (savedValue.isValid())
+        raw.setValue(QStringLiteral("ThemeMode"), savedValue);
+    else
+        raw.remove(QStringLiteral("ThemeMode"));
+    raw.sync();
+    Theme::setMode(savedMode);
+
+    const bool restored = savedValue.isValid()
+        ? (raw.value(QStringLiteral("ThemeMode")) == savedValue)
+        : !raw.contains(QStringLiteral("ThemeMode"));
+    check("stored preference restored", restored ? 1 : 0, 1);
+    check("theme mode restored", Theme::mode() == savedMode ? 1 : 0, 1);
+
+    out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")
+                    : QStringLiteral("[selftest] %1 CHECK(S) FAILED").arg(failed));
+    return failed == 0 ? 0 : 3;
+}
+
 int main(int argc, char **argv)
 {
     QApplication app(argc, argv);
@@ -369,6 +623,21 @@ int main(int argc, char **argv)
     // Opt-in diagnostics: records the startup environment, which is the first
     // thing you want when a scaling or rendering complaint comes in.
     AppLog::applySettings();
+
+    // The appearance preference must be in place before any widget is built:
+    // the chrome bakes its colours at construction.
+    Theme::setMode(static_cast<Theme::Mode>(AppSettings::themeMode()));
+
+    AppLog::write(QStringLiteral("app"),
+                  QStringLiteral("外观：设置 %1 → 解析 %2（系统 %3）pal=%4 desk=%5,%6,%7")
+                      .arg(AppSettings::themeMode())
+                      .arg(int(Theme::resolvedMode()))
+                      .arg(int(Theme::systemMode()))
+                      .arg(static_cast<qulonglong>(reinterpret_cast<quintptr>(&Theme::light())))
+                      .arg(Theme::light().desk.red())
+                      .arg(Theme::light().desk.green())
+                      .arg(Theme::light().desk.blue()));
+
     AppLog::write(QStringLiteral("app"),
                   QStringLiteral("启动：Qt %1 | 程序 %2 | 参数 [%3]")
                       .arg(QString::fromLatin1(qVersion()),
@@ -383,6 +652,8 @@ int main(int argc, char **argv)
     const int benchIdx = args.indexOf(QStringLiteral("--bench"));
     const int stIdx = args.indexOf(QStringLiteral("--selftest-ink"));
     const int logIdx = args.indexOf(QStringLiteral("--selftest-log"));
+    const int uiIdx = args.indexOf(QStringLiteral("--selftest-ui"));
+    const int themeIdx = args.indexOf(QStringLiteral("--selftest-theme"));
 
     // The shipping build is a GUI executable (no console window when the user
     // double-clicks it). The console-based modes still need their output, so
@@ -390,7 +661,9 @@ int main(int argc, char **argv)
     // redirected, otherwise we would clobber the caller's capture.
     if ((benchIdx >= 0 && benchIdx + 1 < args.size())
         || (stIdx >= 0 && stIdx + 1 < args.size())
-        || logIdx >= 0) {
+        || logIdx >= 0
+        || uiIdx >= 0
+        || themeIdx >= 0) {
         attachConsoleForCli();
     }
 
@@ -402,6 +675,12 @@ int main(int argc, char **argv)
 
     if (logIdx >= 0)
         return runLogSelfTest();
+
+    if (uiIdx >= 0)
+        return runUiSelfTest();
+
+    if (themeIdx >= 0)
+        return runThemeSelfTest();
 
     MainWindow w;
     w.show();

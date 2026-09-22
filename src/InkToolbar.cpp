@@ -13,6 +13,7 @@
 #include <QKeyEvent>
 #include <QFontMetrics>
 #include <QFrame>
+#include <QMouseEvent>
 #include <QGraphicsDropShadowEffect>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -216,9 +217,11 @@ public:
 
     QSize sizeHint() const override
     {
+        // The palette rides on the island metrics, so its swatches scale with
+        // the island instead of keeping a 100% floor.
         const QFontMetrics fm(font());
-        const int s = qMax(40, fm.height() * 2 + 10);
-        return QSize(s, s);
+        const qreal s = qMax<qreal>(40.0, fm.height() * 2.0 + 10.0) * Theme::IslandScale;
+        return QSize(int(s), int(s));
     }
 
 protected:
@@ -274,9 +277,14 @@ class PenPalette : public QWidget
 {
     Q_OBJECT
 public:
-    explicit PenPalette(QWidget *parent = nullptr);
+    // The island hands down its scaled font and metrics: the palette is part of
+    // the same piece of chrome, so it shrinks with it.
+    PenPalette(QWidget *toolbar, const QFont &font, const Theme::Metrics &metrics);
 
     void syncSelection(const QColor &color, qreal width);
+
+    // Re-applies the card sheet and shadow after the application theme changed.
+    void applyTheme();
 
 signals:
     void colorPicked(const QColor &color);
@@ -291,7 +299,11 @@ private:
     void refreshWidthIcons();
 
     QWidget                *m_toolbar = nullptr;   // clicking here must not auto-hide
-    QColor                 m_color{ 0xD3, 0x2F, 0x2F };
+    QFont                   m_font;
+    Theme::Metrics          m_metrics{};
+    QFrame                 *m_chip = nullptr;
+    QGraphicsDropShadowEffect *m_glow = nullptr;
+    QColor                  m_color{ 0xD3, 0x2F, 0x2F };
     QVector<ColorSwatch *> m_swatches;
     QVector<QToolButton *> m_widthButtons;
 };
@@ -300,9 +312,11 @@ private:
 // frameless window gets a square native (DWM) shadow around its bounds, which
 // looked broken next to the rounded card. As a child it is composited by Qt, so
 // only the card and its own soft shadow are visible.
-PenPalette::PenPalette(QWidget *toolbar)
+PenPalette::PenPalette(QWidget *toolbar, const QFont &font, const Theme::Metrics &metrics)
     : QWidget(toolbar ? toolbar->parentWidget() : nullptr)
     , m_toolbar(toolbar)
+    , m_font(font)
+    , m_metrics(metrics)
 {
     setFocusPolicy(Qt::NoFocus);
     setAttribute(Qt::WA_ShowWithoutActivating, true);
@@ -315,24 +329,25 @@ void PenPalette::buildUi()
 {
     const Theme::Palette &pal = Theme::light();
 
-    setFont(Theme::chromeFont(font()));
-    const Theme::Metrics m = Theme::metrics(font());
+    setFont(m_font);
+    const Theme::Metrics m = m_metrics;
 
     auto *outer = new QVBoxLayout(this);
     outer->setContentsMargins(m.shadowRoom, m.shadowRoom, m.shadowRoom, m.shadowRoom);
     outer->setSpacing(0);
 
     auto *chip = new QFrame(this);
+    m_chip = chip;
     chip->setObjectName(QStringLiteral("penPalette"));
     chip->setAttribute(Qt::WA_StyledBackground, true);
     chip->setStyleSheet(paletteSheet(pal, m));
-    auto *glow = new QGraphicsDropShadowEffect(chip);
-    glow->setBlurRadius(m.shadowBlur);
-    glow->setOffset(0.0, m.shadowOffsetY);
+    m_glow = new QGraphicsDropShadowEffect(chip);
+    m_glow->setBlurRadius(m.shadowBlur);
+    m_glow->setOffset(0.0, m.shadowOffsetY);
     QColor shadow = pal.shadow;
     shadow.setAlpha(0x46);
-    glow->setColor(shadow);
-    chip->setGraphicsEffect(glow);
+    m_glow->setColor(shadow);
+    chip->setGraphicsEffect(m_glow);
     outer->addWidget(chip);
 
     auto *content = new QVBoxLayout(chip);
@@ -394,10 +409,24 @@ void PenPalette::buildUi()
     refreshWidthIcons();
 }
 
+void PenPalette::applyTheme()
+{
+    const Theme::Palette &pal = Theme::light();
+    if (m_chip)
+        m_chip->setStyleSheet(paletteSheet(pal, m_metrics));
+    if (m_glow) {
+        QColor shadow = pal.shadow;
+        shadow.setAlpha(0x46);
+        m_glow->setColor(shadow);
+    }
+    refreshWidthIcons();   // the width samples' casing follows the theme
+    update();
+}
+
 void PenPalette::refreshWidthIcons()
 {
     const Theme::Palette &pal = Theme::light();
-    const Theme::Metrics m = Theme::metrics(font());
+    const Theme::Metrics m = m_metrics;
     const QSize box(qMax(30, m.icon + 12), qMax(14, int(m.icon * 0.62)));
     const qreal dpr = devicePixelRatioF();
     const qreal *widths = penWidths();
@@ -489,10 +518,12 @@ void InkToolbar::buildUi()
 {
     const Theme::Palette &pal = Theme::light();
 
-    // Slightly larger, touch friendly type; every metric below derives from it.
-    setFont(Theme::chromeFont(font()));
-    setCursor(Qt::ArrowCursor);
-    m_metrics = Theme::metrics(font());
+    // The island ships at 80% of the chrome type scale: font and metrics shrink
+    // together, so the bar stays one proportional piece.
+    const QFont base = font();
+    setFont(Theme::islandFont(base));
+    setCursor(Qt::OpenHandCursor);
+    m_metrics = Theme::metrics(Theme::chromeFont(base), Theme::IslandScale);
     const Theme::Metrics m = m_metrics;
 
     auto *outer = new QVBoxLayout(this);
@@ -503,13 +534,13 @@ void InkToolbar::buildUi()
     m_chip->setObjectName(QStringLiteral("inkChip"));
     m_chip->setAttribute(Qt::WA_StyledBackground, true);
     m_chip->setStyleSheet(chipSheet(pal, m));
-    auto *glow = new QGraphicsDropShadowEffect(m_chip);
-    glow->setBlurRadius(m.shadowBlur);
-    glow->setOffset(0.0, m.shadowOffsetY);
+    m_glow = new QGraphicsDropShadowEffect(m_chip);
+    m_glow->setBlurRadius(m.shadowBlur);
+    m_glow->setOffset(0.0, m.shadowOffsetY);
     QColor shadow = pal.shadow;
     shadow.setAlpha(0x46);
-    glow->setColor(shadow);
-    m_chip->setGraphicsEffect(glow);
+    m_glow->setColor(shadow);
+    m_chip->setGraphicsEffect(m_glow);
     outer->addWidget(m_chip);
 
     auto *chipRow = new QHBoxLayout(m_chip);
@@ -557,10 +588,13 @@ void InkToolbar::buildUi()
                             QStringLiteral("画笔：选择颜色与粗细"), true);
     m_eraserButton = addButton(row, IconPainter::Glyph::Eraser, QStringLiteral("橡皮"),
                                QStringLiteral("点擦：擦除碰到的整条笔迹"), true);
+    m_moveButton = addButton(row, IconPainter::Glyph::Move, QStringLiteral("自由移动"),
+                             QStringLiteral("自由移动：拖动画面（不批注）"), true);
     auto *toolGroup = new QButtonGroup(this);
     toolGroup->setExclusive(true);
     toolGroup->addButton(m_penButton);
     toolGroup->addButton(m_eraserButton);
+    toolGroup->addButton(m_moveButton);
 
     addSeparator(row);
 
@@ -599,6 +633,10 @@ void InkToolbar::buildUi()
     m_settingsButton = addButton(row, IconPainter::Glyph::Gear, QStringLiteral("设置"),
                                  QStringLiteral("设置：开机自启与文件关联"), false);
 
+    // Fullscreen sits right after settings; the window state belongs to the host.
+    m_fullscreenButton = addButton(row, IconPainter::Glyph::Fullscreen, QStringLiteral("全屏"),
+                                   QStringLiteral("全屏显示（F11）"), false);
+
     // Group 5: the collapse / expand chevron, kept outside the collapsible body
     // so it is always reachable.
     m_moreSep = addSeparator(chipRow);
@@ -629,6 +667,13 @@ void InkToolbar::buildUi()
         dismissPageGrid();
         if (m_canvas)
             m_canvas->setTool(PdfCanvas::InkTool::Eraser);
+    });
+    connect(m_moveButton, &QToolButton::clicked, this, [this] {
+        if (m_palette)
+            m_palette->hide();
+        dismissPageGrid();
+        if (m_canvas)
+            m_canvas->setTool(PdfCanvas::InkTool::Move);
     });
     connect(m_undoButton, &QToolButton::clicked, this, [this] {
         dismissPageGrid();
@@ -665,11 +710,17 @@ void InkToolbar::buildUi()
             m_palette->hide();
         emit settingsRequested();
     });
+    connect(m_fullscreenButton, &QToolButton::clicked, this, [this] {
+        dismissPageGrid();
+        if (m_palette)
+            m_palette->hide();
+        emit fullscreenRequested();
+    });
     // The chevron IS the collapse / expand affordance: a direct click toggles
     // the island, there is no intermediate menu any more.
     connect(m_moreButton, &QToolButton::clicked, this, &InkToolbar::toggleCollapsed);
 
-    m_palette = new PenPalette(this);
+    m_palette = new PenPalette(this, font(), m_metrics);
     connect(m_palette, &PenPalette::colorPicked, this, &InkToolbar::onPenColorPicked);
     connect(m_palette, &PenPalette::widthPicked, this, &InkToolbar::onPenWidthPicked);
     // Child overlays are shown together with their parent unless they were
@@ -680,6 +731,12 @@ void InkToolbar::buildUi()
     // canvas like the palette: the "n / N" chip toggles it.
     m_pageGrid = new PageGrid(m_canvas, this);
     m_pageGrid->hide();
+
+    // Every press on the island may start a drag, the ones landing on a button
+    // included: the filter arms on the press and only takes over once the
+    // pointer has travelled far enough, so a tap still clicks the button.
+    for (QWidget *child : findChildren<QWidget *>())
+        child->installEventFilter(this);
 
     refreshIcons();
 }
@@ -697,6 +754,8 @@ void InkToolbar::refreshIcons()
         // toggle always shows what the next click will do.
         if (it.key() == m_moreButton && m_collapsed)
             glyph = IconPainter::Glyph::ChevronDown;
+        else if (it.key() == m_fullscreenButton && m_fullscreenActive)
+            glyph = IconPainter::Glyph::FullscreenExit;   // show the way out
         const QColor badge = (glyph == IconPainter::Glyph::Pen) ? pen : QColor();
         it.key()->setIcon(IconPainter::makeIcon(glyph, m_metrics.icon, states, dpr, 1.0, badge));
     }
@@ -705,16 +764,38 @@ void InkToolbar::refreshIcons()
     m_iconDpr = dpr;
 }
 
+void InkToolbar::applyTheme()
+{
+    if (m_chip)
+        m_chip->setStyleSheet(chipSheet(Theme::light(), m_metrics));
+    if (m_glow) {
+        QColor shadow = Theme::light().shadow;
+        shadow.setAlpha(0x46);
+        m_glow->setColor(shadow);
+    }
+    if (m_palette)
+        m_palette->applyTheme();
+    if (m_pageGrid)
+        m_pageGrid->applyTheme();   // owned by the island, drawn on the canvas
+    refreshIcons();
+    update();
+}
+
 void InkToolbar::syncFromCanvas()
 {
     if (!m_canvas)
         return;
 
-    const bool penTool = (m_canvas->tool() == PdfCanvas::InkTool::Pen);
+    const PdfCanvas::InkTool tool = m_canvas->tool();
+    const bool penTool    = (tool == PdfCanvas::InkTool::Pen);
+    const bool eraserTool = (tool == PdfCanvas::InkTool::Eraser);
+    const bool moveTool   = (tool == PdfCanvas::InkTool::Move);
     if (m_penButton->isChecked() != penTool)
         m_penButton->setChecked(penTool);
-    if (m_eraserButton->isChecked() == penTool)
-        m_eraserButton->setChecked(!penTool);
+    if (m_eraserButton->isChecked() != eraserTool)
+        m_eraserButton->setChecked(eraserTool);
+    if (m_moveButton->isChecked() != moveTool)
+        m_moveButton->setChecked(moveTool);
 
     m_undoButton->setEnabled(m_canvas->canUndo());
     m_redoButton->setEnabled(m_canvas->canRedo());
@@ -866,6 +947,164 @@ void InkToolbar::toggleCollapsed()
     setCollapsed(!m_collapsed);
 }
 
+void InkToolbar::setFullscreenActive(bool on)
+{
+    if (m_fullscreenActive == on)
+        return;
+
+    m_fullscreenActive = on;
+    if (m_fullscreenButton) {
+        m_fullscreenButton->setToolTip(on ? QStringLiteral("退出全屏（Esc）")
+                                          : QStringLiteral("全屏显示（F11）"));
+    }
+    refreshIcons();
+}
+
+QPoint InkToolbar::clampToolbarPos(const QPoint &pos, const QSize &host, const QSize &self)
+{
+    const int maxX = qMax(0, host.width() - self.width());
+    const int maxY = qMax(0, host.height() - self.height());
+    return QPoint(qBound(0, pos.x(), maxX), qBound(0, pos.y(), maxY));
+}
+
+void InkToolbar::moveBy(const QPoint &delta)
+{
+    QWidget *host = parentWidget();
+    if (!host)
+        return;
+
+    m_userPos = clampToolbarPos(pos() + delta, host->size(), size());
+    m_dragged = true;
+    move(m_userPos);
+    if (m_palette && m_palette->isVisible())
+        positionPalette();   // the popup follows its anchor
+    raise();
+}
+
+// One drag path: the island's own handlers and the child event filter both
+// funnel through these, so the gesture behaves the same wherever it started.
+
+void InkToolbar::beginDrag(const QPoint &posInIsland)
+{
+    m_dragging = true;
+    m_dragOffset = posInIsland;
+    setCursor(Qt::ClosedHandCursor);
+}
+
+void InkToolbar::dragTo(const QPoint &posInIsland)
+{
+    QWidget *host = parentWidget();
+    if (!m_dragging || !host)
+        return;
+
+    // Keep the grab point under the pointer: move to that absolute target,
+    // expressed as a delta for the clamped moveBy path.
+    const QPoint target = mapToParent(posInIsland) - m_dragOffset;
+    moveBy(target - pos());
+}
+
+void InkToolbar::endDrag()
+{
+    m_dragging = false;
+    setCursor(Qt::OpenHandCursor);
+}
+
+void InkToolbar::resetPress()
+{
+    m_pressArmed = false;
+    m_pressChild = nullptr;
+}
+
+// A press on any child - buttons included - arms a drag. The button sees the
+// press first, so a tap keeps working; the drag only takes over once the
+// pointer has travelled startDragDistance(), and from then on the release is
+// swallowed so the button under it never fires clicked().
+bool InkToolbar::eventFilter(QObject *watched, QEvent *event)
+{
+    QWidget *w = qobject_cast<QWidget *>(watched);
+    if (!w)
+        return QWidget::eventFilter(watched, event);
+
+    switch (event->type()) {
+    case QEvent::MouseButtonPress: {
+        auto *me = static_cast<QMouseEvent *>(event);
+        if (me->button() != Qt::LeftButton)
+            break;
+        m_pressArmed = true;
+        m_pressPos = w->mapTo(this, me->position().toPoint());
+        m_pressChild = w;
+        break;                    // never consumed: the button needs the press
+    }
+    case QEvent::MouseMove: {
+        if (!m_dragging && !m_pressArmed)
+            break;
+        auto *me = static_cast<QMouseEvent *>(event);
+        const QPoint inIsland = w->mapTo(this, me->position().toPoint());
+        if (!m_dragging) {
+            if ((inIsland - m_pressPos).manhattanLength()
+                < QApplication::startDragDistance()) {
+                break;            // still a tap, not a drag
+            }
+            beginDrag(m_pressPos);
+        }
+        dragTo(inIsland);
+        return true;              // the button must not track the pointer
+    }
+    case QEvent::MouseButtonRelease: {
+        auto *me = static_cast<QMouseEvent *>(event);
+        if (me->button() != Qt::LeftButton)
+            break;
+        const bool dragged = m_dragging;
+        if (dragged) {
+            endDrag();
+            // The release is swallowed, so clear the pressed look by hand.
+            if (auto *button = qobject_cast<QAbstractButton *>(m_pressChild))
+                button->setDown(false);
+        }
+        resetPress();
+        if (dragged)
+            return true;          // no clicked() for the button under it
+        break;
+    }
+    default:
+        break;
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
+void InkToolbar::mousePressEvent(QMouseEvent *e)
+{
+    if (e->button() == Qt::LeftButton) {
+        // The island's own margin: no button under the pointer, so the drag
+        // starts right away.
+        beginDrag(e->position().toPoint());
+        e->accept();
+        return;
+    }
+    QWidget::mousePressEvent(e);
+}
+
+void InkToolbar::mouseMoveEvent(QMouseEvent *e)
+{
+    if (m_dragging) {
+        dragTo(e->position().toPoint());
+        e->accept();
+        return;
+    }
+    QWidget::mouseMoveEvent(e);
+}
+
+void InkToolbar::mouseReleaseEvent(QMouseEvent *e)
+{
+    if (m_dragging && e->button() == Qt::LeftButton) {
+        endDrag();
+        resetPress();
+        e->accept();
+        return;
+    }
+    QWidget::mouseReleaseEvent(e);
+}
+
 void InkToolbar::reposition()
 {
     QWidget *host = parentWidget();
@@ -893,9 +1132,14 @@ void InkToolbar::reposition()
     if (size() != want)
         resize(want);
 
-    const int x = (host->width() - width()) / 2;
-    const int y = host->height() - m.barBottom - height() + m.shadowRoom;
-    move(qMax(0, x), qMax(0, y));
+    if (m_dragged) {
+        // Once dragged, stay where the user put it, clamped to the viewport.
+        move(clampToolbarPos(m_userPos, host->size(), size()));
+    } else {
+        const int x = (host->width() - width()) / 2;
+        const int y = host->height() - m.barBottom - height() + m.shadowRoom;
+        move(qMax(0, x), qMax(0, y));
+    }
     raise();
 
     if (m_palette && m_palette->isVisible())

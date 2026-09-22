@@ -18,22 +18,72 @@
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QElapsedTimer>
+#include <QEvent>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QJsonObject>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QPalette>
 #include <QScreen>
 #include <QStackedWidget>
 #include <QStatusBar>
+#include <QStyleHints>
 #include <QTimer>
 #include <QUrl>
 #include <QVBoxLayout>
 
+#include <windows.h>
+#include <dwmapi.h>
+
+// The immersive dark title bar attribute: 20 on Windows 10 20H1+ / Windows 11.
+// Older SDK headers may not define the name, so fall back to the raw value.
+#ifndef DWMWA_USE_IMMERSIVE_DARK_MODE
+#define DWMWA_USE_IMMERSIVE_DARK_MODE 20
+#endif
+
 namespace {
+// The platform's own palette, captured before the first theme apply, so the
+// light modes can restore exactly what Windows gave us at startup.
+QPalette &baseAppPalette()
+{
+    static QPalette pal;
+    static bool captured = false;
+    if (!captured && qApp) {
+        pal = qApp->palette();
+        captured = true;
+    }
+    return pal;
+}
+
+// Native dialogs and message boxes must not stay blinding white in dark mode.
+QPalette darkAppPalette()
+{
+    const Theme::Palette &c = Theme::light();
+    QPalette pal = baseAppPalette();
+    pal.setColor(QPalette::Window, c.desk);
+    pal.setColor(QPalette::WindowText, c.text);
+    pal.setColor(QPalette::Base, c.surface);
+    pal.setColor(QPalette::AlternateBase, c.deskShade);
+    pal.setColor(QPalette::Text, c.text);
+    pal.setColor(QPalette::Button, c.surface);
+    pal.setColor(QPalette::ButtonText, c.text);
+    pal.setColor(QPalette::ToolTipBase, c.surface);
+    pal.setColor(QPalette::ToolTipText, c.text);
+    pal.setColor(QPalette::Highlight, c.accent);
+    pal.setColor(QPalette::HighlightedText, c.onAccent);
+    pal.setColor(QPalette::PlaceholderText, c.textMuted);
+    const QPalette::ColorRole disabledRoles[] = { QPalette::WindowText, QPalette::Text,
+                                                  QPalette::ButtonText };
+    for (QPalette::ColorRole role : disabledRoles)
+        pal.setColor(QPalette::Disabled, role, c.textDisabled);
+    return pal;
+}
+
 // The status bar as a quiet strip of information pills instead of the default
 // Qt chrome. Its content is unchanged: 页码 / 渲染 / 笔画 / 内存.
 QString statusSheet()
@@ -98,6 +148,10 @@ QByteArray readPdfBytes(const QString &path)
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
 {
+    // Capture the untouched platform palette before the first theme apply, so
+    // the light modes can put everything back exactly as Windows had it.
+    baseAppPalette();
+
     setWindowTitle(QStringLiteral("大屏 PDF 批注"));
     setAcceptDrops(true);           // a PDF dropped on the window opens a tab
 
@@ -130,6 +184,12 @@ MainWindow::MainWindow(QWidget *parent)
     m_settingsPage = new SettingsPage(m_stack);
     m_stack->addWidget(m_settingsPage);
 
+    // Picking 系统 / 浅色 / 深色 in the settings page re-applies the theme
+    // everywhere. 系统 additionally follows the live OS colour scheme.
+    connect(m_settingsPage, &SettingsPage::themeChanged, this, &MainWindow::applyTheme);
+    connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged,
+            this, &MainWindow::onSystemColorSchemeChanged);
+
     // Ctrl+O / Ctrl+T open a document; Ctrl+W closes the active one.
     auto *openAct = new QAction(this);
     openAct->setShortcut(QKeySequence::Open);
@@ -157,6 +217,13 @@ MainWindow::MainWindow(QWidget *parent)
     saveAsAct->setShortcut(QKeySequence::SaveAs);
     connect(saveAsAct, &QAction::triggered, this, &MainWindow::onSaveAs);
     addAction(saveAsAct);
+
+    // F11 toggles fullscreen from anywhere; Esc leaves it (see keyPressEvent).
+    auto *fullscreenAct = new QAction(this);
+    fullscreenAct->setShortcut(QKeySequence(Qt::Key_F11));
+    fullscreenAct->setShortcutContext(Qt::WindowShortcut);
+    connect(fullscreenAct, &QAction::triggered, this, &MainWindow::onFullscreen);
+    addAction(fullscreenAct);
 
     // The status bar follows the ACTIVE canvas (see wireActiveCanvas).
     m_pageLabel   = new QLabel(QStringLiteral("页码 -/-"), this);
@@ -198,6 +265,11 @@ MainWindow::MainWindow(QWidget *parent)
     } else {
         resize(1400, 900);
     }
+
+    // The palette itself was applied before any widget was built (see main).
+    // This pushes the theme through every piece that baked colours at
+    // construction and syncs the native dialogs' palette.
+    applyTheme();
 }
 
 PdfCanvas *MainWindow::createCanvas()
@@ -212,6 +284,7 @@ PdfCanvas *MainWindow::createCanvas()
         connect(bar, &InkToolbar::settingsRequested, this, &MainWindow::onSettings);
         connect(bar, &InkToolbar::saveRequested, this, &MainWindow::onSave);
         connect(bar, &InkToolbar::saveAsRequested, this, &MainWindow::onSaveAs);
+        connect(bar, &InkToolbar::fullscreenRequested, this, &MainWindow::onFullscreen);
     }
     return canvas;
 }
@@ -249,6 +322,87 @@ void MainWindow::dropEvent(QDropEvent *e)
         openPath(path);      // opens a new tab (or activates the existing one)
         return;
     }
+}
+
+// Esc is handled here and NOT as a QAction/QShortcut: while the pen palette or
+// the page grid is open their app-level event filters consume Esc first, and
+// they must keep winning.
+void MainWindow::keyPressEvent(QKeyEvent *event)
+{
+    if (event->key() == Qt::Key_Escape && isFullScreen()) {
+        onFullscreen();      // restores the pre-fullscreen window state
+        event->accept();
+        return;
+    }
+    QMainWindow::keyPressEvent(event);
+}
+
+void MainWindow::changeEvent(QEvent *event)
+{
+    QMainWindow::changeEvent(event);
+    if (event->type() != QEvent::WindowStateChange)
+        return;
+
+    // The island's fullscreen button mirrors the real window state. m_active can
+    // be the blank startup canvas, which is not part of m_canvases yet.
+    for (PdfCanvas *canvas : m_canvases) {
+        if (InkToolbar *bar = canvas->toolbar())
+            bar->setFullscreenActive(isFullScreen());
+    }
+    if (m_active && !m_canvases.contains(m_active)) {
+        if (InkToolbar *bar = m_active->toolbar())
+            bar->setFullscreenActive(isFullScreen());
+    }
+}
+
+// The one fan-out for a theme change: the Theme palette first, then every
+// piece of chrome that baked colours at construction - including every open
+// canvas and its overlays, the settings page, the tab strip and the status
+// bar - and finally the native palettes (dialogs, title bar).
+void MainWindow::applyTheme()
+{
+    Theme::applyTheme();
+
+    // Native dialogs and message boxes follow the theme too; the light modes
+    // restore the palette Windows gave us at startup.
+    if (qApp) {
+        qApp->setPalette(Theme::resolvedMode() == Theme::Mode::Dark
+                             ? darkAppPalette()
+                             : baseAppPalette());
+    }
+
+    if (statusBar())
+        statusBar()->setStyleSheet(statusSheet());
+
+    // Every open document, plus the blank startup canvas that is not part of
+    // m_canvases yet (the same pattern changeEvent uses).
+    for (PdfCanvas *canvas : m_canvases)
+        canvas->applyTheme();
+    if (m_active && !m_canvases.contains(m_active))
+        m_active->applyTheme();
+
+    if (m_settingsPage)
+        m_settingsPage->refreshTheme();
+    if (m_tabs)
+        m_tabs->update();
+
+    // The native title bar (Windows 10 20H1+) follows the chrome. In
+    // fullscreen there is no caption, so the call would be a no-op.
+    if (!isFullScreen()) {
+        const BOOL dark = (Theme::resolvedMode() == Theme::Mode::Dark) ? TRUE : FALSE;
+        DwmSetWindowAttribute(reinterpret_cast<HWND>(winId()),
+                              static_cast<DWORD>(DWMWA_USE_IMMERSIVE_DARK_MODE),
+                              &dark, sizeof(dark));
+    }
+
+    update();
+}
+
+// 系统 follows the OS; an explicit 浅色 / 深色 stays where the user put it.
+void MainWindow::onSystemColorSchemeChanged()
+{
+    if (AppSettings::themeMode() == 0)
+        applyTheme();
 }
 
 void MainWindow::openPath(const QString &path)
@@ -506,6 +660,21 @@ void MainWindow::saveDocumentAs()
 void MainWindow::onSaveAs()
 {
     saveDocumentAs();
+}
+
+// F11 / the island's 「全屏」: a plain toggle that returns to the window state
+// the user came from (maximized or normal).
+void MainWindow::onFullscreen()
+{
+    if (isFullScreen()) {
+        if (m_fullscreenWasMaximized)
+            showMaximized();
+        else
+            showNormal();
+    } else {
+        m_fullscreenWasMaximized = isMaximized();
+        showFullScreen();
+    }
 }
 
 void MainWindow::onTabCurrentChanged(int index)

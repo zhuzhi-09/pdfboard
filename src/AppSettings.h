@@ -37,4 +37,9 @@ bool setDefaultSavePath(const QString &dir, QString *errorOut = nullptr);
 bool debugLogEnabled();
 bool setDebugLogEnabled(bool on, QString *errorOut = nullptr);
 
+// Appearance preference: 0 = follow the system (default), 1 = light, 2 = dark.
+// Anything else stored in the registry reads back as 0.
+int  themeMode();
+bool setThemeMode(int mode, QString *errorOut = nullptr);
+
 }   // namespace AppSettings

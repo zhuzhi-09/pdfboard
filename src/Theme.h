@@ -3,7 +3,9 @@
 #include <QColor>
 #include <QFont>
 #include <QFontMetricsF>
+#include <QGuiApplication>
 #include <QString>
+#include <QStyleHints>
 #include <QtGlobal>
 
 // Central design tokens for the application chrome: the canvas backdrop, the
@@ -13,8 +15,9 @@
 // derived from the widget font (see Theme::metrics) so the chrome scales with
 // the display DPI and with the user's font settings instead of assuming 96 dpi.
 //
-// Light theme only: a classroom panel is used in bright rooms, so the canvas is
-// a calm, low-glare light neutral and the pages stay paper white.
+// The palette is runtime-switchable: 系统 follows the Windows colour scheme,
+// 浅色 / 深色 pin it. The pages stay paper white in both modes - a document on
+// a classroom projector must keep looking like paper.
 
 namespace Theme {
 
@@ -82,11 +85,83 @@ inline Palette makeLightPalette()
     return c;
 }
 
-// The one light palette the application uses.
-inline const Palette &light()
+inline Palette makeDarkPalette()
 {
-    static const Palette p = makeLightPalette();
-    return p;
+    Palette c;
+    c.accent         = QColor(0x4C, 0x95, 0xFF);
+    c.accentHover    = QColor(0x6B, 0xA8, 0xFF);
+    c.accentSoft     = QColor(0x4C, 0x95, 0xFF, 0x2E);
+    c.onAccent       = QColor(0xFF, 0xFF, 0xFF);
+
+    c.desk           = QColor(0x1B, 0x1B, 0x1F);
+    c.deskShade      = QColor(0x14, 0x14, 0x17);
+    c.paper          = QColor(0xFF, 0xFF, 0xFF);
+    c.pageEdge       = QColor(0x3A, 0x3A, 0x42);
+    c.pageShadow     = QColor(0x00, 0x00, 0x00);
+
+    c.surface        = QColor(0x2C, 0x2C, 0x31);
+    c.surfaceEdge    = QColor(0x3A, 0x3A, 0x42);
+    c.surfaceHover   = QColor(0x38, 0x38, 0x3F);
+    c.surfacePressed = QColor(0x44, 0x44, 0x4C);
+    c.chipTint       = QColor(0x4C, 0x95, 0xFF, 0x1F);
+
+    c.text           = QColor(0xE8, 0xE8, 0xEC);
+    c.textMuted      = QColor(0xA0, 0xA0, 0xAA);
+    c.textDisabled   = QColor(0x6A, 0x6A, 0x74);
+    c.divider        = QColor(0x3A, 0x3A, 0x42);
+
+    c.shadow         = QColor(0x00, 0x00, 0x00);
+    return c;
+}
+
+// How the appearance is chosen.
+enum class Mode {
+    System,     // follow the Windows colour scheme
+    Light,
+    Dark,
+};
+
+// One palette for the whole program. It is an inline VARIABLE, not a
+// function-local static: inline variables are guaranteed to be a single object
+// across translation units, whereas a local static in an inline function is
+// duplicated by some toolchains - and a duplicated palette means the unit that
+// paints reads a different theme than the one main() selected.
+inline Palette g_palette = makeLightPalette();
+
+inline const Palette &light() { return g_palette; }
+
+// The selected mode (modifiable reference: setMode writes through it).
+inline Mode g_mode = Mode::System;
+
+inline Mode &modeRef() { return g_mode; }
+
+inline Mode mode() { return modeRef(); }
+
+// What the OS asks for right now (Qt 6.5+ colour scheme).
+inline Mode systemMode()
+{
+    return QGuiApplication::styleHints()->colorScheme() == Qt::ColorScheme::Dark
+               ? Mode::Dark : Mode::Light;
+}
+
+inline Mode resolvedMode()
+{
+    const Mode m = mode();
+    return m == Mode::System ? systemMode() : m;
+}
+
+// Swaps the palette to match resolvedMode(). Call at startup before any widget
+// is built, and again whenever the setting or the OS scheme changes.
+inline void applyTheme()
+{
+    g_palette = (resolvedMode() == Mode::Dark) ? makeDarkPalette()
+                                               : makeLightPalette();
+}
+
+inline void setMode(Mode m)
+{
+    modeRef() = m;
+    applyTheme();
 }
 
 // ---------------------------------------------------------------------------
@@ -199,30 +274,33 @@ struct Metrics {
     int emptyGlyph;     // glyph box inside that card
 };
 
-inline Metrics metrics(const QFont &font)
+// `scale` multiplies every FLOOR as well as the font-derived value, so a whole
+// piece of chrome can shrink as one unit (the island ships at IslandScale).
+// The default 1.0 keeps every existing caller bit-identical.
+inline Metrics metrics(const QFont &font, qreal scale = 1.0)
 {
     const QFontMetricsF fm(font);
     const qreal h = qMax<qreal>(12.0, fm.height());
 
     Metrics m;
-    m.touch         = int(qMax<qreal>(48.0, h * 2.20));
-    m.icon          = int(qMax<qreal>(22.0, h * 1.25));
+    m.touch         = int(qMax<qreal>(48.0 * scale, h * 2.20));
+    m.icon          = int(qMax<qreal>(22.0 * scale, h * 1.25));
 
-    m.gap           = int(qMax<qreal>(qreal(Space1), h * 0.25));
-    m.padX          = int(qMax<qreal>(10.0, h * 0.70));
-    m.padY          = int(qMax<qreal>(qreal(Space1) + 2.0, h * 0.34));
-    m.chipPad       = int(qMax<qreal>(qreal(Space2), h * 0.50));
-    m.barBottom     = int(qMax<qreal>(qreal(Space5) - 6.0, h * 1.10));
-    m.shadowRoom    = int(qMax<qreal>(14.0, h * 0.90));
+    m.gap           = int(qMax<qreal>(qreal(Space1) * scale, h * 0.25));
+    m.padX          = int(qMax<qreal>(10.0 * scale, h * 0.70));
+    m.padY          = int(qMax<qreal>((qreal(Space1) + 2.0) * scale, h * 0.34));
+    m.chipPad       = int(qMax<qreal>(qreal(Space2) * scale, h * 0.50));
+    m.barBottom     = int(qMax<qreal>((qreal(Space5) - 6.0) * scale, h * 1.10));
+    m.shadowRoom    = int(qMax<qreal>(14.0 * scale, h * 0.90));
     m.divider       = qMax(1, int(h / 14.0));
-    m.menuGap       = int(qMax<qreal>(6.0, h * 0.40));
+    m.menuGap       = int(qMax<qreal>(6.0 * scale, h * 0.40));
 
-    m.radiusChip    = int(qMax<qreal>(qreal(RadiusChip), h * 1.30));
-    m.radiusButton  = int(qMax<qreal>(qreal(RadiusButton), h * 0.85));
-    m.radiusPill    = int(qMax<qreal>(qreal(RadiusPill), h * 0.60));
+    m.radiusChip    = int(qMax<qreal>(qreal(RadiusChip) * scale, h * 1.30));
+    m.radiusButton  = int(qMax<qreal>(qreal(RadiusButton) * scale, h * 0.85));
+    m.radiusPill    = int(qMax<qreal>(qreal(RadiusPill) * scale, h * 0.60));
 
-    m.shadowBlur    = qMax<qreal>(18.0, h * 1.10);
-    m.shadowOffsetY = qMax<qreal>(3.0, h * 0.22);
+    m.shadowBlur    = qMax<qreal>(18.0 * scale, h * 1.10);
+    m.shadowOffsetY = qMax<qreal>(3.0 * scale, h * 0.22);
 
     m.pageGap       = qMax<qreal>(14.0, h * 1.15);
     m.pageMargin    = qMax<qreal>(14.0, h * 1.15);
@@ -262,6 +340,15 @@ inline QFont scaledFont(const QFont &base, qreal factor,
 inline QFont chromeFont(const QFont &base)
 {
     return scaledFont(base, FontChrome, QFont::DemiBold);
+}
+
+// The island ships at 80% of the type scale: it is one piece, so its font and
+// its metrics shrink together.
+inline constexpr qreal IslandScale = 0.80;
+
+inline QFont islandFont(const QFont &base)
+{
+    return scaledFont(chromeFont(base), IslandScale, QFont::DemiBold);
 }
 
 inline QFont bodyFont(const QFont &base)

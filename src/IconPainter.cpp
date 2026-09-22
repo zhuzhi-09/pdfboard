@@ -308,6 +308,57 @@ void glyphSaveAs(QPainter &p, const Grid &g, const QColor &c, qreal w)
     p.drawPath(head);
 }
 
+// Four corner brackets with their elbows at the box corners: "go fullscreen".
+void glyphFullscreen(QPainter &p, const Grid &g, const QColor &c, qreal w)
+{
+    setStroke(p, c, w);
+    constexpr qreal a = 4.0;    // corner inset
+    constexpr qreal b = 9.0;    // arm end
+    constexpr qreal e = 24.0 - a;
+    constexpr qreal f = 24.0 - b;
+
+    QPainterPath brackets;
+    brackets.moveTo(g.p(b, a)); brackets.lineTo(g.p(a, a)); brackets.lineTo(g.p(a, b));
+    brackets.moveTo(g.p(f, a)); brackets.lineTo(g.p(e, a)); brackets.lineTo(g.p(e, b));
+    brackets.moveTo(g.p(e, f)); brackets.lineTo(g.p(e, e)); brackets.lineTo(g.p(f, e));
+    brackets.moveTo(g.p(a, f)); brackets.lineTo(g.p(a, e)); brackets.lineTo(g.p(b, e));
+    p.drawPath(brackets);
+}
+
+// The same brackets flipped: the elbows sit inwards and the arms point at the
+// corners, the usual "leave fullscreen" affordance.
+void glyphFullscreenExit(QPainter &p, const Grid &g, const QColor &c, qreal w)
+{
+    setStroke(p, c, w);
+    constexpr qreal a = 4.0;    // arm end, at the box edge
+    constexpr qreal b = 9.0;    // elbow, inwards
+    constexpr qreal e = 24.0 - a;
+    constexpr qreal f = 24.0 - b;
+
+    QPainterPath brackets;
+    brackets.moveTo(g.p(a, b)); brackets.lineTo(g.p(b, b)); brackets.lineTo(g.p(b, a));
+    brackets.moveTo(g.p(e, b)); brackets.lineTo(g.p(f, b)); brackets.lineTo(g.p(f, a));
+    brackets.moveTo(g.p(e, f)); brackets.lineTo(g.p(f, f)); brackets.lineTo(g.p(f, e));
+    brackets.moveTo(g.p(a, f)); brackets.lineTo(g.p(b, f)); brackets.lineTo(g.p(b, e));
+    p.drawPath(brackets);
+}
+
+// Four-way arrow: a short vertical and a short horizontal segment crossing at
+// the centre, every end capped with an arrowhead - 「自由移动」.
+void glyphMove(QPainter &p, const Grid &g, const QColor &c, qreal w)
+{
+    setStroke(p, c, w);
+    p.drawLine(g.p(12.0, 5.2), g.p(12.0, 18.8));
+    p.drawLine(g.p(5.2, 12.0), g.p(18.8, 12.0));
+
+    QPainterPath heads;
+    heads.moveTo(g.p(9.4, 7.8));  heads.lineTo(g.p(12.0, 5.2));  heads.lineTo(g.p(14.6, 7.8));
+    heads.moveTo(g.p(14.6, 16.2)); heads.lineTo(g.p(12.0, 18.8)); heads.lineTo(g.p(9.4, 16.2));
+    heads.moveTo(g.p(7.8, 9.4));  heads.lineTo(g.p(5.2, 12.0));  heads.lineTo(g.p(7.8, 14.6));
+    heads.moveTo(g.p(16.2, 14.6)); heads.lineTo(g.p(18.8, 12.0)); heads.lineTo(g.p(16.2, 9.4));
+    p.drawPath(heads);
+}
+
 void glyphBadge(QPainter &p, const Grid &g, const QColor &badge)
 {
     if (!badge.isValid())
@@ -382,6 +433,15 @@ void paintGlyph(QPainter &p, Glyph glyph, const QRectF &box,
         break;
     case Glyph::SaveAs:
         glyphSaveAs(p, g, color, w);
+        break;
+    case Glyph::Fullscreen:
+        glyphFullscreen(p, g, color, w);
+        break;
+    case Glyph::FullscreenExit:
+        glyphFullscreenExit(p, g, color, w);
+        break;
+    case Glyph::Move:
+        glyphMove(p, g, color, w);
         break;
     case Glyph::Document:
         glyphDocument(p, g, color, w);

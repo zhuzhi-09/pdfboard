@@ -6,6 +6,9 @@
 #include "Theme.h"
 
 #include <QAbstractButton>
+#include <QButtonGroup>
+#include <QByteArray>
+#include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDir>
 #include <QEnterEvent>
@@ -20,10 +23,62 @@
 #include <QPushButton>
 #include <QResizeEvent>
 #include <QSignalBlocker>
+#include <QStyle>
 #include <QUrl>
 #include <QVBoxLayout>
 
+#include <windows.h>
+
 namespace {
+
+// The project's licence, shown verbatim in 关于. Keep in sync with LICENSE.
+const char *kMitLicenseText =
+    "Copyright (c) 2026 zhuzhi-09\n\n"
+    "Permission is hereby granted, free of charge, to any person obtaining a copy "
+    "of this software and associated documentation files (the \"Software\"), to deal "
+    "in the Software without restriction, including without limitation the rights "
+    "to use, copy, modify, merge, publish, distribute, sublicense, and/or sell "
+    "copies of the Software, and to permit persons to whom the Software is "
+    "furnished to do so, subject to the following conditions:\n\n"
+    "The above copyright notice and this permission notice shall be included in all "
+    "copies or substantial portions of the Software.\n\n"
+    "THE SOFTWARE IS PROVIDED \"AS IS\", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR "
+    "IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, "
+    "FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE "
+    "AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER "
+    "LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM, "
+    "OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE "
+    "SOFTWARE.";
+
+// 关于 shows the version baked into the executable's own version resource
+// (assets/app.rc), so the installer, the file properties and this page can
+// never disagree about what is running.
+QString appVersion()
+{
+    const QString path = QCoreApplication::applicationFilePath();
+    const auto *wide = reinterpret_cast<const wchar_t *>(path.utf16());
+
+    DWORD ignored = 0;
+    const DWORD size = GetFileVersionInfoSizeW(wide, &ignored);
+    if (size == 0)
+        return QStringLiteral("-");
+
+    QByteArray buffer(int(size), Qt::Uninitialized);
+    if (!GetFileVersionInfoW(wide, 0, size, buffer.data()))
+        return QStringLiteral("-");
+
+    VS_FIXEDFILEINFO *info = nullptr;
+    UINT length = 0;
+    if (!VerQueryValueW(buffer.constData(), L"\\",
+                        reinterpret_cast<LPVOID *>(&info), &length)
+        || !info) {
+        return QStringLiteral("-");
+    }
+    return QStringLiteral("%1.%2.%3")
+        .arg(HIWORD(info->dwFileVersionMS))
+        .arg(LOWORD(info->dwFileVersionMS))
+        .arg(HIWORD(info->dwFileVersionLS));
+}
 
 // The auto-start control: a WinUI-style toggle switch painted with the Theme
 // tokens. Doing it by hand - rather than through a style sheet - keeps the app
@@ -135,10 +190,24 @@ QString pageSheet(const QFont &font)
                " color: %13;"
                " background: %14;"
                " border: none; }"
-               "QPushButton#settingsPrimary:hover { background: %15; }")
+               "QPushButton#settingsPrimary:hover { background: %15; }"
+               // The 外观 segmented control: the checked segment is the accent
+               // pill, so the active mode reads at a glance in both themes.
+               "QPushButton#settingsSegment:checked {"
+               " color: %13;"
+               " background: %14;"
+               " border: 1px solid %14; }"
+               "QPushButton#settingsSegment:checked:hover {"
+               " background: %15;"
+               " border: 1px solid %15; }"
+               "QPushButton#settingsSegment:checked:pressed {"
+               " background: %15;"
+               " border: 1px solid %15; }")
         .arg(Theme::rgba(c.text))
         .arg(Theme::rgba(c.textMuted))
-        .arg(Theme::rgba(c.paper))
+        // Cards are a surface, not paper: paper stays white in dark mode too
+        // (it is the PDF page), and a white card on a dark page looks broken.
+        .arg(Theme::rgba(c.surface))
         .arg(Theme::rgba(c.surfaceEdge))
         .arg(Theme::px(qMax(Theme::Space2 + 2, m.radiusButton - Theme::Space1)))
         .arg(Theme::rgba(c.divider))
@@ -153,7 +222,7 @@ QString pageSheet(const QFont &font)
         .arg(Theme::rgba(c.accentHover));
 }
 
-// A white rounded card with a hairline border. Rows go into `col`; the caller
+// A rounded card with a hairline border. Rows go into `col`; the caller
 // separates them with makeRowSeparator().
 struct Card {
     QFrame      *frame = nullptr;
@@ -294,13 +363,13 @@ void SettingsPage::buildUi()
     auto *header = new QHBoxLayout;
     header->setSpacing(Theme::Space3);
     const int glyph = qMax(int(Theme::Space6), m.icon + Theme::Space2);
-    auto *gear = new QLabel(m_column);
-    gear->setPixmap(IconPainter::makeIcon(
-                        IconPainter::Glyph::Gear, glyph,
-                        IconPainter::States{ pal.accent, pal.accent, pal.textDisabled },
-                        devicePixelRatioF())
-                        .pixmap(glyph, glyph));
-    header->addWidget(gear);
+    m_gear = new QLabel(m_column);
+    m_gear->setPixmap(IconPainter::makeIcon(
+                          IconPainter::Glyph::Gear, glyph,
+                          IconPainter::States{ pal.accent, pal.accent, pal.textDisabled },
+                          devicePixelRatioF())
+                          .pixmap(glyph, glyph));
+    header->addWidget(m_gear);
 
     auto *title = new QLabel(QStringLiteral("设置"), m_column);
     title->setObjectName(QStringLiteral("settingsPageTitle"));
@@ -323,6 +392,58 @@ void SettingsPage::buildUi()
                                        QStringLiteral("登录 Windows 后自动打开本程序"),
                                        m_autoStart, Theme::Space3, Theme::Space3));
     col->addWidget(general.frame);
+
+    // --- 外观 ---------------------------------------------------------------
+    col->addSpacing(Theme::Space3);
+    col->addWidget(makeSectionHeader(m_column, QStringLiteral("外观")));
+
+    const Card appearance = makeCard(m_column);
+    {
+        auto *segments = new QWidget(appearance.frame);
+        auto *sh = new QHBoxLayout(segments);
+        sh->setContentsMargins(0, 0, 0, 0);
+        sh->setSpacing(0);
+
+        m_themeGroup = new QButtonGroup(this);
+        m_themeGroup->setExclusive(true);
+        const QString labels[3] = { QStringLiteral("系统"), QStringLiteral("浅色"),
+                                    QStringLiteral("深色") };
+        for (int i = 0; i < 3; ++i) {
+            auto *button = new QPushButton(labels[i], segments);
+            button->setObjectName(QStringLiteral("settingsSegment"));
+            button->setCheckable(true);
+            button->setFocusPolicy(Qt::NoFocus);
+            button->setCursor(Qt::PointingHandCursor);
+            button->setFont(Theme::chromeFont(font()));
+            button->setMinimumSize(QSize(m.touch * 2, m.touch));
+            m_themeGroup->addButton(button, i);
+            m_themeSegments[i] = button;
+            sh->addWidget(button, 1);
+        }
+        connect(m_themeGroup, &QButtonGroup::idClicked,
+                this, &SettingsPage::onThemePicked);
+        syncThemeSegment();
+
+        appearance.col->addWidget(makeTextRow(appearance.frame,
+                                              QStringLiteral("外观"),
+                                              QStringLiteral("跟随系统 / 浅色 / 深色"),
+                                              segments, Theme::Space4, Theme::Space4));
+        appearance.col->addWidget(makeRowSeparator(appearance.frame));
+
+        // The hint that explains what 系统 currently resolves to.
+        auto *noteWrap = new QWidget(appearance.frame);
+        auto *nh = new QHBoxLayout(noteWrap);
+        nh->setContentsMargins(Theme::Space4, 0, Theme::Space4, Theme::Space3);
+        nh->setSpacing(0);
+        m_themeNote = new QLabel(noteWrap);
+        m_themeNote->setObjectName(QStringLiteral("settingsRowBody"));
+        m_themeNote->setFont(Theme::scaledFont(appearance.frame->font(), 0.95,
+                                               QFont::Normal));
+        m_themeNote->setWordWrap(true);
+        nh->addWidget(m_themeNote, 1);
+        appearance.col->addWidget(noteWrap);
+    }
+    col->addWidget(appearance.frame);
 
     // --- 保存 ---------------------------------------------------------------
     col->addSpacing(Theme::Space3);
@@ -454,6 +575,79 @@ void SettingsPage::buildUi()
     connect(m_debugLog, &QAbstractButton::toggled, this, &SettingsPage::onDebugLogToggled);
     connect(m_openLogDir, &QPushButton::clicked, this, &SettingsPage::onOpenLogDir);
     refreshLogPath();
+    refreshThemeNote();
+
+    // --- 关于 ---------------------------------------------------------------
+    col->addSpacing(Theme::Space3);
+    col->addWidget(makeSectionHeader(m_column, QStringLiteral("关于")));
+
+    const Card about = makeCard(m_column);
+    {
+        auto *titleRow = new QWidget(about.frame);
+        auto *titleCol = new QVBoxLayout(titleRow);
+        titleCol->setContentsMargins(Theme::Space4, Theme::Space3, Theme::Space4, Theme::Space3);
+        titleCol->setSpacing(Theme::Space1);
+
+        auto *appLabel = new QLabel(QStringLiteral("大屏 PDF 批注"), titleRow);
+        appLabel->setFont(Theme::chromeFont(titleRow->font()));
+        titleCol->addWidget(appLabel);
+
+        auto *versionLabel = new QLabel(titleRow);
+        versionLabel->setObjectName(QStringLiteral("settingsRowBody"));
+        versionLabel->setFont(Theme::scaledFont(titleRow->font(), 0.95, QFont::Normal));
+        versionLabel->setWordWrap(true);
+        versionLabel->setText(QStringLiteral("版本 %1 · 面向教室大屏一体机的 PDF 查看与手写批注"
+                                             "（原生 C++/Qt6，触控与低内存优化）")
+                                  .arg(appVersion()));
+        titleCol->addWidget(versionLabel);
+        about.col->addWidget(titleRow);
+    }
+    about.col->addWidget(makeRowSeparator(about.frame));
+    {
+        auto *licenseRow = new QWidget(about.frame);
+        auto *licenseCol = new QVBoxLayout(licenseRow);
+        licenseCol->setContentsMargins(Theme::Space4, Theme::Space3, Theme::Space4, Theme::Space3);
+        licenseCol->setSpacing(Theme::Space1);
+
+        auto *licenseTitle = new QLabel(QStringLiteral("许可证 · MIT License"), licenseRow);
+        licenseTitle->setFont(Theme::chromeFont(licenseRow->font()));
+        licenseCol->addWidget(licenseTitle);
+
+        auto *licenseText = new QLabel(QString::fromLatin1(kMitLicenseText), licenseRow);
+        licenseText->setObjectName(QStringLiteral("settingsRowBody"));
+        licenseText->setFont(Theme::scaledFont(licenseRow->font(), 0.92, QFont::Normal));
+        licenseText->setWordWrap(true);
+        licenseText->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        licenseCol->addWidget(licenseText);
+
+        auto *thirdParty = new QLabel(QStringLiteral(
+            "第三方组件：Qt 6（LGPL-3.0，动态链接使用）· PDFium（BSD-3-Clause，随 Qt PDF 模块）"),
+            licenseRow);
+        thirdParty->setObjectName(QStringLiteral("settingsRowBody"));
+        thirdParty->setFont(Theme::scaledFont(licenseRow->font(), 0.92, QFont::Normal));
+        thirdParty->setWordWrap(true);
+        licenseCol->addWidget(thirdParty);
+        about.col->addWidget(licenseRow);
+    }
+    about.col->addWidget(makeRowSeparator(about.frame));
+    {
+        auto *linksRow = new QWidget(about.frame);
+        auto *linksCol = new QHBoxLayout(linksRow);
+        linksCol->setContentsMargins(Theme::Space4, Theme::Space3, Theme::Space4, Theme::Space3);
+
+        auto *repoButton = new QPushButton(QStringLiteral("项目主页"), linksRow);
+        repoButton->setCursor(Qt::PointingHandCursor);
+        repoButton->setFont(Theme::chromeFont(font()));
+        repoButton->setMinimumHeight(int(m.touch * 0.72));
+        connect(repoButton, &QPushButton::clicked, this, [] {
+            QDesktopServices::openUrl(
+                QUrl(QStringLiteral("https://github.com/zhuzhi-09/pdfboard")));
+        });
+        linksCol->addWidget(repoButton, 0, Qt::AlignLeft);
+        linksCol->addStretch(1);
+        about.col->addWidget(linksRow);
+    }
+    col->addWidget(about.frame);
 
     col->addStretch(1);
 }
@@ -537,6 +731,84 @@ void SettingsPage::refreshLogPath()
                 "本次由环境变量 PDFBOARD_LOG 指定路径：%1（只决定启动时默认开启，"
                 "上面的开关随时可以关闭）").arg(QDir::toNativeSeparators(env)));
     }
+}
+
+// The page background, the body sheet and the gear pixmap all bake theme
+// colours, so a runtime theme switch re-applies every one of them.
+void SettingsPage::refreshTheme()
+{
+    const Theme::Palette &pal = Theme::light();
+
+    QPalette pagePal = palette();
+    pagePal.setColor(QPalette::Window, pal.desk);
+    setPalette(pagePal);
+
+    if (m_body)
+        m_body->setStyleSheet(pageSheet(font()));
+
+    if (m_gear) {
+        const Theme::Metrics m = Theme::metrics(font());
+        const int glyph = qMax(int(Theme::Space6), m.icon + Theme::Space2);
+        m_gear->setPixmap(IconPainter::makeIcon(
+                              IconPainter::Glyph::Gear, glyph,
+                              IconPainter::States{ pal.accent, pal.accent,
+                                                   pal.textDisabled },
+                              devicePixelRatioF())
+                              .pixmap(glyph, glyph));
+    }
+
+    for (QPushButton *segment : m_themeSegments) {
+        if (!segment)
+            continue;
+        segment->style()->unpolish(segment);
+        segment->style()->polish(segment);
+    }
+
+    syncThemeSegment();
+    refreshThemeNote();
+    update();
+}
+
+void SettingsPage::refreshThemeNote()
+{
+    if (!m_themeNote)
+        return;
+
+    const int stored = AppSettings::themeMode();
+    if (stored == 1) {
+        m_themeNote->setText(QStringLiteral("已固定为浅色"));
+    } else if (stored == 2) {
+        m_themeNote->setText(QStringLiteral("已固定为深色"));
+    } else {
+        m_themeNote->setText(Theme::systemMode() == Theme::Mode::Dark
+            ? QStringLiteral("当前跟随系统：深色")
+            : QStringLiteral("当前跟随系统：浅色"));
+    }
+}
+
+void SettingsPage::syncThemeSegment()
+{
+    if (!m_themeGroup)
+        return;
+    QAbstractButton *button = m_themeGroup->button(AppSettings::themeMode());
+    if (!button || button->isChecked())
+        return;
+    const QSignalBlocker block(m_themeGroup);
+    button->setChecked(true);
+}
+
+void SettingsPage::onThemePicked(int mode)
+{
+    QString err;
+    if (!AppSettings::setThemeMode(mode, &err)) {
+        QMessageBox::warning(this, QStringLiteral("设置失败"), err);
+        syncThemeSegment();      // show the value that is really stored
+        return;
+    }
+
+    syncThemeSegment();
+    emit themeChanged();         // MainWindow re-applies the theme everywhere
+    refreshThemeNote();
 }
 
 bool SettingsPage::eventFilter(QObject *, QEvent *event)

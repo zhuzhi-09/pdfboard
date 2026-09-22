@@ -38,7 +38,9 @@ qt_add_executable(pdfboard
 target_link_libraries(pdfboard PRIVATE
     Qt6::Widgets
     Qt6::Pdf
-    psapi
+psapi
+dwmapi
+version
 )
 
 # GUI subsystem: double-clicking the installed app must not flash a console.

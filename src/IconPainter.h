@@ -29,6 +29,9 @@ enum class Glyph {
     Pages,      // page picker: four thumbnail tiles
     Save,       // floppy disk: save annotations
     SaveAs,     // floppy disk + export arrow: save as / inject
+    Fullscreen,     // four brackets opening outwards: enter fullscreen
+    FullscreenExit, // four brackets opening inwards: leave fullscreen
+    Move,           // four-way arrow: free move
     Document,   // empty state: a page
     Swash,      // empty state: a hand drawn ink stroke
 };

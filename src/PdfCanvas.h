@@ -30,6 +30,10 @@ public:
     enum class InkTool {
         Pen,
         Eraser,
+        // Free move: a one-finger / left-button drag pans the document view on
+        // both axes (a hand tool); it never starts a stroke, erases or touches
+        // the undo stack. The toolbar island keeps its own separate drag.
+        Move,
     };
     Q_ENUM(InkTool)
 
@@ -42,6 +46,11 @@ public:
     // Drops every cached page bitmap (used when another document becomes
     // visible, so only one document holds rendered pages at a time).
     void releaseCachedPages();
+
+    // Re-applies the theme-derived pieces: the canvas scroll sheet and every
+    // overlay that hangs off this canvas (the toolbar island owns the pen
+    // palette and the page-grid picker).
+    void applyTheme();
 
     int pageCount() const;
     int currentPage() const;            // topmost visible page
@@ -106,6 +115,9 @@ public:
     bool testEraseAtNormalized(int page, const QPointF &norm);
     bool testEraseSweepNormalized(int page, const QPointF &aNorm, const QPointF &bNorm);
     QString testStrokeSummary(int page) const;
+    // Drives one full free-move drag (press / move / release) through the real
+    // mouse handlers, so the pan semantics are tested end to end.
+    void testFreeMoveDrag(const QPointF &from, const QPointF &to);
     int  undoDepth() const { return int(m_undoStack.size()); }
     int  redoDepth() const { return int(m_redoStack.size()); }
 
@@ -186,6 +198,9 @@ private:
     void beginInputAt(const QPointF &viewportPos);   // pen stroke / erase start
     void moveInputTo(const QPointF &viewportPos);
     void endInput();
+    // Free-move mode: pans the view by the pointer movement since the previous
+    // sample. Returns true while a move drag is in progress.
+    bool freePanTo(const QPointF &viewportPos);
     bool handleTouch(QTouchEvent *te);               // 1 finger ink, 2 fingers zoom+pan
     void panBy(const QPointF &delta);
 
@@ -230,6 +245,8 @@ private:
     bool    m_pinchActive = false;      // two-finger zoom+pan in progress
     bool    m_touchInkBlocked = false;  // no inking until every finger lifts
     QVector<QPointF> m_pinchPts;        // last two touch points
+    bool    m_moveDragActive = false;   // free-move drag in progress (mouse / one finger)
+    QPointF m_moveLastPos;              // previous free-move sample (viewport coords)
 
     QVector<InkModel> m_undoStack;      // capped snapshot stack
     QVector<InkModel> m_redoStack;

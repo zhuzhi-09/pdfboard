@@ -11,6 +11,7 @@
 
 class PdfCanvas;
 class QFrame;
+class QGraphicsDropShadowEffect;
 class QGridLayout;
 class QLabel;
 class QScrollArea;
@@ -46,6 +47,9 @@ public:
     // document changes.
     void invalidateThumbnails();
 
+    // Re-applies the card sheet, shadow and header glyph after a theme change.
+    void applyTheme();
+
 protected:
     void showEvent(QShowEvent *e) override;
     void changeEvent(QEvent *e) override;
@@ -72,6 +76,7 @@ private:
     QWidget   *m_toolbar = nullptr;     // clicks here must not dismiss the grid
 
     QFrame      *m_card     = nullptr;
+    QGraphicsDropShadowEffect *m_glow = nullptr;
     QLabel      *m_glyph    = nullptr;
     QLabel      *m_title    = nullptr;
     QLabel      *m_count    = nullptr;

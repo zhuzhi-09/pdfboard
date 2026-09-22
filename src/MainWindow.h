@@ -6,6 +6,8 @@
 class DocumentTabs;
 class PdfCanvas;
 class SettingsPage;
+class QEvent;
+class QKeyEvent;
 class QLabel;
 class QStackedWidget;
 
@@ -22,12 +24,17 @@ protected:
     // Dropping a PDF onto the window opens it in a new tab.
     void dragEnterEvent(QDragEnterEvent *e) override;
     void dropEvent(QDropEvent *e) override;
+    // Esc leaves fullscreen; F11 is handled by a window-level QAction.
+    void keyPressEvent(QKeyEvent *event) override;
+    // Window state changes are pushed down to every canvas toolbar.
+    void changeEvent(QEvent *event) override;
 
 private slots:
     void onOpen();
     void onSave();
     void onSaveAs();
     void onSettings();
+    void onFullscreen();
     void onTabCurrentChanged(int index);
     void onTabCloseRequested(int index);
     void onCloseCurrent();
@@ -35,6 +42,10 @@ private slots:
     void onRenderMeasured(qint64 ms, QSize size);
     void onInkChanged(int strokes);
     void updateMemLabel();
+    // Re-applies the current theme to the whole window chrome; called at
+    // startup and whenever the setting or the OS colour scheme changes.
+    void applyTheme();
+    void onSystemColorSchemeChanged();
 
 private:
     // Per-document bookkeeping that lives alongside each canvas, in tab order.
@@ -60,6 +71,7 @@ private:
 
     QVector<PdfCanvas *>    m_canvases;     // open documents, in tab order
     QVector<DocumentInfo>   m_docs;         // parallel to m_canvases
+    bool                    m_fullscreenWasMaximized = false;
     PdfCanvas *m_active       = nullptr;    // the visible canvas (doc or blank)
     PdfCanvas *m_statusCanvas = nullptr;    // the canvas the status bar follows
 

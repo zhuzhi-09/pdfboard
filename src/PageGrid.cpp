@@ -301,13 +301,13 @@ void PageGrid::buildUi()
     m_card->setObjectName(QStringLiteral("pageGridCard"));
     m_card->setAttribute(Qt::WA_StyledBackground, true);
     m_card->setStyleSheet(cardSheet(pal, m));
-    auto *glow = new QGraphicsDropShadowEffect(m_card);
-    glow->setBlurRadius(m.shadowBlur);
-    glow->setOffset(0.0, m.shadowOffsetY);
+    m_glow = new QGraphicsDropShadowEffect(m_card);
+    m_glow->setBlurRadius(m.shadowBlur);
+    m_glow->setOffset(0.0, m.shadowOffsetY);
     QColor shadow = pal.shadow;
     shadow.setAlpha(0x46);
-    glow->setColor(shadow);
-    m_card->setGraphicsEffect(glow);
+    m_glow->setColor(shadow);
+    m_card->setGraphicsEffect(m_glow);
     outer->addWidget(m_card);
 
     const int pad = m.chipPad + Theme::Space1;
@@ -379,6 +379,22 @@ void PageGrid::refreshGlyph()
     const QIcon icon = IconPainter::makeIcon(IconPainter::Glyph::Pages, m_metrics.icon,
                                              states, m_dpr);
     m_glyph->setPixmap(icon.pixmap(QSize(m_metrics.icon, m_metrics.icon), m_dpr));
+}
+
+void PageGrid::applyTheme()
+{
+    const Theme::Palette &pal = Theme::light();
+    if (m_card)
+        m_card->setStyleSheet(cardSheet(pal, m_metrics));
+    if (m_glow) {
+        QColor shadow = pal.shadow;
+        shadow.setAlpha(0x46);
+        m_glow->setColor(shadow);
+    }
+    refreshGlyph();
+    for (PageCell *cell : m_cells)
+        cell->update();   // the tiles read Theme::light() themselves
+    update();
 }
 
 void PageGrid::open()

@@ -238,6 +238,15 @@ PdfCanvas::PdfCanvas(QWidget *parent)
 
 PdfCanvas::~PdfCanvas() = default;
 
+void PdfCanvas::applyTheme()
+{
+    setStyleSheet(scrollSheet());
+    if (m_toolbar)
+        m_toolbar->applyTheme();   // island chip, pen palette and page grid
+    viewport()->update();
+    update();
+}
+
 bool PdfCanvas::openPdf(const QString &path, QString *errorOut)
 {
     if (m_doc) {
@@ -554,6 +563,17 @@ void PdfCanvas::drawInk(QPainter &p, int page, const QRectF &rect)
 void PdfCanvas::paintBackdrop(QPainter &p) const
 {
     const Theme::Palette &pal = Theme::light();
+    {   // TEMP DIAG: what the painter actually sees, once per process.
+        static bool once = false;
+        if (!once) {
+            once = true;
+            AppLog::write(QStringLiteral("theme"),
+                          QStringLiteral("paint: 解析 %1 pal=%2 desk=%3,%4,%5")
+                              .arg(int(Theme::resolvedMode()))
+                              .arg(static_cast<qulonglong>(reinterpret_cast<quintptr>(&pal)))
+                              .arg(pal.desk.red()).arg(pal.desk.green()).arg(pal.desk.blue()));
+        }
+    }
     const QRect area = viewport()->rect();
     p.fillRect(area, pal.desk);
 
@@ -750,6 +770,7 @@ void PdfCanvas::cancelGesture()
     m_erasing     = false;
     m_erasePushed = false;
     m_hasLastErasePos = false;
+    m_moveDragActive  = false;
     m_drawPage    = -1;
     m_current     = Stroke{};
 }
@@ -842,13 +863,30 @@ QString PdfCanvas::testStrokeSummary(int page) const
     return s;
 }
 
+void PdfCanvas::testFreeMoveDrag(const QPointF &from, const QPointF &to)
+{
+    // Call the real handlers with a synthetic left-button sequence, so the
+    // test drives the exact press / move / release path a user drag uses.
+    QMouseEvent press(QEvent::MouseButtonPress, from, from, Qt::LeftButton,
+                      Qt::LeftButton, Qt::NoModifier);
+    mousePressEvent(&press);
+    QMouseEvent move(QEvent::MouseMove, to, to, Qt::NoButton,
+                     Qt::LeftButton, Qt::NoModifier);
+    mouseMoveEvent(&move);
+    QMouseEvent release(QEvent::MouseButtonRelease, to, to, Qt::LeftButton,
+                        Qt::NoButton, Qt::NoModifier);
+    mouseReleaseEvent(&release);
+}
+
 void PdfCanvas::setTool(InkTool tool)
 {
     if (m_tool == tool)
         return;
     m_tool = tool;
     cancelGesture();
-    viewport()->setCursor(tool == InkTool::Eraser ? Qt::PointingHandCursor : Qt::CrossCursor);
+    viewport()->setCursor(tool == InkTool::Eraser ? Qt::PointingHandCursor
+                        : tool == InkTool::Move   ? Qt::SizeAllCursor
+                                                  : Qt::CrossCursor);
     viewport()->update();
     emit toolChanged();
 }
@@ -1085,6 +1123,9 @@ bool PdfCanvas::eraseAtPointer(int page, const QPointF &viewportPos)
 
 void PdfCanvas::beginInputAt(const QPointF &viewportPos)
 {
+    if (m_tool == InkTool::Move)    // free move never draws ink
+        return;
+
     const int page = pageAtViewportPos(viewportPos);
     if (page < 0)
         return;
@@ -1183,6 +1224,23 @@ void PdfCanvas::endInput()
     viewport()->update();
 }
 
+// Free-move mode: pans the view on both axes by the pointer delta (hand tool),
+// never the toolbar island. Only the integer part of the delta is applied and
+// the sub-pixel remainder stays in m_moveLastPos, so slow drags still
+// accumulate movement.
+bool PdfCanvas::freePanTo(const QPointF &viewportPos)
+{
+    if (!m_moveDragActive)
+        return false;
+
+    const QPoint delta = (viewportPos - m_moveLastPos).toPoint();
+    if (!delta.isNull()) {
+        m_moveLastPos += QPointF(delta);
+        panBy(QPointF(delta));
+    }
+    return true;
+}
+
 void PdfCanvas::panBy(const QPointF &delta)
 {
     verticalScrollBar()->setValue(int(verticalScrollBar()->value() - delta.y()));
@@ -1196,8 +1254,19 @@ void PdfCanvas::mousePressEvent(QMouseEvent *e)
         QAbstractScrollArea::mousePressEvent(e);
         return;
     }
-    if (!m_doc || e->button() != Qt::LeftButton
-        || pageAtViewportPos(e->position()) < 0) {
+    if (e->button() != Qt::LeftButton) {
+        QAbstractScrollArea::mousePressEvent(e);
+        return;
+    }
+    if (m_tool == InkTool::Move) {
+        // Free move: grab anywhere on the viewport (page or gutter, with or
+        // without a document); the drag pans the view and never inks.
+        m_moveDragActive = true;
+        m_moveLastPos = e->position();
+        e->accept();
+        return;
+    }
+    if (!m_doc || pageAtViewportPos(e->position()) < 0) {
         QAbstractScrollArea::mousePressEvent(e);
         return;
     }
@@ -1208,6 +1277,13 @@ void PdfCanvas::mouseMoveEvent(QMouseEvent *e)
 {
     if (m_touchInkBlocked) {
         QAbstractScrollArea::mouseMoveEvent(e);
+        return;
+    }
+    if (m_tool == InkTool::Move) {
+        if (!freePanTo(e->position()))
+            QAbstractScrollArea::mouseMoveEvent(e);
+        else
+            e->accept();
         return;
     }
     if (!m_drawing && !m_erasing) {
@@ -1222,6 +1298,11 @@ void PdfCanvas::mouseReleaseEvent(QMouseEvent *e)
     if (m_touchInkBlocked) {
         eraseLog(QStringLiteral("mouse release ignored (touch lock)"));
         QAbstractScrollArea::mouseReleaseEvent(e);
+        return;
+    }
+    if (m_tool == InkTool::Move && m_moveDragActive) {
+        m_moveDragActive = false;
+        e->accept();
         return;
     }
     if (!m_drawing && !m_erasing) {
@@ -1476,7 +1557,8 @@ bool PdfCanvas::viewportEvent(QEvent *e)
 // One finger draws / erases; two fingers pinch-zoom and pan at the same time.
 bool PdfCanvas::handleTouch(QTouchEvent *te)
 {
-    if (!m_doc || m_geom.isEmpty())
+    // Free move pans the view, so it works on a blank canvas too.
+    if (m_tool != InkTool::Move && (!m_doc || m_geom.isEmpty()))
         return false;
 
     QVector<QPointF> pts;
@@ -1521,6 +1603,9 @@ bool PdfCanvas::handleTouch(QTouchEvent *te)
     }
 
     if (pts.size() >= 2) {
+        // The two-finger gesture wins: a running free-move drag must stop here
+        // and must not resume until a fresh single-finger sequence begins.
+        m_moveDragActive = false;
         if (!m_pinchActive) {
             cancelGesture();               // drop any partial single-finger stroke
             m_pinchActive = true;
@@ -1559,6 +1644,7 @@ bool PdfCanvas::handleTouch(QTouchEvent *te)
     }
 
     if (ended) {
+        m_moveDragActive = false;
         endInput();
         // Keep the lock briefly: synthesized mouse events may still trail in.
         if (m_touchRelease)
@@ -1576,11 +1662,21 @@ bool PdfCanvas::handleTouch(QTouchEvent *te)
             if (m_touchRelease)
                 m_touchRelease->stop();
             m_touchInkBlocked = false;
+            if (m_tool == InkTool::Move) {
+                // One finger in free-move mode pans the view, not the page.
+                m_moveDragActive = true;
+                m_moveLastPos = pts.first();
+                return true;
+            }
             beginInputAt(pts.first());
             return true;
         }
         if (m_touchInkBlocked)
             return true;                   // residual finger of a pinch gesture
+        if (m_tool == InkTool::Move) {
+            freePanTo(pts.first());
+            return true;
+        }
         moveInputTo(pts.first());
         return true;
     }

@@ -17,6 +17,7 @@ const QString kRunValue = QStringLiteral("PDFBoard");
 const QString kAppKey = QStringLiteral("HKEY_CURRENT_USER\\Software\\PDFBoard");
 const QString kSavePathValue = QStringLiteral("DefaultSavePath");
 const QString kDebugLogValue = QStringLiteral("DebugLog");
+const QString kThemeModeValue = QStringLiteral("ThemeMode");
 
 // The executable path exactly as Windows wants it in the Run key: native
 // separators, wrapped in quotes so a path with spaces keeps working.
@@ -135,6 +136,30 @@ bool AppSettings::setDebugLogEnabled(bool on, QString *errorOut)
         errorOut->clear();
     return true;
 }
+
+int AppSettings::themeMode()
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    const int mode = s.value(kThemeModeValue, 0).toInt();
+    return (mode >= 0 && mode <= 2) ? mode : 0;
+}
+
+bool AppSettings::setThemeMode(int mode, QString *errorOut)
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    s.setValue(kThemeModeValue, qBound(0, mode, 2));
+    s.sync();
+
+    if (s.status() != QSettings::NoError) {
+        if (errorOut)
+            *errorOut = QStringLiteral("无法写入注册表（外观设置）");
+        return false;
+    }
+    if (errorOut)
+        errorOut->clear();
+    return true;
+}
+
 QString AppSettings::defaultSavePath()
 {
     QSettings s(kAppKey, QSettings::NativeFormat);
