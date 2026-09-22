@@ -587,6 +587,18 @@ static int runThemeSelfTest()
     check("system: palette matches factory",
           Theme::light().desk == expected.desk ? 1 : 0, 1);
 
+    // The settings-page click path: persist the value, then re-apply through
+    // applyStoredMode. Both directions must actually switch - the palette used to
+    // be recomputed from the mode that was set at startup, so a click did nothing.
+    AppSettings::setThemeMode(1, nullptr);
+    Theme::applyStoredMode(AppSettings::themeMode());
+    check("click path: light applies",
+          qGray(Theme::light().desk.rgb()) > qGray(Theme::makeDarkPalette().desk.rgb()) ? 1 : 0, 1);
+    AppSettings::setThemeMode(2, nullptr);
+    Theme::applyStoredMode(AppSettings::themeMode());
+    check("click path: dark applies",
+          qGray(Theme::light().desk.rgb()) < qGray(Theme::makeLightPalette().desk.rgb()) ? 1 : 0, 1);
+
     if (savedValue.isValid())
         raw.setValue(QStringLiteral("ThemeMode"), savedValue);
     else

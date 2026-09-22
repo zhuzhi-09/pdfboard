@@ -361,7 +361,11 @@ void MainWindow::changeEvent(QEvent *event)
 // bar - and finally the native palettes (dialogs, title bar).
 void MainWindow::applyTheme()
 {
-    Theme::applyTheme();
+    // Re-sync the runtime mode from the stored preference FIRST: the settings
+    // page only writes the value, so without this the palette would be
+    // recomputed from whatever mode was set at startup and a click on
+    // 浅色 / 深色 would appear to do nothing.
+    Theme::applyStoredMode(AppSettings::themeMode());
 
     // Native dialogs and message boxes follow the theme too; the light modes
     // restore the palette Windows gave us at startup.

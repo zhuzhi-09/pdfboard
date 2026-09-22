@@ -164,6 +164,15 @@ inline void setMode(Mode m)
     applyTheme();
 }
 
+// Applies the STORED preference (0 = 系统, 1 = 浅色, 2 = 深色). Every path that
+// re-applies the theme must go through this: the settings page only persists the
+// value, so the runtime mode has to be re-synced from it - otherwise the swap
+// recomputes from a stale mode and clicking 深色 / 浅色 does nothing.
+inline void applyStoredMode(int stored)
+{
+    setMode(static_cast<Mode>(qBound(0, stored, 2)));
+}
+
 // ---------------------------------------------------------------------------
 // Style sheet helpers
 // ---------------------------------------------------------------------------
