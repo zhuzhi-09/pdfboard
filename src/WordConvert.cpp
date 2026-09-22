@@ -488,6 +488,37 @@ bool WordConvert::convertToPdf(const QString &src, QString *pdfOut, QString *err
     QElapsedTimer timer;
     timer.start();
 
+    // Word reads its "am I the default program?" options when it STARTS, and on
+    // a machine where this app - not Word - owns .docx it will pop a modal
+    // dialog that blocks Open/Export and refuses Quit. Setting the option over
+    // COM is too late (the dialog is already up), so write the two Word option
+    // values first: AlertIfNotDefault is the switch behind that nag and
+    // DoNotCheckIfWordIsDefaultApp is its older sibling. Word's own "Tell me if
+    // Microsoft Word isn't the default program" checkbox writes the same keys.
+    const auto silenceDefaultProgramNag = [] {
+        QSettings office(QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Office"),
+                         QSettings::NativeFormat);
+        for (const QString &version : office.childGroups()) {
+            if (!version.contains(QLatin1Char('.')))
+                continue;                       // version keys look like 16.0
+            QSettings options(
+                QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Office/%1/Word/Options")
+                    .arg(version),
+                QSettings::NativeFormat);
+            if (options.contains(QStringLiteral("AlertIfNotDefault"))
+                && options.value(QStringLiteral("AlertIfNotDefault")).toInt() == 0) {
+                continue;                       // already silenced
+            }
+            options.setValue(QStringLiteral("AlertIfNotDefault"), 0);
+            options.setValue(QStringLiteral("DoNotCheckIfWordIsDefaultApp"), 1);
+            options.sync();
+            AppLog::write(QStringLiteral("open"),
+                          QStringLiteral("已关闭 Word 的「不是默认程序」提醒（Office %1）")
+                              .arg(version));
+        }
+    };
+    silenceDefaultProgramNag();
+
     QString failure = runExport(src, part);
     if (!failure.isEmpty()) {
         // One retry: on a machine where Word nagged with its "not the default
