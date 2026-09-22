@@ -19,12 +19,12 @@ BEGIN
         BEGIN
             VALUE "CompanyName",      "PDFBoard"
             VALUE "FileDescription",  "大屏 PDF 批注"
-            VALUE "FileVersion",      "1.1.0.0"
+            VALUE "FileVersion",      "1.2.0.0"
             VALUE "InternalName",     "pdfboard"
             VALUE "LegalCopyright",   "MIT License"
             VALUE "OriginalFilename", "pdfboard.exe"
             VALUE "ProductName",      "大屏 PDF 批注"
-            VALUE "ProductVersion",   "1.1.0.0"
+            VALUE "ProductVersion",   "1.2.0.0"
         END
     END
     BLOCK "VarFileInfo"
