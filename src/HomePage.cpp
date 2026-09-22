@@ -267,6 +267,17 @@ HomePage::HomePage(QWidget *parent)
 
     m_net = new QNetworkAccessManager(this);
     setQuote(fallbackQuote());       // never empty, even with no network
+
+    // The greeting has to age with the clock: a home page left open overnight
+    // would otherwise still wish a good night in the morning. Only the greeting
+    // is re-rendered here - the quote keeps its own request throttle.
+    auto *clock = new QTimer(this);
+    clock->setInterval(60 * 1000);
+    connect(clock, &QTimer::timeout, this, [this] {
+        if (m_greeting)
+            m_greeting->setText(greetingForHour(QTime::currentTime().hour(), userName()));
+    });
+    clock->start();
     refreshGreeting();
     rebuildRecentList();
 }
