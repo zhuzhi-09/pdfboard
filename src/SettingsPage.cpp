@@ -1,13 +1,17 @@
 #include "SettingsPage.h"
 
 #include "AppSettings.h"
+#include "AppLog.h"
 #include "IconPainter.h"
 #include "Theme.h"
 
 #include <QAbstractButton>
 #include <QDesktopServices>
+#include <QDir>
 #include <QEnterEvent>
 #include <QEvent>
+#include <QFileDialog>
+#include <QFileInfo>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -320,6 +324,56 @@ void SettingsPage::buildUi()
                                        m_autoStart, Theme::Space3, Theme::Space3));
     col->addWidget(general.frame);
 
+    // --- 保存 ---------------------------------------------------------------
+    col->addSpacing(Theme::Space3);
+    col->addWidget(makeSectionHeader(m_column, QStringLiteral("保存")));
+
+    col->addWidget(makeSectionBody(m_column, QStringLiteral(
+        "批注默认保存到哪个文件夹。选择「跟随源文件」则与源文件保持同目录。")));
+
+    const Card saveCard = makeCard(m_column);
+    {
+        auto *saveRow = new QWidget(saveCard.frame);
+        auto *h = new QHBoxLayout(saveRow);
+        h->setContentsMargins(Theme::Space4, Theme::Space3, Theme::Space4, Theme::Space3);
+        h->setSpacing(Theme::Space4);
+
+        auto *saveTexts = new QVBoxLayout;
+        saveTexts->setContentsMargins(0, 0, 0, 0);
+        saveTexts->setSpacing(Theme::Space1);
+        auto *saveTitle = new QLabel(QStringLiteral("默认保存位置"), saveRow);
+        saveTitle->setFont(Theme::chromeFont(saveRow->font()));
+        saveTexts->addWidget(saveTitle);
+        m_savePathLabel = new QLabel(saveRow);
+        m_savePathLabel->setObjectName(QStringLiteral("settingsRowBody"));
+        m_savePathLabel->setFont(Theme::scaledFont(saveRow->font(), 0.95, QFont::Normal));
+        m_savePathLabel->setWordWrap(true);
+        saveTexts->addWidget(m_savePathLabel);
+        h->addLayout(saveTexts, 1);
+
+        auto *saveButtons = new QWidget(saveRow);
+        auto *bh = new QHBoxLayout(saveButtons);
+        bh->setContentsMargins(0, 0, 0, 0);
+        bh->setSpacing(Theme::Space2);
+        auto makeBtn = [&](const QString &text) {
+            auto *b = new QPushButton(text, saveButtons);
+            b->setCursor(Qt::PointingHandCursor);
+            b->setFont(Theme::chromeFont(font()));
+            b->setMinimumHeight(int(m.touch * 0.72));
+            bh->addWidget(b);
+            return b;
+        };
+        m_chooseSaveDir = makeBtn(QStringLiteral("选择文件夹…"));
+        m_resetSaveDir  = makeBtn(QStringLiteral("跟随源文件"));
+        h->addWidget(saveButtons, 0, Qt::AlignVCenter);
+
+        saveCard.col->addWidget(saveRow);
+        col->addWidget(saveCard.frame);
+        connect(m_chooseSaveDir, &QPushButton::clicked, this, &SettingsPage::onChooseSaveDir);
+        connect(m_resetSaveDir, &QPushButton::clicked, this, &SettingsPage::onResetSaveDir);
+        refreshSavePath();
+    }
+
     // --- 文件关联 -----------------------------------------------------------
     col->addSpacing(Theme::Space3);
     col->addWidget(makeSectionHeader(m_column, QStringLiteral("文件关联")));
@@ -342,7 +396,130 @@ void SettingsPage::buildUi()
                                      m_register, Theme::Space4, Theme::Space4));
     col->addWidget(assoc.frame);
 
+    // --- 调试 ---------------------------------------------------------------
+    col->addSpacing(Theme::Space3);
+    col->addWidget(makeSectionHeader(m_column, QStringLiteral("调试")));
+
+    col->addWidget(makeSectionBody(m_column, QStringLiteral(
+        "开启后会写入诊断日志，用于排查问题。日志只记录运行状态与耗时，"
+        "不包含文档内容或批注坐标。默认关闭。")));
+
+    const Card debugCard = makeCard(m_column);
+    m_debugLog = new ToggleSwitch(debugCard.frame);
+    m_debugLog->setToolTip(QStringLiteral("写入诊断日志（默认关闭）"));
+    {
+        const QSignalBlocker block(m_debugLog);
+        m_debugLog->setChecked(AppSettings::debugLogEnabled() || AppLog::isEnabled());
+    }
+    debugCard.col->addWidget(makeTextRow(debugCard.frame,
+                                         QStringLiteral("写入诊断日志"),
+                                         QString(),
+                                         m_debugLog, Theme::Space3, Theme::Space3));
+    debugCard.col->addWidget(makeRowSeparator(debugCard.frame));
+    {
+        auto *logRow = new QWidget(debugCard.frame);
+        auto *h = new QHBoxLayout(logRow);
+        h->setContentsMargins(Theme::Space4, Theme::Space3, Theme::Space4, Theme::Space3);
+        h->setSpacing(Theme::Space4);
+
+        auto *logTexts = new QVBoxLayout;
+        logTexts->setContentsMargins(0, 0, 0, 0);
+        logTexts->setSpacing(Theme::Space1);
+        auto *logTitle = new QLabel(QStringLiteral("日志位置"), logRow);
+        logTitle->setFont(Theme::chromeFont(logRow->font()));
+        logTexts->addWidget(logTitle);
+        m_logPathLabel = new QLabel(logRow);
+        m_logPathLabel->setObjectName(QStringLiteral("settingsRowBody"));
+        m_logPathLabel->setFont(Theme::scaledFont(logRow->font(), 0.95, QFont::Normal));
+        m_logPathLabel->setWordWrap(true);
+        logTexts->addWidget(m_logPathLabel);
+        h->addLayout(logTexts, 1);
+
+        m_openLogDir = new QPushButton(QStringLiteral("打开日志文件夹"), logRow);
+        m_openLogDir->setCursor(Qt::PointingHandCursor);
+        m_openLogDir->setFont(Theme::chromeFont(font()));
+        m_openLogDir->setMinimumHeight(int(m.touch * 0.72));
+        h->addWidget(m_openLogDir, 0, Qt::AlignVCenter);
+        debugCard.col->addWidget(logRow);
+    }
+    col->addWidget(debugCard.frame);
+    connect(m_debugLog, &QAbstractButton::toggled, this, &SettingsPage::onDebugLogToggled);
+    connect(m_openLogDir, &QPushButton::clicked, this, &SettingsPage::onOpenLogDir);
+    refreshLogPath();
+
     col->addStretch(1);
+}
+
+void SettingsPage::onChooseSaveDir()
+{
+    QString start = AppSettings::defaultSavePath();
+    if (start.isEmpty() || !QFileInfo(start).isDir())
+        start = QDir::homePath();
+
+    const QString dir = QFileDialog::getExistingDirectory(
+        this, QStringLiteral("选择默认保存位置"), start);
+    if (dir.isEmpty())
+        return;
+
+    QString err;
+    if (!AppSettings::setDefaultSavePath(dir, &err))
+        QMessageBox::warning(this, QStringLiteral("设置失败"), err);
+    refreshSavePath();
+}
+
+void SettingsPage::onResetSaveDir()
+{
+    QString err;
+    if (!AppSettings::setDefaultSavePath(QString(), &err))
+        QMessageBox::warning(this, QStringLiteral("设置失败"), err);
+    refreshSavePath();
+}
+
+void SettingsPage::refreshSavePath()
+{
+    if (!m_savePathLabel)
+        return;
+
+    const QString dir = AppSettings::defaultSavePath();
+    m_savePathLabel->setText(dir.isEmpty()
+        ? QStringLiteral("跟随源文件所在目录（默认）")
+        : QDir::toNativeSeparators(dir));
+    if (m_resetSaveDir)
+        m_resetSaveDir->setEnabled(!dir.isEmpty());
+}
+
+void SettingsPage::onDebugLogToggled(bool on)
+{
+    QString err;
+    if (!AppLog::setEnabled(on, &err))
+        QMessageBox::warning(this, QStringLiteral("设置失败"), err);
+
+    // Reflect the real state: the environment override can force it on.
+    {
+        const QSignalBlocker block(m_debugLog);
+        m_debugLog->setChecked(AppLog::isEnabled());
+    }
+    refreshLogPath();
+}
+
+void SettingsPage::onOpenLogDir()
+{
+    const QString dir = AppLog::logDirectory();
+    QDir().mkpath(dir);
+    QDesktopServices::openUrl(QUrl::fromLocalFile(dir));
+}
+
+void SettingsPage::refreshLogPath()
+{
+    if (!m_logPathLabel)
+        return;
+
+    const bool on = AppLog::isEnabled();
+    m_logPathLabel->setText(on
+        ? QDir::toNativeSeparators(AppLog::logFilePath())
+        : QStringLiteral("已关闭（不写入任何日志）"));
+    if (m_openLogDir)
+        m_openLogDir->setEnabled(on);
 }
 
 bool SettingsPage::eventFilter(QObject *, QEvent *event)

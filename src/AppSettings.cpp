@@ -13,6 +13,11 @@ const QString kRunKey = QStringLiteral(
     "HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Run");
 const QString kRunValue = QStringLiteral("PDFBoard");
 
+// Where the "default save folder" preference lives.
+const QString kAppKey = QStringLiteral("HKEY_CURRENT_USER\\Software\\PDFBoard");
+const QString kSavePathValue = QStringLiteral("DefaultSavePath");
+const QString kDebugLogValue = QStringLiteral("DebugLog");
+
 // The executable path exactly as Windows wants it in the Run key: native
 // separators, wrapped in quotes so a path with spaces keeps working.
 QString quotedExePath()
@@ -104,6 +109,56 @@ bool AppSettings::registerPdfHandler(QString *errorOut)
     reg.sync();
 
     SHChangeNotify(SHCNE_ASSOCCHANGED, SHCNF_IDLIST, nullptr, nullptr);
+    if (errorOut)
+        errorOut->clear();
+    return true;
+}
+
+bool AppSettings::debugLogEnabled()
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    return s.value(kDebugLogValue, false).toBool();
+}
+
+bool AppSettings::setDebugLogEnabled(bool on, QString *errorOut)
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    s.setValue(kDebugLogValue, on);
+    s.sync();
+
+    if (s.status() != QSettings::NoError) {
+        if (errorOut)
+            *errorOut = QStringLiteral("无法写入注册表（调试日志设置）");
+        return false;
+    }
+    if (errorOut)
+        errorOut->clear();
+    return true;
+}
+QString AppSettings::defaultSavePath()
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    const QString dir = s.value(kSavePathValue).toString().trimmed();
+    if (dir.isEmpty())
+        return {};
+    return QDir::toNativeSeparators(dir);
+}
+
+bool AppSettings::setDefaultSavePath(const QString &dir, QString *errorOut)
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    const QString trimmed = dir.trimmed();
+    if (trimmed.isEmpty())
+        s.remove(kSavePathValue);              // empty = follow the source file
+    else
+        s.setValue(kSavePathValue, QDir::toNativeSeparators(trimmed));
+    s.sync();
+
+    if (s.status() != QSettings::NoError) {
+        if (errorOut)
+            *errorOut = QStringLiteral("无法写入注册表（默认保存路径）");
+        return false;
+    }
     if (errorOut)
         errorOut->clear();
     return true;

@@ -25,4 +25,16 @@ bool setAutoStart(bool on, QString *errorOut = nullptr);
 // still has to confirm it in 默认应用.
 bool registerPdfHandler(QString *errorOut);
 
+// Directory that 保存 / 另存为 should suggest first. An EMPTY string means
+// "next to the source document", which is the default.
+QString defaultSavePath();
+
+// Stores the preferred save directory (empty = follow the source document).
+bool setDefaultSavePath(const QString &dir, QString *errorOut = nullptr);
+
+// Diagnostic logging preference. OFF by default: the shipping app must not
+// write anything to disk unless the user asks for it.
+bool debugLogEnabled();
+bool setDebugLogEnabled(bool on, QString *errorOut = nullptr);
+
 }   // namespace AppSettings

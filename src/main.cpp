@@ -1,25 +1,42 @@
 #include "MainWindow.h"
+#include "AppLog.h"
 #include "MemProbe.h"
 #include "PdfCanvas.h"
 
 #include <QApplication>
-#include <QColor>
+#include <QGuiApplication>
+#include <QScreen>
 #include <QElapsedTimer>
 #include <QImage>
-#include <QLabel>
-#include <QMenu>
 #include <QPdfDocument>
-#include <QPixmap>
-#include <QStackedWidget>
-#include <QStatusBar>
-#include <QToolButton>
 #include <QPointF>
+#include <QSize>
 #include <QSizeF>
 #include <QString>
 #include <QStringList>
+#include <QTranslator>
+#include <QLibraryInfo>
+#include <QLocale>
 #include <QtGlobal>
 
 #include <cstdio>
+#include <windows.h>
+
+// A GUI-subsystem process owns no console, so `qInfo`/`fprintf` output from
+// --bench and --selftest-* would vanish. Attach to the launching terminal; this
+// is a no-op when the caller redirected stdout, because then the handle is
+// already valid and must not be clobbered.
+static void attachConsoleForCli()
+{
+    const HANDLE out = GetStdHandle(STD_OUTPUT_HANDLE);
+    if (out && out != INVALID_HANDLE_VALUE)
+        return;
+    if (!AttachConsole(ATTACH_PARENT_PROCESS))
+        return;                                  // launched from Explorer: fine
+    FILE *f = nullptr;
+    freopen_s(&f, "CONOUT$", "w", stdout);
+    freopen_s(&f, "CONOUT$", "w", stderr);
+}
 
 // Raw stdout write + flush: qInfo() output proved unreliable here (Qt's default
 // category logging can be compiled out), so the bench uses plain stdio.
@@ -279,13 +296,45 @@ int main(int argc, char **argv)
     QApplication app(argc, argv);
     app.setApplicationName(QStringLiteral("PDFBoard"));
 
+    // Qt's own dialogs (message boxes) should follow the system language.
+    {
+        auto *translator = new QTranslator(&app);
+        if (translator->load(QLocale(), QStringLiteral("qtbase"), QStringLiteral("_"),
+                             QLibraryInfo::path(QLibraryInfo::TranslationsPath)))
+            app.installTranslator(translator);
+    }
+
     const QStringList args = app.arguments();
 
+    // Opt-in diagnostics: records the startup environment, which is the first
+    // thing you want when a scaling or rendering complaint comes in.
+    AppLog::applySettings();
+    AppLog::write(QStringLiteral("app"),
+                  QStringLiteral("启动：Qt %1 | 程序 %2 | 参数 [%3]")
+                      .arg(QString::fromLatin1(qVersion()),
+                           QCoreApplication::applicationFilePath(),
+                           args.mid(1).join(QLatin1Char(' '))));
+    if (QScreen *scr = QGuiApplication::primaryScreen())
+        AppLog::write(QStringLiteral("app"),
+                      QStringLiteral("屏幕：%1×%2 @DPR %3")
+                          .arg(scr->geometry().width())
+                          .arg(scr->geometry().height())
+                          .arg(scr->devicePixelRatio()));
     const int benchIdx = args.indexOf(QStringLiteral("--bench"));
+    const int stIdx = args.indexOf(QStringLiteral("--selftest-ink"));
+
+    // The shipping build is a GUI executable (no console window when the user
+    // double-clicks it). The console-based modes still need their output, so
+    // attach to the launching terminal - but only when stdout was NOT already
+    // redirected, otherwise we would clobber the caller's capture.
+    if ((benchIdx >= 0 && benchIdx + 1 < args.size())
+        || (stIdx >= 0 && stIdx + 1 < args.size())) {
+        attachConsoleForCli();
+    }
+
     if (benchIdx >= 0 && benchIdx + 1 < args.size())
         return runBench(args.at(benchIdx + 1));
 
-    const int stIdx = args.indexOf(QStringLiteral("--selftest-ink"));
     if (stIdx >= 0 && stIdx + 1 < args.size())
         return runInkSelfTest(args.at(stIdx + 1));
 

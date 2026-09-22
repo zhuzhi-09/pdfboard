@@ -1,4 +1,5 @@
 #include "PdfCanvas.h"
+#include "AppLog.h"
 #include "IconPainter.h"
 #include "InkToolbar.h"
 #include "Theme.h"
@@ -22,19 +23,10 @@
 #include <QtMath>
 
 namespace {
-// Diagnostic only: set PDFBOARD_ERASE_LOG=<path> to record the eraser
-// trajectory and every cut. Used to reproduce input-timing bugs on real
-// hardware; it is a no-op otherwise.
+// Input/gesture diagnostics - a no-op unless the opt-in log is enabled.
 void eraseLog(const QString &line)
 {
-    const QByteArray path = qgetenv("PDFBOARD_ERASE_LOG");
-    if (!path.isEmpty()) {
-        QFile f(QString::fromLocal8Bit(path));
-        if (f.open(QIODevice::WriteOnly | QIODevice::Append | QIODevice::Text)) {
-            f.write(line.toUtf8());
-            f.write("\n");
-        }
-    }
+    AppLog::write(QStringLiteral("input"), line);
 }
 }   // namespace
 
@@ -222,6 +214,11 @@ PdfCanvas::PdfCanvas(QWidget *parent)
         invalidateRenders();
         relayout();
         viewport()->update();
+        AppLog::write(QStringLiteral("view"),
+                      QStringLiteral("缩放稳定：%1×（视口 %2×%3，缓存 %4 MB）")
+                          .arg(m_zoom, 0, 'f', 2)
+                          .arg(viewport()->width()).arg(viewport()->height())
+                          .arg(double(m_cacheBytes) / 1048576.0, 0, 'f', 1));
     });
 
     // Touch input can also be forwarded as synthesized mouse events. Keep the
@@ -444,6 +441,12 @@ QImage PdfCanvas::imageFor(int page)
     m_lastRenderMs = t.elapsed();
     m_lastRenderSize = img.size();
     emit renderMeasured(m_lastRenderMs, m_lastRenderSize);
+    // Slow pages are the first thing to look at when scrolling feels bad.
+    if (m_lastRenderMs > 40)
+        AppLog::write(QStringLiteral("render"),
+                      QStringLiteral("第 %1 页渲染 %2 ms（%3×%4）")
+                          .arg(page + 1).arg(m_lastRenderMs)
+                          .arg(m_lastRenderSize.width()).arg(m_lastRenderSize.height()));
 
     m_cache.insert(page, img);
     m_cacheBytes += img.sizeInBytes();
@@ -491,6 +494,7 @@ void PdfCanvas::trimCache()
         visible.insert(i);
     }
 
+    const qint64 before = m_cacheBytes;
     for (int i = 0; i < m_lru.size() && m_cacheBytes > m_cacheBudget;) {
         const int page = m_lru.at(i);
         if (visible.contains(page)) {   // never evict a visible page
@@ -501,6 +505,12 @@ void PdfCanvas::trimCache()
         m_cache.remove(page);
         m_lru.removeAt(i);
     }
+    if (m_cacheBytes < before)
+        AppLog::write(QStringLiteral("cache"),
+                      QStringLiteral("淘汰 %1 MB，缓存 %2 MB / 上限 %3 MB")
+                          .arg(double(before - m_cacheBytes) / 1048576.0, 0, 'f', 1)
+                          .arg(double(m_cacheBytes) / 1048576.0, 0, 'f', 1)
+                          .arg(double(m_cacheBudget) / 1048576.0, 0, 'f', 0));
 }
 
 void PdfCanvas::drawInk(QPainter &p, int page, const QRectF &rect)

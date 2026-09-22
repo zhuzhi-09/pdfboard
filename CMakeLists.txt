@@ -8,6 +8,7 @@ find_package(Qt6 REQUIRED COMPONENTS Widgets Pdf)
 qt_standard_project_setup()
 
 qt_add_executable(pdfboard
+    assets/app.rc
     src/main.cpp
     src/MainWindow.h
     src/MainWindow.cpp
@@ -25,6 +26,8 @@ qt_add_executable(pdfboard
     src/PageGrid.cpp
     src/AppSettings.h
     src/AppSettings.cpp
+    src/AppLog.h
+    src/AppLog.cpp
     src/SettingsPage.h
     src/SettingsPage.cpp
     src/IconPainter.h
@@ -38,9 +41,9 @@ target_link_libraries(pdfboard PRIVATE
     psapi
 )
 
-# M0: console subsystem so --bench / qInfo output is visible.
-# Switch to WIN32_EXECUTABLE TRUE for the shipping GUI build.
-set_target_properties(pdfboard PROPERTIES WIN32_EXECUTABLE FALSE)
+# GUI subsystem: double-clicking the installed app must not flash a console.
+# The --bench / --selftest-* modes re-attach to the launching terminal instead.
+set_target_properties(pdfboard PROPERTIES WIN32_EXECUTABLE TRUE)
 
 if (MSVC)
     # Chinese UI strings in sources need /utf-8

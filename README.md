@@ -34,6 +34,8 @@
   - `注入 PDF (*.pdf)`：把批注烧录进页面，**适合分享、任何阅读器都能打开**
 - **设置为 PDF 默认打开方式**（一键注册 + 引导到系统「默认应用」确认）
 - **开机自启动**开关
+- **默认保存路径**：可指定批注默认存到哪个文件夹，或跟随源文件所在目录
+- **诊断日志**（默认关闭）：开启后记录运行状态与耗时，便于排查问题
 
 ### 界面
 - 底部悬浮**工具岛**（打开/保存入口集中在此），可收起为小箭头
@@ -49,6 +51,47 @@
 - 构建零警告（MSVC `/W4`）
 
 ---
+
+## 打包安装器
+
+需要 [Inno Setup 6](https://jrsoftware.org/isdl.php)（脚本按默认路径 `D:\dev\tools\InnoSetup` 查找 `ISCC.exe`，可自行修改）：
+
+```powershell
+package.cmd
+# 产物：dist\PDFBoard-1.0.0-setup.exe   （自带 Qt 运行库，约 17 MB）
+```
+
+安装器做这些事（全部**当前用户**范围，不需要管理员）：
+
+| 项目 | 说明 |
+|---|---|
+| 安装位置 | `%LOCALAPPDATA%\Programs\PDFBoard` |
+| 系统管理 | 注册到「应用和功能」，带图标与版本，可正常卸载 |
+| 快捷方式 | 开始菜单（桌面快捷方式为可选项） |
+| 文件关联 | `.pdf` / `.dpz` 的 OpenWith + Capabilities（会出现在「默认应用」里） |
+| 卸载 | 同时清理文件、快捷方式、关联注册项与临时缓存 |
+
+**静默部署**（供教室集中管理客户端调用）：
+
+```bat
+PDFBoard-1.0.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+rem 不要桌面快捷方式：
+PDFBoard-1.0.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
+```
+
+> 卸载时若程序正在运行，静默模式下无法提示关闭，会残留被占用的文件（Windows 常见行为）。先退出程序再卸载即可完全清除。
+
+## 诊断日志
+
+默认**关闭**，程序不会写任何日志。在「设置 → 调试」里打开，或临时用环境变量指定路径：
+
+```powershell
+$env:PDFBOARD_LOG = "D:\tmp\pdfboard.log"
+build\pdfboard.exe --bench some.pdf
+```
+
+记录内容：启动环境（Qt 版本、程序路径、屏幕与 DPI）、文档打开/关闭耗时与页数、**慢页渲染**、缓存淘汰、缩放稳定值、墨迹编辑与保存/导出结果、以及 Qt 的所有警告。
+**不记录**文档内容，也不记录批注坐标。日志默认位置：`%LOCALAPPDATA%\PDFBoard\logs\pdfboard.log`（超过 2 MB 自动轮转为 `.1`）。
 
 ## 环境要求
 

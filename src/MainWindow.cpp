@@ -1,5 +1,7 @@
 #include "MainWindow.h"
 #include "AnnotationBundle.h"
+#include "AppLog.h"
+#include "AppSettings.h"
 #include "DocumentTabs.h"
 #include "PdfCanvas.h"
 #include "PdfExport.h"
@@ -15,6 +17,7 @@
 #include <QDir>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -250,6 +253,8 @@ void MainWindow::dropEvent(QDropEvent *e)
 
 void MainWindow::openPath(const QString &path)
 {
+    QElapsedTimer timer;
+    timer.start();
     const bool bundle = AnnotationBundle::isBundle(path);
     const QString key = fileKey(path);
 
@@ -272,6 +277,8 @@ void MainWindow::openPath(const QString &path)
     if (bundle) {
         QString err;
         if (!AnnotationBundle::read(path, &pdfBytes, &annotations, &err)) {
+            AppLog::write(QStringLiteral("open"),
+                          QStringLiteral("批注包读取失败：%1（%2）").arg(path, err));
             statusBar()->showMessage(QStringLiteral("打开失败：%1").arg(err), 8000);
             return;
         }
@@ -303,6 +310,8 @@ void MainWindow::openPath(const QString &path)
 
     QString err;
     if (!canvas->openPdf(tempPath, &err)) {
+        AppLog::write(QStringLiteral("open"),
+                      QStringLiteral("打开失败：%1（%2）").arg(path, err));
         if (!reuse) {
             m_stack->removeWidget(canvas);
             delete canvas;
@@ -312,6 +321,13 @@ void MainWindow::openPath(const QString &path)
     }
     if (bundle)
         canvas->importInk(annotations);
+
+    AppLog::write(QStringLiteral("open"),
+                  QStringLiteral("%1：%2 页，%3 ms，批注 %4 条")
+                      .arg(tabTitle)
+                      .arg(canvas->pageCount())
+                      .arg(timer.elapsed())
+                      .arg(canvas->strokeCount()));
 
     DocumentInfo info;
     info.bundlePath = bundle ? path : QString();
@@ -391,7 +407,11 @@ void MainWindow::saveDocumentAs()
     const QString identity =
         info.bundlePath.isEmpty() ? info.sourcePdf : info.bundlePath;
     const QFileInfo src(identity);
-    const QString dir = src.absolutePath();
+    // Prefer the user's configured save folder; fall back to the document's own
+    // directory when it is unset or has gone away.
+    QString dir = AppSettings::defaultSavePath();
+    if (dir.isEmpty() || !QFileInfo(dir).isDir())
+        dir = src.absolutePath();
     QString base = src.completeBaseName();
     if (base.isEmpty())
         base = QStringLiteral("未命名");
@@ -436,10 +456,20 @@ void MainWindow::saveDocumentAs()
     QString err;
     if (inject) {
         // Injecting never changes the open document's own bundle state.
+        QElapsedTimer timer;
+        timer.start();
         if (!PdfExport::exportFlattened(m_active, path, &err)) {
+            AppLog::write(QStringLiteral("save"),
+                          QStringLiteral("注入 PDF 失败：%1（%2）").arg(path, err));
             QMessageBox::warning(this, QStringLiteral("保存失败"), err);
             return;
         }
+        AppLog::write(QStringLiteral("save"),
+                      QStringLiteral("注入 PDF %1：%2 页，%3 KB，%4 ms")
+                          .arg(QFileInfo(path).fileName())
+                          .arg(m_active->pageCount())
+                          .arg(double(QFileInfo(path).size()) / 1024.0, 0, 'f', 0)
+                          .arg(timer.elapsed()));
         statusBar()->showMessage(
             QStringLiteral("已注入 PDF %1").arg(QFileInfo(path).fileName()), 4000);
         return;
@@ -447,14 +477,23 @@ void MainWindow::saveDocumentAs()
 
     const QByteArray pdf = readPdfBytes(info.sourcePdf);
     if (pdf.isEmpty()) {
+        AppLog::write(QStringLiteral("save"),
+                      QStringLiteral("读取源 PDF 失败：%1").arg(info.sourcePdf));
         QMessageBox::warning(this, QStringLiteral("保存失败"),
                              QStringLiteral("无法读取源 PDF：%1").arg(info.sourcePdf));
         return;
     }
     if (!AnnotationBundle::write(path, pdf, m_active->exportInk(), &err)) {
+        AppLog::write(QStringLiteral("save"),
+                      QStringLiteral("保存批注包失败：%1（%2）").arg(path, err));
         QMessageBox::warning(this, QStringLiteral("保存失败"), err);
         return;
     }
+    AppLog::write(QStringLiteral("save"),
+                  QStringLiteral("保存批注包 %1：%2 KB，批注 %3 条")
+                      .arg(QFileInfo(path).fileName())
+                      .arg(double(QFileInfo(path).size()) / 1024.0, 0, 'f', 0)
+                      .arg(m_active->strokeCount()));
 
     m_docs[index].bundlePath = path;
     m_docs[index].title = QFileInfo(path).fileName();

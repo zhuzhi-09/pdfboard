@@ -3,6 +3,7 @@
 #include <QScrollArea>
 
 class QAbstractButton;
+class QLabel;
 class QPushButton;
 class QWidget;
 
@@ -33,14 +34,26 @@ protected:
 private slots:
     void onAutoStartToggled(bool on);
     void onRegisterPdf();
+    void onChooseSaveDir();
+    void onResetSaveDir();
+    void onDebugLogToggled(bool on);
+    void onOpenLogDir();
 
 private:
     void buildUi();
     void centreColumn();
+    void refreshSavePath();
+    void refreshLogPath();
 
     QWidget         *m_body      = nullptr;   // the scrolling body
     QWidget         *m_column    = nullptr;   // the centred content column
     QAbstractButton *m_autoStart = nullptr;
     QPushButton     *m_register  = nullptr;
+    QLabel          *m_savePathLabel = nullptr;
+    QPushButton     *m_chooseSaveDir = nullptr;
+    QPushButton     *m_resetSaveDir  = nullptr;
+    QAbstractButton *m_debugLog      = nullptr;
+    QLabel          *m_logPathLabel  = nullptr;
+    QPushButton     *m_openLogDir    = nullptr;
     int              m_maxColumn = 0;
 };
