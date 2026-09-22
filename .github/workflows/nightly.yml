@@ -89,8 +89,18 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist/stage | Out-Null
           Copy-Item build/pdfboard.exe dist/stage/
-          & "$env:QT_ROOT_DIR/bin/windeployqt.exe" --release --no-system-d3d-compiler --compiler-runtime dist/stage/pdfboard.exe
+          # 不打包 vc_redist：安装器是按当前用户安装（不弹 UAC），本来也无法安装它；
+          # VC++ 运行库是 Windows 上的常见组件。
+          # 不打包全部语言翻译：只随包附上本程序使用的简体中文。
+          & "$env:QT_ROOT_DIR/bin/windeployqt.exe" --release --no-translations `
+              --no-system-d3d-compiler dist/stage/pdfboard.exe
           if ($LASTEXITCODE -ne 0) { throw "windeployqt failed" }
+          # D3D12 着色器编译器与本程序无关（本地包不含这两者，实测运行正常）。
+          Remove-Item dist/stage/dxcompiler.dll, dist/stage/dxil.dll, dist/stage/vc_redist.x64.exe -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Force dist/stage/translations | Out-Null
+          Copy-Item "$env:QT_ROOT_DIR/translations/*zh_CN.qm" dist/stage/translations/ -ErrorAction SilentlyContinue
+          Get-ChildItem dist/stage -Recurse -File | Measure-Object Length -Sum |
+            ForEach-Object { "staged: {0:N1} MB" -f ($_.Sum / 1MB) }
 
       # 配置了 secrets.SIGN_PFX_BASE64 / SIGN_PFX_PASS 才会执行
       - name: Sign app executable (optional)

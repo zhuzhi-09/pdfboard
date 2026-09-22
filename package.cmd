@@ -32,7 +32,12 @@ echo [package] 2/3 collecting runtime...
 if exist "%~dp0dist\stage" rmdir /s /q "%~dp0dist\stage"
 mkdir "%~dp0dist\stage"
 copy /y "%~dp0build\pdfboard.exe" "%~dp0dist\stage\" >nul || ( echo [package] copy failed & exit /b 1 )
-"%QT%\bin\windeployqt.exe" --release --no-system-d3d-compiler --compiler-runtime "%~dp0dist\stage\pdfboard.exe" || ( echo [package] windeployqt failed & exit /b 1 )
+rem No --compiler-runtime (the per-user install cannot elevate to install it),
+rem no translation bundle except the Chinese one the app asks for.
+"%QT%\bin\windeployqt.exe" --release --no-translations --no-system-d3d-compiler "%~dp0dist\stage\pdfboard.exe" || ( echo [package] windeployqt failed & exit /b 1 )
+del /q "%~dp0dist\stage\dxcompiler.dll" "%~dp0dist\stage\dxil.dll" "%~dp0dist\stage\vc_redist.x64.exe" 2>nul
+mkdir "%~dp0dist\stage\translations" 2>nul
+copy /y "%QT%\translations\*zh_CN.qm" "%~dp0dist\stage\translations\" >nul 2>nul
 
 echo [package] 3/3 building installer...
 "%ISCC%" "%~dp0installer\pdfboard.iss" || ( echo [package] Inno Setup failed & exit /b 1 )
