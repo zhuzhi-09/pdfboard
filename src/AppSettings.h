@@ -71,4 +71,9 @@ bool setWordOpenMode(int mode, QString *errorOut = nullptr);
 bool wordNagFixEnabled();
 bool setWordNagFixEnabled(bool on, QString *errorOut = nullptr);
 
+// Timestamp (ms since epoch) of the last quiet update check, so the settings
+// page asks the network at most about once a day.
+qint64 lastUpdateCheckMs();
+bool setLastUpdateCheckMs(qint64 ms, QString *errorOut = nullptr);
+
 }   // namespace AppSettings

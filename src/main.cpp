@@ -7,6 +7,7 @@
 #include "MemProbe.h"
 #include "PdfCanvas.h"
 #include "Theme.h"
+#include "UpdateChecker.h"
 #include "WordConvert.h"
 
 #include <QApplication>
@@ -1251,6 +1252,96 @@ static int runDocxSelfTest()
     return failed == 0 ? 0 : 3;
 }
 
+// Headless self test:  pdfboard.exe --selftest-update
+// No network: the channel payloads are parsed from fixtures, so the numeric
+// version comparison and both parsers can be locked without a server.
+static int runUpdateSelfTest()
+{
+    int failed = 0;
+    auto check = [&failed](const char *what, int got, int want) {
+        const bool ok = (got == want);
+        if (!ok)
+            ++failed;
+        out(QStringLiteral("[selftest] %1: got %2 want %3 -> %4")
+                .arg(QString::fromLatin1(what), -28)
+                .arg(got).arg(want)
+                .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+    };
+    using UpdateChecker::compareVersion;
+
+    // Numeric, component-wise - "1.4.10" is newer than "1.4.2".
+    check("version: equal", compareVersion(QStringLiteral("1.4.2"),
+                                          QStringLiteral("1.4.2")), 0);
+    check("version: newer", compareVersion(QStringLiteral("1.4.3"),
+                                           QStringLiteral("1.4.2")), 1);
+    check("version: older", compareVersion(QStringLiteral("1.3.9"),
+                                           QStringLiteral("1.4.0")), -1);
+    check("version: string trap", compareVersion(QStringLiteral("1.4.10"),
+                                                 QStringLiteral("1.4.2")), 1);
+    check("version: shorter is older", compareVersion(QStringLiteral("1.4"),
+                                                      QStringLiteral("1.4.1")), -1);
+    check("version: padded equal", compareVersion(QStringLiteral("1.4.0"),
+                                                  QStringLiteral("1.4")), 0);
+
+    // The fallback server payload (a trimmed copy of the live response shape).
+    const QByteArray fallback = QByteArrayLiteral(R"({
+        "product":"PDFBoard","version":"1.4.2","tag":"v1.4.2","commit":"ec06228",
+        "notes":"n","downloads":{"setup":"/download/PDFBoard-latest-setup.exe",
+        "portable":"/download/PDFBoard-latest-portable.zip"},
+        "assets":[{"name":"PDFBoard-1.4.2-setup.exe","size":17524694,
+        "sha256":"DCDF2C07AA","url":"https://x/download/PDFBoard-1.4.2-setup.exe",
+        "stable_url":"https://x/download/PDFBoard-latest-setup.exe"}]})");
+    const auto mirror =
+        UpdateChecker::parseFallbackJson(fallback, QStringLiteral("1.4.0"));
+    check("mirror: parsed", mirror.valid ? 1 : 0, 1);
+    check("mirror: version", mirror.version == QStringLiteral("1.4.2") ? 1 : 0, 1);
+    check("mirror: newer than local", mirror.available ? 1 : 0, 1);
+    check("mirror: uses versioned url",
+          mirror.setupUrl.endsWith(QStringLiteral("PDFBoard-1.4.2-setup.exe")) ? 1 : 0, 1);
+    check("mirror: sha256 normalised",
+          mirror.setupSha256 == QStringLiteral("dcdf2c07aa") ? 1 : 0, 1);
+    check("mirror: size", int(mirror.setupSize), 17524694);
+    const auto same = UpdateChecker::parseFallbackJson(fallback, QStringLiteral("1.4.2"));
+    check("mirror: same version not newer", same.available ? 1 : 0, 0);
+    check("mirror: garbage rejected",
+          UpdateChecker::parseFallbackJson(QByteArrayLiteral("not json"),
+                                           QStringLiteral("1.0")).valid ? 1 : 0, 0);
+
+    // GitHub: with and without the per-asset digest.
+    const QByteArray ghWithDigest = QByteArrayLiteral(R"({
+        "tag_name":"v1.5.0","body":"notes","html_url":"https://github.com/r/rel",
+        "assets":[{"name":"PDFBoard-1.5.0-setup.exe","size":10,
+        "digest":"sha256:AABBCC","browser_download_url":"https://x/setup.exe"}]})");
+    const auto gh = UpdateChecker::parseGitHubJson(ghWithDigest, QStringLiteral("1.4.2"));
+    check("github: parsed", gh.valid ? 1 : 0, 1);
+    check("github: version from tag", gh.version == QStringLiteral("1.5.0") ? 1 : 0, 1);
+    check("github: newer", gh.available ? 1 : 0, 1);
+    check("github: digest stripped", gh.setupSha256 == QStringLiteral("aabbcc") ? 1 : 0, 1);
+
+    const QByteArray ghNoDigest = QByteArrayLiteral(R"({
+        "tag_name":"v1.5.0","body":"","html_url":"https://github.com/r/rel",
+        "assets":[{"name":"PDFBoard-1.5.0-setup.exe","size":10,
+        "browser_download_url":"https://x/setup.exe"}]})");
+    const auto gh2 = UpdateChecker::parseGitHubJson(ghNoDigest, QStringLiteral("1.4.2"));
+    check("github: no digest -> empty hash", gh2.setupSha256.isEmpty() ? 1 : 0, 1);
+    check("github: page url kept",
+          gh2.pageUrl == QStringLiteral("https://github.com/r/rel") ? 1 : 0, 1);
+    check("github: non-release rejected",
+          UpdateChecker::parseGitHubJson(QByteArrayLiteral("{}"),
+                                         QStringLiteral("1.0")).valid ? 1 : 0, 0);
+
+    // The running version must come from the executable's own resource.
+    const QString current = UpdateChecker::currentVersion();
+    check("current version readable", current.isEmpty() ? 0 : 1, 1);
+    check("current version is 3 parts",
+          current.count(QLatin1Char('.')) >= 2 ? 1 : 0, 1);
+    (void)UpdateChecker::isInstalledCopy();
+
+    out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")
+                    : QStringLiteral("[selftest] %1 CHECK(S) FAILED").arg(failed));
+    return failed == 0 ? 0 : 3;
+}
+
 // Single-instance plumbing: the first process owns a named local socket and
 // every later launch hands its document paths over before exiting, so opening a
 // file never pops up a second window. QtNetwork backs this; no WinAPI needed.
@@ -1393,6 +1484,7 @@ int main(int argc, char **argv)
     const int themeIdx = args.indexOf(QStringLiteral("--selftest-theme"));
     const int homeIdx = args.indexOf(QStringLiteral("--selftest-home"));
     const int docxIdx = args.indexOf(QStringLiteral("--selftest-docx"));
+    const int updateIdx = args.indexOf(QStringLiteral("--selftest-update"));
 
     // The shipping build is a GUI executable (no console window when the user
     // double-clicks it). The console-based modes still need their output, so
@@ -1404,7 +1496,8 @@ int main(int argc, char **argv)
         || uiIdx >= 0
         || themeIdx >= 0
         || homeIdx >= 0
-        || docxIdx >= 0) {
+        || docxIdx >= 0
+        || updateIdx >= 0) {
         attachConsoleForCli();
     }
 
@@ -1428,6 +1521,9 @@ int main(int argc, char **argv)
 
     if (docxIdx >= 0)
         return runDocxSelfTest();
+
+    if (updateIdx >= 0)
+        return runUpdateSelfTest();
 
     // With a window already running, this process only hands its paths over and
     // exits: a file association, autostart or second command line must never

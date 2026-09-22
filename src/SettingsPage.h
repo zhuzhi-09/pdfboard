@@ -1,11 +1,14 @@
 #pragma once
 
+#include "UpdateChecker.h"
+
 #include <QScrollArea>
 
 class QAbstractButton;
 class QButtonGroup;
 class QLabel;
 class QPushButton;
+class QProgressBar;
 class QWidget;
 
 // Full-area settings PAGE, shown as one page inside MainWindow's stack - not a
@@ -97,6 +100,49 @@ private:
     QAbstractButton *m_wordNagFix     = nullptr;
     QPushButton     *m_restoreWordNag = nullptr;
     QLabel          *m_wordNagNote    = nullptr;
+
+    // --- 更新 ---------------------------------------------------------------
+    UpdateChecker::Client *m_updateClient = nullptr;
+    QProgressBar *m_updateProgress = nullptr;
+    QLabel       *m_updateVersion  = nullptr;   // 当前版本 / 线上最新
+    QLabel       *m_updateNote     = nullptr;   // state line
+    QPushButton  *m_updateGh       = nullptr;
+    QPushButton  *m_updateMirror   = nullptr;
+    QPushButton  *m_updateSite     = nullptr;
+    QPushButton  *m_updatePortableGh     = nullptr;
+    QPushButton  *m_updatePortableMirror = nullptr;
+
+    // Last successful check per channel (0 = GitHub, 1 = fallback server): only
+    // the fields the panel needs, so no request is repeated.
+    QString m_updateSetupUrl[2];
+    QString m_updateSetupSha[2];
+    QString m_updatePortableUrl[2];
+    QString m_updatePageUrl[2];
+    bool    m_updateChecked[2] = { false, false };
+    bool    m_updateChecking = false;
+    bool    m_updateCheckForInstall = false;
+    int     m_updateCheckChannel = 0;
+    int     m_updateQueuedChannel = -1;
+    bool    m_updateDownloading = false;
+    bool    m_updateHelperFailed = false;
+    QString m_updateOnline[2];      // version each channel last announced
+
+private slots:
+    void onUpdateChecked(const UpdateChecker::UpdateInfo &info);
+    void onUpdateFailed(const QString &reason);
+    void onUpdateProgress(qint64 received, qint64 total);
+    void onUpdateStage(const QString &text);
+    void onUpdateSetupReady(const QString &path);
+    void onUpdateSetupUnverified(const QString &pageUrl);
+
+private:
+    void beginUpdateInstall(int channel);
+    void startUpdateCheck(int channel, bool forInstall);
+    void startUpdateDownload(int channel);
+    void finishUpdateBusy();
+    void setUpdateState(const QString &text);
+    void refreshUpdateVersionLine();
+    void openPortablePage(int channel);
 
     int           m_maxColumn = 0;
 };

@@ -28,6 +28,12 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
+#include "UpdateChecker.h"
+
+#include <QCoreApplication>
+#include <QDateTime>
+#include <QProgressBar>
+
 #include <windows.h>
 
 namespace {
@@ -206,7 +212,16 @@ QString pageSheet(const QFont &font)
                " border: 1px solid %15; }"
                "QPushButton#settingsSegment:checked:pressed {"
                " background: %15;"
-               " border: 1px solid %15; }")
+               " border: 1px solid %15; }"
+               // The updater's progress bar follows the same tokens, so it also
+               // repaints correctly after a theme switch.
+               "QProgressBar {"
+               " color: %2;"
+               " background: %7;"
+               " border: 1px solid %4;"
+               " border-radius: %8;"
+               " text-align: center; }"
+               "QProgressBar::chunk { background: %14; border-radius: %8; }")
         .arg(Theme::rgba(c.text))
         .arg(Theme::rgba(c.textMuted))
         // Cards are a surface, not paper: paper stays white in dark mode too
@@ -756,6 +771,134 @@ void SettingsPage::buildUi()
     }
     col->addWidget(about.frame);
 
+    // --- 更新 ---------------------------------------------------------------
+    col->addSpacing(Theme::Space3);
+    col->addWidget(makeSectionHeader(m_column, QStringLiteral("更新")));
+    col->addWidget(makeSectionBody(m_column, QStringLiteral(
+        "安装包下载完成后会先校验 SHA-256，校验通过才会运行安装程序，不合格的文件直接丢弃。")));
+
+    const Card update = makeCard(m_column);
+    {
+        auto *versionRow = new QWidget(update.frame);
+        auto *versionCol = new QVBoxLayout(versionRow);
+        versionCol->setContentsMargins(Theme::Space4, Theme::Space3, Theme::Space4, Theme::Space3);
+        versionCol->setSpacing(Theme::Space1);
+
+        auto *versionTitle = new QLabel(QStringLiteral("版本"), versionRow);
+        versionTitle->setFont(Theme::chromeFont(versionRow->font()));
+        versionCol->addWidget(versionTitle);
+
+        m_updateVersion = new QLabel(versionRow);
+        m_updateVersion->setObjectName(QStringLiteral("settingsRowBody"));
+        m_updateVersion->setFont(Theme::scaledFont(versionRow->font(), 0.95, QFont::Normal));
+        m_updateVersion->setWordWrap(true);
+        versionCol->addWidget(m_updateVersion);
+        update.col->addWidget(versionRow);
+    }
+    update.col->addWidget(makeRowSeparator(update.frame));
+    {
+        auto *buttonsRow = new QWidget(update.frame);
+        auto *buttonsLayout = new QHBoxLayout(buttonsRow);
+        buttonsLayout->setContentsMargins(Theme::Space4, Theme::Space3, Theme::Space4, Theme::Space3);
+        buttonsLayout->setSpacing(Theme::Space2);
+
+        m_updateGh = new QPushButton(QStringLiteral("GitHub 下载并安装"), buttonsRow);
+        m_updateGh->setObjectName(QStringLiteral("settingsPrimary"));
+        m_updateMirror = new QPushButton(QStringLiteral("备用服务器 下载并安装"), buttonsRow);
+        m_updateMirror->setToolTip(QStringLiteral("备选方案，不保证实时可用"));
+        m_updateSite = new QPushButton(QStringLiteral("打开备用下载网站"), buttonsRow);
+        for (QPushButton *button : { m_updateGh, m_updateMirror, m_updateSite }) {
+            button->setCursor(Qt::PointingHandCursor);
+            button->setFont(Theme::chromeFont(buttonsRow->font()));
+            button->setMinimumHeight(int(m.touch * 0.72));
+            buttonsLayout->addWidget(button);
+        }
+        buttonsLayout->addStretch(1);
+        update.col->addWidget(buttonsRow);
+    }
+    update.col->addWidget(makeRowSeparator(update.frame));
+    {
+        auto *portable = new QWidget(update.frame);
+        auto *h = new QHBoxLayout(portable);
+        h->setContentsMargins(0, 0, 0, 0);
+        h->setSpacing(Theme::Space2);
+        m_updatePortableGh = new QPushButton(QStringLiteral("GitHub 便携版"), portable);
+        m_updatePortableMirror = new QPushButton(QStringLiteral("备用便携版"), portable);
+        for (QPushButton *button : { m_updatePortableGh, m_updatePortableMirror }) {
+            button->setCursor(Qt::PointingHandCursor);
+            button->setFont(Theme::chromeFont(font()));
+            button->setMinimumHeight(int(m.touch * 0.72));
+            h->addWidget(button);
+        }
+        update.col->addWidget(makeTextRow(
+            update.frame, QStringLiteral("便携版"),
+            QStringLiteral("压缩包交给浏览器下载，解压后覆盖即可，不运行安装程序。"),
+            portable, Theme::Space3, Theme::Space3));
+    }
+    update.col->addWidget(makeRowSeparator(update.frame));
+    {
+        auto *progressRow = new QWidget(update.frame);
+        auto *progressCol = new QVBoxLayout(progressRow);
+        progressCol->setContentsMargins(Theme::Space4, Theme::Space3, Theme::Space4, Theme::Space3);
+        progressCol->setSpacing(Theme::Space2);
+
+        m_updateProgress = new QProgressBar(progressRow);
+        m_updateProgress->setRange(0, 100);
+        m_updateProgress->setValue(0);
+        m_updateProgress->setMinimumHeight(int(m.touch * 0.5));
+        m_updateProgress->setVisible(false);
+        progressCol->addWidget(m_updateProgress);
+
+        m_updateNote = new QLabel(progressRow);
+        m_updateNote->setObjectName(QStringLiteral("settingsRowBody"));
+        m_updateNote->setFont(Theme::scaledFont(progressRow->font(), 0.95, QFont::Normal));
+        m_updateNote->setWordWrap(true);
+        progressCol->addWidget(m_updateNote);
+        update.col->addWidget(progressRow);
+    }
+    col->addWidget(update.frame);
+
+    m_updateClient = new UpdateChecker::Client(this);
+    connect(m_updateClient, &UpdateChecker::Client::checked, this, &SettingsPage::onUpdateChecked);
+    connect(m_updateClient, &UpdateChecker::Client::failed, this, &SettingsPage::onUpdateFailed);
+    connect(m_updateClient, &UpdateChecker::Client::progress, this, &SettingsPage::onUpdateProgress);
+    connect(m_updateClient, &UpdateChecker::Client::stage, this, &SettingsPage::onUpdateStage);
+    connect(m_updateClient, &UpdateChecker::Client::setupReady, this, &SettingsPage::onUpdateSetupReady);
+    connect(m_updateClient, &UpdateChecker::Client::setupUnverified, this,
+            &SettingsPage::onUpdateSetupUnverified);
+    connect(m_updateGh, &QPushButton::clicked, this, [this] { beginUpdateInstall(0); });
+    connect(m_updateMirror, &QPushButton::clicked, this, [this] { beginUpdateInstall(1); });
+    connect(m_updateSite, &QPushButton::clicked, this, [] {
+        UpdateChecker::Client::openInBrowser(
+            QStringLiteral("https://pdz-update-download-latest.zhuzhi.site/"));
+    });
+    connect(m_updatePortableGh, &QPushButton::clicked, this, [this] { openPortablePage(0); });
+    connect(m_updatePortableMirror, &QPushButton::clicked, this, [this] { openPortablePage(1); });
+
+    if (!UpdateChecker::isInstalledCopy()) {
+        // A portable copy is updated by replacing files; running a setup would
+        // install a second, unrelated copy.
+        for (QPushButton *button : { m_updateGh, m_updateMirror }) {
+            button->setEnabled(false);
+            button->setToolTip(QStringLiteral("便携版：请用下面的便携版链接覆盖更新"));
+        }
+        m_updateNote->setText(QStringLiteral("便携版：请用下面的便携版链接下载后覆盖，无需安装。"));
+    } else {
+        m_updateNote->setText(QStringLiteral("点击上面的按钮即可下载并安装最新版本。"));
+    }
+    refreshUpdateVersionLine();
+
+    {
+        // One quiet check a day, GitHub only: it just fills in 线上最新. Any
+        // failure is ignored - an offline classroom never sees a dialog.
+        const qint64 last = AppSettings::lastUpdateCheckMs();
+        const qint64 now = QDateTime::currentMSecsSinceEpoch();
+        if (last <= 0 || now - last > qint64(24 * 60 * 60 * 1000)) {
+            AppSettings::setLastUpdateCheckMs(now, nullptr);
+            startUpdateCheck(0, false);
+        }
+    }
+
     col->addStretch(1);
 }
 
@@ -882,6 +1025,212 @@ void SettingsPage::refreshTheme()
     refreshWordNag();
     refreshThemeNote();
     update();
+}
+
+void SettingsPage::setUpdateState(const QString &text)
+{
+    if (m_updateNote)
+        m_updateNote->setText(text);
+}
+
+void SettingsPage::refreshUpdateVersionLine()
+{
+    if (!m_updateVersion)
+        return;
+    QString text = QStringLiteral("当前版本 %1").arg(UpdateChecker::currentVersion());
+    if (!m_updateOnline[0].isEmpty())
+        text += QStringLiteral(" · 线上最新 %1").arg(m_updateOnline[0]);
+    m_updateVersion->setText(text);
+}
+
+void SettingsPage::finishUpdateBusy()
+{
+    m_updateDownloading = false;
+    m_updateChecking = false;
+    m_updateCheckForInstall = false;
+    if (m_updateProgress) {
+        m_updateProgress->setVisible(false);
+        m_updateProgress->setRange(0, 100);
+        m_updateProgress->setValue(0);
+    }
+    if (UpdateChecker::isInstalledCopy()) {
+        if (m_updateGh)
+            m_updateGh->setEnabled(true);
+        if (m_updateMirror)
+            m_updateMirror->setEnabled(true);
+    }
+}
+
+void SettingsPage::startUpdateCheck(int channel, bool forInstall)
+{
+    if (!m_updateClient)
+        return;
+    m_updateChecking = true;
+    m_updateCheckChannel = channel;
+    m_updateCheckForInstall = forInstall;
+    if (forInstall) {
+        setUpdateState(QStringLiteral("正在检查更新…"));
+        if (m_updateProgress) {
+            m_updateProgress->setRange(0, 0);        // indeterminate while checking
+            m_updateProgress->setVisible(true);
+        }
+        if (UpdateChecker::isInstalledCopy()) {
+            if (m_updateGh)
+                m_updateGh->setEnabled(false);
+            if (m_updateMirror)
+                m_updateMirror->setEnabled(false);
+        }
+    }
+    m_updateClient->check(static_cast<UpdateChecker::Channel>(channel));
+}
+
+void SettingsPage::beginUpdateInstall(int channel)
+{
+    if (m_updateDownloading || !m_updateClient)
+        return;
+    if (m_updateChecked[channel]) {
+        startUpdateDownload(channel);
+        return;
+    }
+    if (m_updateChecking) {
+        if (m_updateCheckChannel == channel)
+            m_updateCheckForInstall = true;          // upgrade the quiet check
+        else
+            m_updateQueuedChannel = channel;         // run once this one finishes
+        return;
+    }
+    startUpdateCheck(channel, true);
+}
+
+void SettingsPage::startUpdateDownload(int channel)
+{
+    m_updateChecking = false;
+    m_updateCheckForInstall = false;
+    m_updateDownloading = true;
+    if (m_updateProgress) {
+        m_updateProgress->setRange(0, 100);
+        m_updateProgress->setValue(0);
+        m_updateProgress->setVisible(true);
+    }
+    UpdateChecker::UpdateInfo info;
+    info.valid = true;
+    info.version = m_updateOnline[channel];
+    info.setupUrl = m_updateSetupUrl[channel];
+    info.setupSha256 = m_updateSetupSha[channel];
+    info.pageUrl = m_updatePageUrl[channel];
+    m_updateClient->downloadSetup(static_cast<UpdateChecker::Channel>(channel), info);
+}
+
+void SettingsPage::onUpdateChecked(const UpdateChecker::UpdateInfo &info)
+{
+    const int channel = m_updateCheckChannel;
+    const bool forInstall = m_updateCheckForInstall;
+    m_updateChecking = false;
+    m_updateCheckForInstall = false;
+
+    if (info.valid) {
+        m_updateChecked[channel] = true;
+        m_updateSetupUrl[channel] = info.setupUrl;
+        m_updateSetupSha[channel] = info.setupSha256;
+        m_updatePortableUrl[channel] = info.portableUrl;
+        m_updatePageUrl[channel] = info.pageUrl;
+        m_updateOnline[channel] = info.version;
+        if (!info.version.isEmpty())
+            refreshUpdateVersionLine();
+    }
+
+    if (forInstall) {
+        if (info.valid) {
+            startUpdateDownload(channel);
+            return;                                  // the download owns the busy state
+        }
+        finishUpdateBusy();
+        setUpdateState(QStringLiteral("检查更新失败，请稍后再试。"));
+    }
+
+    if (m_updateQueuedChannel >= 0 && !m_updateDownloading) {
+        const int queued = m_updateQueuedChannel;
+        m_updateQueuedChannel = -1;
+        startUpdateCheck(queued, true);
+    }
+}
+
+void SettingsPage::onUpdateFailed(const QString &reason)
+{
+    if (m_updateDownloading) {
+        finishUpdateBusy();
+        setUpdateState(QStringLiteral("下载失败：%1").arg(reason));
+        return;
+    }
+    if (m_updateChecking) {
+        const bool forInstall = m_updateCheckForInstall;
+        m_updateChecking = false;
+        m_updateCheckForInstall = false;
+        if (forInstall) {
+            finishUpdateBusy();
+            setUpdateState(QStringLiteral("更新失败：%1").arg(reason));
+        }
+        if (m_updateQueuedChannel >= 0) {
+            const int queued = m_updateQueuedChannel;
+            m_updateQueuedChannel = -1;
+            startUpdateCheck(queued, true);
+        }
+        return;
+    }
+    // Only reached when the relaunch helper could not be written: keep running.
+    m_updateHelperFailed = true;
+    finishUpdateBusy();
+    setUpdateState(QStringLiteral("无法准备安装脚本：%1").arg(reason));
+}
+
+void SettingsPage::onUpdateProgress(qint64 received, qint64 total)
+{
+    if (!m_updateProgress || !m_updateDownloading)
+        return;
+    if (total > 0) {
+        m_updateProgress->setRange(0, 100);
+        m_updateProgress->setValue(int(qBound<qint64>(qint64(0), received * 100 / total,
+                                                      qint64(100))));
+    } else {
+        m_updateProgress->setRange(0, 0);
+    }
+}
+
+void SettingsPage::onUpdateStage(const QString &text)
+{
+    setUpdateState(text);
+}
+
+void SettingsPage::onUpdateSetupReady(const QString &path)
+{
+    m_updateDownloading = false;
+    m_updateHelperFailed = false;
+    setUpdateState(QStringLiteral("校验通过，正在启动安装程序…"));
+    if (m_updateClient)
+        m_updateClient->runInstallerAndRestart(path);
+    if (m_updateHelperFailed)
+        return;                       // the helper could not be written: stay open
+    QCoreApplication::quit();
+}
+
+void SettingsPage::onUpdateSetupUnverified(const QString &pageUrl)
+{
+    finishUpdateBusy();
+    setUpdateState(QStringLiteral("该渠道未提供校验值，已改为打开下载页"));
+    UpdateChecker::Client::openInBrowser(pageUrl);
+}
+
+void SettingsPage::openPortablePage(int channel)
+{
+    QString url = m_updatePortableUrl[channel];
+    if (url.isEmpty()) {
+        url = channel == 0
+                  ? (m_updatePageUrl[0].isEmpty()
+                         ? QStringLiteral("https://github.com/zhuzhi-09/pdfboard/releases/latest")
+                         : m_updatePageUrl[0])
+                  : QStringLiteral("https://pdz-update-download-latest.zhuzhi.site/");
+    }
+    UpdateChecker::Client::openInBrowser(url);
 }
 
 void SettingsPage::refreshThemeNote()

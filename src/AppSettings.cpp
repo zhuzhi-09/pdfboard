@@ -280,6 +280,28 @@ bool AppSettings::setThemeMode(int mode, QString *errorOut)
     return true;
 }
 
+qint64 AppSettings::lastUpdateCheckMs()
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    return s.value(QStringLiteral("LastUpdateCheckMs"), qint64(0)).toLongLong();
+}
+
+bool AppSettings::setLastUpdateCheckMs(qint64 ms, QString *errorOut)
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    s.setValue(QStringLiteral("LastUpdateCheckMs"), ms);
+    s.sync();
+
+    if (s.status() != QSettings::NoError) {
+        if (errorOut)
+            *errorOut = QStringLiteral("无法写入注册表（更新时间戳）");
+        return false;
+    }
+    if (errorOut)
+        errorOut->clear();
+    return true;
+}
+
 int AppSettings::wordOpenMode()
 {
     QSettings s(kAppKey, QSettings::NativeFormat);
