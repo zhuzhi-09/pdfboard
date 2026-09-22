@@ -42,6 +42,18 @@ jobs:
           "version=$base-nightly.$sha" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
           "sha=$sha" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
 
+      # 代码签名是可选步骤：仓库里配置了签名密钥才会执行，没配置就跳过
+      # （fork 本仓库的人不会因为缺少密钥而构建失败）。
+      # 注意：secrets 不能直接写在 if 里，所以先探测再输出布尔值。
+      - name: Detect signing secrets
+        id: signing
+        shell: pwsh
+        env:
+          PFX: ${{ secrets.SIGN_PFX_BASE64 }}
+        run: |
+          if ($env:PFX) { "enabled=true" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT }
+          else          { "enabled=false" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT }
+
       - name: Install Qt
         uses: jurplel/install-qt-action@v4
         with:
@@ -71,12 +83,9 @@ jobs:
           & "$env:QT_ROOT_DIR/bin/windeployqt.exe" --release --no-system-d3d-compiler --compiler-runtime dist/stage/pdfboard.exe
           if ($LASTEXITCODE -ne 0) { throw "windeployqt failed" }
 
-      # 代码签名是可选步骤：仓库里配置了签名密钥才会执行，没配置就跳过
-      # （fork 本仓库的人不会因为缺少密钥而构建失败）。
-      #   secrets.SIGN_PFX_BASE64 - .pfx 证书的 base64
-      #   secrets.SIGN_PFX_PASS   - .pfx 的密码
+      # 配置了 secrets.SIGN_PFX_BASE64 / SIGN_PFX_PASS 才会执行
       - name: Sign app executable (optional)
-        if: ${{ secrets.SIGN_PFX_BASE64 != '' }}
+        if: steps.signing.outputs.enabled == 'true'
         shell: pwsh
         env:
           SIGN_PFX_BASE64: ${{ secrets.SIGN_PFX_BASE64 }}
@@ -100,7 +109,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
 
       - name: Sign installer (optional)
-        if: ${{ secrets.SIGN_PFX_BASE64 != '' }}
+        if: steps.signing.outputs.enabled == 'true'
         shell: pwsh
         env:
           SIGN_PFX_BASE64: ${{ secrets.SIGN_PFX_BASE64 }}
