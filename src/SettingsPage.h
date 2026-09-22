@@ -17,6 +17,8 @@ class QWidget;
 //     desktop app can actually become the default handler.
 //   * 「外观」 - 系统 / 浅色 / 深色, stored through AppSettings and applied by
 //     the host through the themeChanged() signal.
+//   * 「打开 Word 文档时」 - 每次询问 / 批注 / 用 Word 打开, stored through
+//     AppSettings; MainWindow reads the mode whenever a Word file is opened.
 //
 // Look: WinUI-style settings - the page sits on the canvas "desk" surface, a
 // centred column (at most metrics.touch * 14 wide) carries the title, muted
@@ -48,6 +50,7 @@ private slots:
     void onDebugLogToggled(bool on);
     void onOpenLogDir();
     void onThemePicked(int mode);
+    void onWordModePicked(int mode);
 
 private:
     void buildUi();
@@ -56,6 +59,7 @@ private:
     void refreshLogPath();
     void refreshThemeNote();
     void syncThemeSegment();
+    void syncWordSegment();
 
     QWidget         *m_body      = nullptr;   // the scrolling body
     QWidget         *m_column    = nullptr;   // the centred content column
@@ -74,5 +78,11 @@ private:
     QButtonGroup *m_themeGroup = nullptr;
     QPushButton  *m_themeSegments[3] = {};
     QLabel       *m_themeNote = nullptr;
+
+    // 打开 Word 文档时: the same three-segment control, persisted through
+    // AppSettings::setWordOpenMode (0 每次询问 / 1 批注 / 2 用 Word 打开).
+    QButtonGroup *m_wordGroup = nullptr;
+    QPushButton  *m_wordSegments[3] = {};
+
     int           m_maxColumn = 0;
 };

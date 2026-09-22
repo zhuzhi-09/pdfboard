@@ -393,6 +393,44 @@ void SettingsPage::buildUi()
                                        m_autoStart, Theme::Space3, Theme::Space3));
     col->addWidget(general.frame);
 
+    // --- Word 文档 ----------------------------------------------------------
+    col->addSpacing(Theme::Space3);
+    col->addWidget(makeSectionHeader(m_column, QStringLiteral("Word 文档")));
+
+    const Card wordOpen = makeCard(m_column);
+    {
+        auto *segments = new QWidget(wordOpen.frame);
+        auto *sh = new QHBoxLayout(segments);
+        sh->setContentsMargins(0, 0, 0, 0);
+        sh->setSpacing(0);
+
+        m_wordGroup = new QButtonGroup(this);
+        m_wordGroup->setExclusive(true);
+        const QString labels[3] = { QStringLiteral("每次询问"), QStringLiteral("批注"),
+                                    QStringLiteral("用 Word 打开") };
+        for (int i = 0; i < 3; ++i) {
+            auto *button = new QPushButton(labels[i], segments);
+            button->setObjectName(QStringLiteral("settingsSegment"));
+            button->setCheckable(true);
+            button->setFocusPolicy(Qt::NoFocus);
+            button->setCursor(Qt::PointingHandCursor);
+            button->setFont(Theme::chromeFont(font()));
+            button->setMinimumSize(QSize(m.touch * 2, m.touch));
+            m_wordGroup->addButton(button, i);
+            m_wordSegments[i] = button;
+            sh->addWidget(button, 1);
+        }
+        connect(m_wordGroup, &QButtonGroup::idClicked,
+                this, &SettingsPage::onWordModePicked);
+        syncWordSegment();
+
+        wordOpen.col->addWidget(makeTextRow(wordOpen.frame,
+                                            QStringLiteral("打开 Word 文档时"),
+                                            QStringLiteral("每次询问 / 批注 / 用 Word 打开"),
+                                            segments, Theme::Space4, Theme::Space4));
+    }
+    col->addWidget(wordOpen.frame);
+
     // --- 外观 ---------------------------------------------------------------
     col->addSpacing(Theme::Space3);
     col->addWidget(makeSectionHeader(m_column, QStringLiteral("外观")));
@@ -763,8 +801,15 @@ void SettingsPage::refreshTheme()
         segment->style()->unpolish(segment);
         segment->style()->polish(segment);
     }
+    for (QPushButton *segment : m_wordSegments) {
+        if (!segment)
+            continue;
+        segment->style()->unpolish(segment);
+        segment->style()->polish(segment);
+    }
 
     syncThemeSegment();
+    syncWordSegment();
     refreshThemeNote();
     update();
 }
@@ -811,6 +856,28 @@ void SettingsPage::onThemePicked(int mode)
     refreshThemeNote();
 }
 
+void SettingsPage::syncWordSegment()
+{
+    if (!m_wordGroup)
+        return;
+    QAbstractButton *button = m_wordGroup->button(AppSettings::wordOpenMode());
+    if (!button || button->isChecked())
+        return;
+    const QSignalBlocker block(m_wordGroup);
+    button->setChecked(true);
+}
+
+void SettingsPage::onWordModePicked(int mode)
+{
+    QString err;
+    if (!AppSettings::setWordOpenMode(mode, &err)) {
+        QMessageBox::warning(this, QStringLiteral("设置失败"), err);
+        syncWordSegment();      // show the value that is really stored
+        return;
+    }
+    syncWordSegment();
+}
+
 bool SettingsPage::eventFilter(QObject *, QEvent *event)
 {
     if (event->type() == QEvent::Resize)
@@ -854,10 +921,13 @@ void SettingsPage::onRegisterPdf()
 
     QMessageBox box(this);
     box.setWindowTitle(QStringLiteral("已注册为打开方式"));
-    box.setText(QStringLiteral("已把本程序注册为 PDF 与批注包 (.dpz) 的打开方式。"));
+    box.setText(QStringLiteral(
+        "已把本程序注册为 PDF、批注包 (.dpz) 以及 Word 文档 (.docx/.doc) 的打开方式。"));
     box.setInformativeText(QStringLiteral(
         "Windows 不允许程序直接抢占默认应用，需要你手动确认：\n"
         "接下来打开「默认应用」设置，在 .pdf（以及 .dpz）里选择「大屏 PDF 批注」。\n\n"
+        "Word 文档只注册为「打开方式」候选，默认仍由 Word 打开；\n"
+        "需要时可右键 .docx / .doc →「打开方式」选择本程序。\n\n"
         "确认后，双击任意 PDF 或 .dpz 批注包都会用本程序打开。"));
     box.setStandardButtons(QMessageBox::Ok | QMessageBox::Cancel);
     box.button(QMessageBox::Ok)->setText(QStringLiteral("打开设置"));

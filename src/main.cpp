@@ -17,6 +17,7 @@
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QHash>
+#include <QJsonObject>
 #include <QList>
 #include <QLocalServer>
 #include <QLocalSocket>
@@ -870,6 +871,213 @@ static int runDocxSelfTest()
         check("guard: .dpz target still works", okWrote ? 1 : 0, 1);
         check("guard: .dpz file created", QFileInfo::exists(dpz) ? 1 : 0, 1);
         QFile::remove(dpz);
+    }
+
+    // --- working copies under %TEMP%\pdfboard -------------------------------
+    // A document without a bundle of its own is 保存d into a per-source working
+    // copy in the temp directory. The path function is pure, so it is asserted
+    // without ever touching the disk.
+    const QString sourceA = QStringLiteral("D:\\dev\\tmp\\selftest-docx-a.pdf");
+    const QString sourceB = QStringLiteral("D:\\dev\\tmp\\selftest-docx-b.pdf");
+    const QString workA = AnnotationBundle::workingBundlePathFor(sourceA);
+    check("working path: deterministic",
+          int(workA == AnnotationBundle::workingBundlePathFor(sourceA)), 1);
+    check("working path: per source",
+          int(workA != AnnotationBundle::workingBundlePathFor(sourceB)), 1);
+    check("working path: .dpz suffix",
+          int(workA.endsWith(QStringLiteral(".dpz"))), 1);
+    {
+        QString temp = QDir::fromNativeSeparators(QDir::tempPath());
+        while (temp.endsWith(QLatin1Char('/')))
+            temp.chop(1);
+        const QString normalized = QDir::fromNativeSeparators(workA);
+        check("working path: under temp",
+              int(normalized.startsWith(temp + QLatin1Char('/'), Qt::CaseInsensitive)), 1);
+        check("working path: inside pdfboard",
+              int(normalized.contains(QStringLiteral("/pdfboard/work-"))), 1);
+    }
+
+    // --- content-identity fingerprint ---------------------------------------
+    // The restore gate: a working copy may only come back when the file behind
+    // the same PATH is still the same document content.
+    const QString fpPath =
+        QDir(QDir::tempPath()).filePath(QStringLiteral("pdfboard-selftest-fp.bin"));
+    QFile::remove(fpPath);
+    {
+        QFile seed(fpPath);
+        seed.open(QIODevice::WriteOnly | QIODevice::Truncate);
+        seed.write(QByteArray(200, 'A'));
+    }
+
+    const QJsonObject fpA = AnnotationBundle::sourceFingerprintFor(fpPath);
+    check("fingerprint: non-empty", int(!fpA.isEmpty()), 1);
+    check("fingerprint: stable",
+          int(fpA == AnnotationBundle::sourceFingerprintFor(fpPath)), 1);
+    check("fingerprint: matches itself",
+          int(AnnotationBundle::fingerprintMatches(fpA, fpA)), 1);
+    check("fingerprint: head is sha1 hex",
+          int(fpA.value(QStringLiteral("head")).toString().size() == 40), 1);
+    check("fingerprint: missing file empty",
+          int(AnnotationBundle::sourceFingerprintFor(
+                  fpPath + QStringLiteral(".missing")).isEmpty()), 1);
+
+    // One more byte: the size changes, so the fingerprint must not match.
+    {
+        QFile appender(fpPath);
+        appender.open(QIODevice::Append);
+        appender.write(QByteArrayLiteral("B"));
+    }
+    const QJsonObject fpB = AnnotationBundle::sourceFingerprintFor(fpPath);
+    check("fingerprint: append breaks match",
+          int(AnnotationBundle::fingerprintMatches(fpA, fpB)), 0);
+
+    // Same length, DIFFERENT content, original mtime restored: only the head
+    // hash can tell the two apart. This is the "not just a name match" proof.
+    {
+        QFile replacer(fpPath);
+        replacer.open(QIODevice::WriteOnly | QIODevice::Truncate);
+        replacer.write(QByteArray(200, 'B'));
+    }
+    {
+        const qint64 mtimeMs = qint64(fpA.value(QStringLiteral("mtimeMs")).toDouble());
+        constexpr qint64 kEpochOffsetMs = 11644473600000LL;   // 1601 -> 1970
+        ULARGE_INTEGER ticks;
+        ticks.QuadPart = static_cast<ULONGLONG>((mtimeMs + kEpochOffsetMs) * 10000LL);
+        FILETIME stamp;
+        stamp.dwLowDateTime = ticks.LowPart;
+        stamp.dwHighDateTime = ticks.HighPart;
+        const QString native = QDir::toNativeSeparators(fpPath);
+        HANDLE handle = CreateFileW(
+            reinterpret_cast<const wchar_t *>(native.utf16()),
+            FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+            OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        if (handle != INVALID_HANDLE_VALUE) {
+            SetFileTime(handle, nullptr, nullptr, &stamp);
+            CloseHandle(handle);
+        }
+    }
+    const QJsonObject fpC = AnnotationBundle::sourceFingerprintFor(fpPath);
+    check("fingerprint: same size kept",
+          int(fpC.value(QStringLiteral("size")) == fpA.value(QStringLiteral("size"))), 1);
+    check("fingerprint: same mtime restored",
+          int(fpC.value(QStringLiteral("mtimeMs"))
+              == fpA.value(QStringLiteral("mtimeMs"))), 1);
+    check("fingerprint: head differs",
+          int(fpC.value(QStringLiteral("head")) != fpA.value(QStringLiteral("head"))), 1);
+    check("fingerprint: name+size+mtime same -> no match",
+          int(AnnotationBundle::fingerprintMatches(fpA, fpC)), 0);
+    QFile::remove(fpPath);
+
+    // Round trip: a working copy written with the fingerprint must carry it
+    // back through annotations.json, and the restore gate must accept the SAME
+    // file while refusing an edited one. MainWindow::openPath relies on exactly
+    // this contract.
+    {
+        const QString workFile = AnnotationBundle::workingBundlePathFor(
+            QStringLiteral("D:\\dev\\tmp\\selftest-docx-source.pdf"));
+        QDir().mkpath(QFileInfo(workFile).absolutePath());
+        QFile::remove(workFile);
+
+        const QString rtSrc =
+            QDir(QDir::tempPath()).filePath(QStringLiteral("pdfboard-selftest-rt.pdf"));
+        QFile::remove(rtSrc);
+        {
+            QFile seed(rtSrc);
+            seed.open(QIODevice::WriteOnly | QIODevice::Truncate);
+            seed.write(QByteArrayLiteral("%PDF-1.4 selftest"));
+        }
+
+        const QJsonObject recorded = AnnotationBundle::sourceFingerprintFor(rtSrc);
+        QString rtErr;
+        check("round trip: write working copy",
+              int(AnnotationBundle::write(workFile, QByteArrayLiteral("%PDF-1.4 fake"),
+                                          QJsonObject(), &rtErr, recorded)), 1);
+        QByteArray rtPdf;
+        QJsonObject rtInk;
+        check("round trip: read working copy",
+              int(AnnotationBundle::read(workFile, &rtPdf, &rtInk, &rtErr)), 1);
+        check("round trip: fingerprint stored",
+              int(rtInk.value(QStringLiteral("source")).toObject() == recorded), 1);
+        check("round trip: gate accepts same file",
+              int(AnnotationBundle::fingerprintMatches(
+                      rtInk.value(QStringLiteral("source")).toObject(),
+                      AnnotationBundle::sourceFingerprintFor(rtSrc))), 1);
+        {
+            QFile appender(rtSrc);
+            appender.open(QIODevice::Append);
+            appender.write(QByteArrayLiteral("!"));
+        }
+        check("round trip: gate refuses edited file",
+              int(AnnotationBundle::fingerprintMatches(
+                      rtInk.value(QStringLiteral("source")).toObject(),
+                      AnnotationBundle::sourceFingerprintFor(rtSrc))), 0);
+
+        QFile::remove(workFile);
+        QFile::remove(rtSrc);
+    }
+
+    // --- 最近项目 refuses temp paths ----------------------------------------
+    // The stored list is restored through the raw registry afterwards, so an
+    // odd pre-existing value cannot make the restore itself fail.
+    {
+        QSettings rawRecent(QStringLiteral("HKEY_CURRENT_USER\\Software\\PDFBoard"),
+                            QSettings::NativeFormat);
+        const QVariant savedRecent = rawRecent.value(QStringLiteral("RecentFiles"));
+
+        const QStringList recentBefore = AppSettings::recentFiles();
+        const QString tempCandidate =
+            QDir(QDir::tempPath()).filePath(QStringLiteral("pdfboard/work-selftest.dpz"));
+        QString recentErr;
+        const bool added = AppSettings::addRecentFile(tempCandidate, &recentErr);
+        check("recent: temp path refused", int(added), 0);
+        check("recent: refusal explains", int(!recentErr.isEmpty()), 1);
+        check("recent: list untouched",
+              int(AppSettings::recentFiles() == recentBefore), 1);
+
+        const QString normal = QStringLiteral("D:\\dev\\tmp\\selftest-docx-recent.pdf");
+        AppSettings::addRecentFile(normal, nullptr);
+        check("recent: normal path recorded",
+              int(AppSettings::recentFiles().value(0) == normal), 1);
+
+        if (savedRecent.isValid())
+            rawRecent.setValue(QStringLiteral("RecentFiles"), savedRecent);
+        else
+            rawRecent.remove(QStringLiteral("RecentFiles"));
+        rawRecent.sync();
+        const QVariant afterRecent = rawRecent.value(QStringLiteral("RecentFiles"));
+        check("recent: stored list restored",
+              int(savedRecent.isValid() ? afterRecent == savedRecent
+                                        : !afterRecent.isValid()), 1);
+    }
+
+    // --- Word 打开方式 preference ------------------------------------------
+    {
+        QSettings rawWord(QStringLiteral("HKEY_CURRENT_USER\\Software\\PDFBoard"),
+                          QSettings::NativeFormat);
+        const QVariant savedWord = rawWord.value(QStringLiteral("WordOpenMode"));
+
+        rawWord.remove(QStringLiteral("WordOpenMode"));
+        rawWord.sync();
+        check("word mode: default 0", AppSettings::wordOpenMode(), 0);
+
+        QString wordErr;
+        check("word mode: set 1", int(AppSettings::setWordOpenMode(1, &wordErr)), 1);
+        check("word mode: stored 1", AppSettings::wordOpenMode(), 1);
+        check("word mode: set 2", int(AppSettings::setWordOpenMode(2, &wordErr)), 1);
+        check("word mode: stored 2", AppSettings::wordOpenMode(), 2);
+
+        rawWord.setValue(QStringLiteral("WordOpenMode"), 7);
+        rawWord.sync();
+        check("word mode: out of range -> 0", AppSettings::wordOpenMode(), 0);
+
+        if (savedWord.isValid())
+            rawWord.setValue(QStringLiteral("WordOpenMode"), savedWord);
+        else
+            rawWord.remove(QStringLiteral("WordOpenMode"));
+        rawWord.sync();
+        const QVariant afterWord = rawWord.value(QStringLiteral("WordOpenMode"));
+        check("word mode: stored value restored",
+              int(savedWord.isValid() ? afterWord == savedWord : !afterWord.isValid()), 1);
     }
 
     out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")

@@ -2,6 +2,7 @@
 
 #include <QCoreApplication>
 #include <QDir>
+#include <QFileInfo>
 #include <QSettings>
 
 #include <shlobj.h>
@@ -18,6 +19,7 @@ const QString kAppKey = QStringLiteral("HKEY_CURRENT_USER\\Software\\PDFBoard");
 const QString kSavePathValue = QStringLiteral("DefaultSavePath");
 const QString kDebugLogValue = QStringLiteral("DebugLog");
 const QString kThemeModeValue = QStringLiteral("ThemeMode");
+const QString kWordOpenModeValue = QStringLiteral("WordOpenMode");
 const QString kRecentFilesValue = QStringLiteral("RecentFiles");
 
 // 最近项目 keeps at most this many paths; the oldest entry is dropped first.
@@ -29,6 +31,21 @@ QString quotedExePath()
 {
     const QString exe = QDir::toNativeSeparators(QCoreApplication::applicationFilePath());
     return exe.isEmpty() ? QString() : QStringLiteral("\"%1\"").arg(exe);
+}
+
+// True when `path` lives under the system temp directory - which includes
+// `<temp>/pdfboard`, where the working copies are kept. Both sides are made
+// absolute and separator-normalised; Windows paths compare case-insensitively.
+bool isUnderTempDir(const QString &path)
+{
+    const QString dir =
+        QDir::fromNativeSeparators(QFileInfo(path).absoluteFilePath());
+    QString temp =
+        QDir::fromNativeSeparators(QFileInfo(QDir::tempPath()).absoluteFilePath());
+    while (temp.endsWith(QLatin1Char('/')))
+        temp.chop(1);
+    return dir.compare(temp, Qt::CaseInsensitive) == 0
+           || dir.startsWith(temp + QLatin1Char('/'), Qt::CaseInsensitive);
 }
 
 }   // namespace
@@ -80,6 +97,7 @@ bool AppSettings::registerPdfHandler(QString *errorOut)
 
     const QString progId    = QStringLiteral("PDFBoard.Pdf");
     const QString dpzProgId = QStringLiteral("PDFBoard.Dpz");
+    const QString wordProgId = QStringLiteral("PDFBoard.Word");
     const QString exeQuoted = QStringLiteral("\"%1\"").arg(exe);
 
     QSettings cls(QStringLiteral("HKEY_CURRENT_USER\\Software\\Classes"),
@@ -97,6 +115,17 @@ bool AppSettings::registerPdfHandler(QString *errorOut)
     cls.setValue(dpzProgId + QStringLiteral("/shell/open/command/."),
                  exeQuoted + QStringLiteral(" \"%1\""));
     cls.setValue(QStringLiteral(".dpz/OpenWithProgids/") + dpzProgId, QString());
+
+    // Word documents are registered as an OpenWith CANDIDATE only: the ProgID
+    // lands in OpenWithProgids, which merely offers this app in the "打开方式"
+    // list. The user's Word default (the UserChoice hash) is never written, so
+    // double-clicking a .docx still starts Word, exactly as before.
+    cls.setValue(wordProgId + QStringLiteral("/."), QStringLiteral("Word 文档（批注）"));
+    cls.setValue(wordProgId + QStringLiteral("/DefaultIcon/."), exeQuoted + QStringLiteral(",0"));
+    cls.setValue(wordProgId + QStringLiteral("/shell/open/command/."),
+                 exeQuoted + QStringLiteral(" \"%1\""));
+    cls.setValue(QStringLiteral(".docx/OpenWithProgids/") + wordProgId, QString());
+    cls.setValue(QStringLiteral(".doc/OpenWithProgids/") + wordProgId, QString());
     cls.sync();
 
     QSettings caps(QStringLiteral("HKEY_CURRENT_USER\\Software\\PDFBoard\\Capabilities"),
@@ -106,6 +135,8 @@ bool AppSettings::registerPdfHandler(QString *errorOut)
                   QStringLiteral("大屏 PDF 查看与批注工具"));
     caps.setValue(QStringLiteral("FileAssociations/.pdf"), progId);
     caps.setValue(QStringLiteral("FileAssociations/.dpz"), dpzProgId);
+    caps.setValue(QStringLiteral("FileAssociations/.docx"), wordProgId);
+    caps.setValue(QStringLiteral("FileAssociations/.doc"), wordProgId);
     caps.sync();
 
     QSettings reg(QStringLiteral("HKEY_CURRENT_USER\\Software\\RegisteredApplications"),
@@ -188,6 +219,16 @@ bool AppSettings::addRecentFile(const QString &path, QString *errorOut)
         return true;                     // nothing to remember: not an error
     }
 
+    // 最近项目 must only ever hold a file the user chose and can reopen. The
+    // temp directory is where 保存 keeps its working copies; recording one
+    // would list a hash name that the user never picked, so the path is
+    // refused outright and the stored list stays untouched.
+    if (isUnderTempDir(trimmed)) {
+        if (errorOut)
+            *errorOut = QStringLiteral("临时文件不会加入最近项目");
+        return false;
+    }
+
     QStringList list = recentFiles();
     for (qsizetype i = list.size() - 1; i >= 0; --i) {
         if (list.at(i).compare(trimmed, Qt::CaseInsensitive) == 0)
@@ -231,6 +272,29 @@ bool AppSettings::setThemeMode(int mode, QString *errorOut)
     if (s.status() != QSettings::NoError) {
         if (errorOut)
             *errorOut = QStringLiteral("无法写入注册表（外观设置）");
+        return false;
+    }
+    if (errorOut)
+        errorOut->clear();
+    return true;
+}
+
+int AppSettings::wordOpenMode()
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    const int mode = s.value(kWordOpenModeValue, 0).toInt();
+    return (mode >= 0 && mode <= 2) ? mode : 0;
+}
+
+bool AppSettings::setWordOpenMode(int mode, QString *errorOut)
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    s.setValue(kWordOpenModeValue, qBound(0, mode, 2));
+    s.sync();
+
+    if (s.status() != QSettings::NoError) {
+        if (errorOut)
+            *errorOut = QStringLiteral("无法写入注册表（Word 文档打开方式）");
         return false;
     }
     if (errorOut)

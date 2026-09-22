@@ -7,6 +7,7 @@ class DocumentTabs;
 class HomePage;
 class PdfCanvas;
 class SettingsPage;
+class QCloseEvent;
 class QEvent;
 class QKeyEvent;
 class QLabel;
@@ -29,6 +30,9 @@ protected:
     void keyPressEvent(QKeyEvent *event) override;
     // Window state changes are pushed down to every canvas toolbar.
     void changeEvent(QEvent *event) override;
+    // Closing the window asks about every dirty document; a single 取消
+    // aborts the whole close.
+    void closeEvent(QCloseEvent *event) override;
 
 private slots:
     void onOpen();
@@ -56,6 +60,7 @@ private:
         QString sourcePdf;    // the PDF the canvas actually opened
         QString title;        // tab strip title
         QString tempPdf;      // temp PDF backing the document (may be empty)
+        bool    dirty = false;  // ink edited since open / last save
     };
 
     PdfCanvas *createCanvas();              // builds + wires one document canvas
@@ -67,7 +72,19 @@ private:
     void       updateTitle();
     int        docIndex(PdfCanvas *canvas) const;
     QString    docTitle(PdfCanvas *canvas) const;
-    void       saveDocumentAs();            // shared by 另存为 and the first 保存
+    // Saves one document: its own bundle when it has one, otherwise the
+    // per-source working copy in %TEMP%. Returns true only when bytes were
+    // written. Shared by 保存, 另存为's close prompt and the close prompts.
+    bool       saveDocument(int index);
+    // The 另存为 dialog for one document. Returns true when a file was written.
+    bool       saveDocumentAs(int index);
+    // The 保存 / 另存为 / 舍弃 / 取消 close conversation. Returns true when the
+    // caller may proceed to close the document.
+    bool       confirmCloseDocument(int index);
+    void       closeTabAt(int index);       // the removal, after confirmations
+    void       markDocumentDirty(PdfCanvas *canvas);
+    void       markDocumentSaved(int index);
+    void       refreshTabTitle(int index);  // source name + the dirty `*`
 
     QStackedWidget *m_stack = nullptr;      // one PdfCanvas per open document
     DocumentTabs   *m_tabs  = nullptr;      // the docked strip under the pages

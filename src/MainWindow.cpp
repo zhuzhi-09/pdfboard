@@ -15,7 +15,9 @@
 #include <QAction>
 #include <QAbstractButton>
 #include <QApplication>
+#include <QCloseEvent>
 #include <QCryptographicHash>
+#include <QDesktopServices>
 #include <QDialog>
 #include <QDir>
 #include <QDragEnterEvent>
@@ -32,6 +34,7 @@
 #include <QMessageBox>
 #include <QMimeData>
 #include <QPalette>
+#include <QPushButton>
 #include <QScreen>
 #include <QStackedWidget>
 #include <QStatusBar>
@@ -147,6 +150,53 @@ QByteArray readPdfBytes(const QString &path)
     if (!file.open(QIODevice::ReadOnly))
         return {};
     return file.readAll();
+}
+
+// The 每次询问 chooser for Word documents: exactly TWO touch-sized choices,
+// 批注 / 用 Word 打开, and deliberately no "remember my choice" control - the
+// preference lives in the settings page only. Dismissing the dialog (Esc / X)
+// is a cancel and opens nothing.
+enum class WordOpenAnswer { Cancel, Annotate, OpenInWord };
+
+WordOpenAnswer askWordOpen(QWidget *parent, const QString &fileName)
+{
+    QDialog dlg(parent);
+    dlg.setWindowTitle(QStringLiteral("打开 Word 文档"));
+    dlg.setModal(true);
+
+    auto *layout = new QVBoxLayout(&dlg);
+    layout->setContentsMargins(Theme::Space5, Theme::Space5, Theme::Space5, Theme::Space5);
+    layout->setSpacing(Theme::Space4);
+
+    auto *question = new QLabel(QStringLiteral("「%1」要如何打开？").arg(fileName), &dlg);
+    question->setWordWrap(true);
+    layout->addWidget(question);
+
+    auto *row = new QHBoxLayout;
+    row->setSpacing(Theme::Space3);
+    const int touch = Theme::metrics(dlg.font()).touch;
+    auto *annotateButton = new QPushButton(QStringLiteral("批注"), &dlg);
+    auto *wordButton = new QPushButton(QStringLiteral("用 Word 打开"), &dlg);
+    const auto makeTouch = [touch](QPushButton *button) {
+        button->setMinimumSize(QSize(touch * 2, touch));
+        button->setCursor(Qt::PointingHandCursor);
+    };
+    makeTouch(annotateButton);
+    makeTouch(wordButton);
+    annotateButton->setDefault(true);
+    row->addWidget(annotateButton, 1);
+    row->addWidget(wordButton, 1);
+    layout->addLayout(row);
+
+    QObject::connect(annotateButton, &QPushButton::clicked, &dlg, [&dlg] { dlg.done(1); });
+    QObject::connect(wordButton, &QPushButton::clicked, &dlg, [&dlg] { dlg.done(2); });
+
+    const int result = dlg.exec();
+    if (result == 1)
+        return WordOpenAnswer::Annotate;
+    if (result == 2)
+        return WordOpenAnswer::OpenInWord;
+    return WordOpenAnswer::Cancel;
 }
 }   // namespace
 
@@ -286,6 +336,13 @@ PdfCanvas *MainWindow::createCanvas()
     auto *canvas = new PdfCanvas(m_stack);
     m_stack->addWidget(canvas);
 
+    // Every canvas tracks its own edits, so a document that was drawn on and
+    // then switched away from stays dirty. The receiver context is the canvas
+    // itself: the status-canvas rewiring in wireActiveCanvas cannot drop this
+    // connection, and the lambda dies with the canvas.
+    connect(canvas, &PdfCanvas::inkChanged, canvas,
+            [this, canvas](int) { markDocumentDirty(canvas); });
+
     // Each canvas owns its own floating island; the host supplies the actions
     // the island cannot do itself.
     if (InkToolbar *bar = canvas->toolbar()) {
@@ -361,6 +418,21 @@ void MainWindow::changeEvent(QEvent *event)
         if (InkToolbar *bar = canvas->toolbar())
             bar->setFullscreenActive(isFullScreen());
     }
+}
+
+// Closing the window walks every dirty document and asks the same four-way
+// question as a single tab close; ONE 取消 aborts the whole close.
+void MainWindow::closeEvent(QCloseEvent *event)
+{
+    for (int i = 0; i < m_docs.size(); ++i) {
+        if (!m_docs.at(i).dirty)
+            continue;
+        if (!confirmCloseDocument(i)) {
+            event->ignore();
+            return;
+        }
+    }
+    QMainWindow::closeEvent(event);
 }
 
 // The one fan-out for a theme change: the Theme palette first, then every
@@ -443,6 +515,29 @@ void MainWindow::openPath(const QString &path)
     QString tabTitle;
 
     if (word) {
+        // The stored preference decides: 每次询问 pops the two-choice modal,
+        // 总用 Word 打开 hands the file to the system handler, 总批注 goes
+        // straight down the conversion path. Handing over opens NO tab and
+        // converts nothing, so the 2.4 s export cost is skipped entirely.
+        const int mode = AppSettings::wordOpenMode();
+        if (mode == 2) {
+            AppLog::write(QStringLiteral("open"),
+                          QStringLiteral("Word 文档交给系统默认程序：%1").arg(path));
+            QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+            return;
+        }
+        if (mode == 0) {
+            const WordOpenAnswer answer = askWordOpen(this, QFileInfo(path).fileName());
+            if (answer == WordOpenAnswer::Cancel)
+                return;
+            if (answer == WordOpenAnswer::OpenInWord) {
+                AppLog::write(QStringLiteral("open"),
+                              QStringLiteral("Word 文档交给系统默认程序：%1").arg(path));
+                QDesktopServices::openUrl(QUrl::fromLocalFile(path));
+                return;
+            }
+        }
+
         // The .docx itself is never touched: Word/WPS renders a PDF into the
         // temp cache (reused while path+size+mtime are unchanged) and that PDF
         // is what the normal pipeline sees from here on.
@@ -467,7 +562,9 @@ void MainWindow::openPath(const QString &path)
             return;
         }
         statusBar()->clearMessage();
-        tabTitle = QFileInfo(path).fileName();
+        // Everything from here on annotates a copy, never the .docx: the tab
+        // reads <basename>.dpz from the start.
+        tabTitle = QFileInfo(path).completeBaseName() + QStringLiteral(".dpz");
     } else if (bundle) {
         QString err;
         if (!AnnotationBundle::read(path, &pdfBytes, &annotations, &err)) {
@@ -514,6 +611,41 @@ void MainWindow::openPath(const QString &path)
     if (bundle)
         canvas->importInk(annotations);
 
+    // A source without a real bundle may still have a working copy from an
+    // earlier 保存: restore it so the teacher gets their annotations back. The
+    // restore is gated on CONTENT IDENTITY, not the path alone - a swapped USB
+    // stick or a replaced file at the same path must not inherit the old ink.
+    // The status line says the outcome once, after the tab is in place.
+    bool restoredWorkingCopy = false;
+    bool workingCopyMismatch = false;
+    if (!bundle) {
+        const QString working = AnnotationBundle::workingBundlePathFor(path);
+        if (QFileInfo::exists(working)) {
+            QJsonObject workingInk;
+            QString workingErr;
+            if (AnnotationBundle::read(working, nullptr, &workingInk, &workingErr)) {
+                const QJsonObject recorded =
+                    workingInk.value(QStringLiteral("source")).toObject();
+                const QJsonObject actual = AnnotationBundle::sourceFingerprintFor(path);
+                if (AnnotationBundle::fingerprintMatches(recorded, actual)) {
+                    canvas->importInk(workingInk);
+                    restoredWorkingCopy = true;
+                } else {
+                    // The working file is left untouched for inspection: this
+                    // is never a modal, just one log line and one status line.
+                    workingCopyMismatch = true;
+                    AppLog::write(
+                        QStringLiteral("open"),
+                        QStringLiteral("工作副本与源文件不一致，未恢复批注：%1（源 %2）")
+                            .arg(working, path));
+                }
+            } else {
+                AppLog::write(QStringLiteral("open"),
+                              QStringLiteral("工作副本读取失败：%1（%2）").arg(working, workingErr));
+            }
+        }
+    }
+
     // 最近项目 remembers the user-visible path only - the .pdf / .dpz / .docx
     // the user picked, never the generated temp PDF; the file itself is never
     // copied anywhere (bundles are read in place too).
@@ -539,6 +671,11 @@ void MainWindow::openPath(const QString &path)
     const int index = int(m_canvases.size()) - 1;
     m_tabs->setCurrentIndex(index);              // emits -> activates the tab
     onTabCurrentChanged(index);                  // idempotent safety net
+
+    if (restoredWorkingCopy)
+        statusBar()->showMessage(QStringLiteral("已恢复上次未另存的批注"), 5000);
+    else if (workingCopyMismatch)
+        statusBar()->showMessage(QStringLiteral("工作副本与源文件不一致，未恢复批注"), 8000);
 }
 
 int MainWindow::docIndex(PdfCanvas *canvas) const
@@ -552,89 +689,118 @@ QString MainWindow::docTitle(PdfCanvas *canvas) const
     return index >= 0 ? m_docs.at(index).title : QString();
 }
 
-// Ctrl+S / the island's 「保存」: overwrite the existing bundle, or fall back to
-// 另存为 when the document has no bundle of its own yet.
+// Ctrl+S / the island's 「保存」.
 void MainWindow::onSave()
 {
-    if (!m_active || m_active->pdfPath().isEmpty())
-        return;
     const int index = docIndex(m_active);
     if (index < 0)
         return;
+    saveDocument(index);
+}
 
+// Writes one document's annotations. A document with a real bundle (opened as
+// a .dpz, or created by 另存为) saves into that file, exactly as before. Every
+// other document - a Word file or a plain PDF - saves into a working copy
+// under %TEMP%/pdfboard keyed by its SOURCE path, so a document on a USB stick
+// is never joined by a `.dpz` sibling. Returns true only when bytes were
+// written.
+bool MainWindow::saveDocument(int index)
+{
+    if (index < 0 || index >= m_canvases.size())
+        return false;
+    PdfCanvas *canvas = m_canvases.at(index);
+    if (!canvas || canvas->pdfPath().isEmpty())
+        return false;
     const DocumentInfo info = m_docs.at(index);
 
-    // A Word document has no bundle of its own yet: 保存 packs the annotations
-    // next to the .docx with the same basename. The .docx itself is never
-    // written to, copied or renamed.
-    if (!info.wordPath.isEmpty() && info.bundlePath.isEmpty()) {
-        const QFileInfo word(info.wordPath);
-        const QString target = QDir(word.absolutePath())
-                                   .filePath(word.completeBaseName() + QStringLiteral(".dpz"));
-
+    // A real bundle is updated in place.
+    if (!info.bundlePath.isEmpty()) {
         const QByteArray pdf = readPdfBytes(info.sourcePdf);
         if (pdf.isEmpty()) {
             AppLog::write(QStringLiteral("save"),
-                          QStringLiteral("Word 文档保存失败：无法读取源 PDF：%1")
-                              .arg(info.sourcePdf));
-            statusBar()->showMessage(QStringLiteral("保存失败：无法读取转换后的 PDF"), 8000);
-            return;
+                          QStringLiteral("保存失败：无法读取源 PDF：%1").arg(info.sourcePdf));
+            QMessageBox::warning(this, QStringLiteral("保存失败"),
+                                 QStringLiteral("无法读取源 PDF：%1").arg(info.sourcePdf));
+            return false;
         }
 
         QString err;
-        if (!AnnotationBundle::write(target, pdf, m_active->exportInk(), &err)) {
+        if (!AnnotationBundle::write(info.bundlePath, pdf, canvas->exportInk(), &err)) {
             AppLog::write(QStringLiteral("save"),
-                          QStringLiteral("Word 文档保存失败：%1（%2）").arg(target, err));
-            statusBar()->showMessage(QStringLiteral("保存失败：%1").arg(err), 8000);
-            return;
+                          QStringLiteral("保存批注包失败：%1（%2）").arg(info.bundlePath, err));
+            QMessageBox::warning(this, QStringLiteral("保存失败"), err);
+            return false;
         }
-
-        m_docs[index].bundlePath = target;
-        // The document is bundle-backed from now on: the tab switches to the
-        // .dpz and later saves go to it, exactly like a bundle opened as one.
-        m_docs[index].title = QFileInfo(target).fileName();
-        m_tabs->setTabTitle(index, m_docs.at(index).title);
-        updateTitle();
         AppLog::write(QStringLiteral("save"),
-                      QStringLiteral("Word 文档保存批注包 %1：%2 KB，批注 %3 条")
-                          .arg(QFileInfo(target).fileName())
-                          .arg(double(QFileInfo(target).size()) / 1024.0, 0, 'f', 0)
-                          .arg(m_active->strokeCount()));
+                      QStringLiteral("保存批注包 %1：批注 %2 条")
+                          .arg(QFileInfo(info.bundlePath).fileName())
+                          .arg(canvas->strokeCount()));
+        markDocumentSaved(index);
         statusBar()->showMessage(
-            QStringLiteral("已保存 %1").arg(QFileInfo(target).fileName()), 4000);
-        return;
+            QStringLiteral("已保存 %1").arg(QFileInfo(info.bundlePath).fileName()), 4000);
+        return true;
     }
 
-    if (info.bundlePath.isEmpty()) {
-        saveDocumentAs();
-        return;
+    // No real bundle yet: 保存 keeps a working copy under the temp dir, keyed
+    // by the source path, and the tab keeps the SOURCE file name - saving must
+    // not turn a .docx into a `work-<hash>.dpz` tab (the 1.3.2 over-correction)
+    // and must not create anything next to the source. 另存为 remains the only
+    // way to put the annotations where the user chooses.
+    const QString source = !info.wordPath.isEmpty() ? info.wordPath : info.sourcePdf;
+    const QString target = AnnotationBundle::workingBundlePathFor(source);
+    if (!QDir().mkpath(QFileInfo(target).absolutePath())) {
+        AppLog::write(QStringLiteral("save"),
+                      QStringLiteral("保存失败：无法创建临时目录：%1")
+                          .arg(QFileInfo(target).absolutePath()));
+        QMessageBox::warning(this, QStringLiteral("保存失败"),
+                             QStringLiteral("无法创建临时工作目录：%1")
+                                 .arg(QFileInfo(target).absolutePath()));
+        return false;
     }
 
     const QByteArray pdf = readPdfBytes(info.sourcePdf);
     if (pdf.isEmpty()) {
+        AppLog::write(QStringLiteral("save"),
+                      QStringLiteral("保存失败：无法读取源 PDF：%1").arg(info.sourcePdf));
         QMessageBox::warning(this, QStringLiteral("保存失败"),
                              QStringLiteral("无法读取源 PDF：%1").arg(info.sourcePdf));
-        return;
+        return false;
     }
 
+    // The fingerprint pins the working copy to the file it was made from, so a
+    // restore can tell "same path" from "same document".
+    const QJsonObject fingerprint = AnnotationBundle::sourceFingerprintFor(source);
+
     QString err;
-    if (!AnnotationBundle::write(info.bundlePath, pdf, m_active->exportInk(), &err)) {
+    if (!AnnotationBundle::write(target, pdf, canvas->exportInk(), &err, fingerprint)) {
+        AppLog::write(QStringLiteral("save"),
+                      QStringLiteral("保存工作副本失败：%1（%2）").arg(target, err));
         QMessageBox::warning(this, QStringLiteral("保存失败"), err);
-        return;
+        return false;
     }
-    statusBar()->showMessage(
-        QStringLiteral("已保存 %1").arg(QFileInfo(info.bundlePath).fileName()), 4000);
+
+    // The first 保存 materialises the `<basename>.dpz` title: the source name
+    // plus the signal that the annotations live in a copy, not next to it.
+    m_docs[index].title = QFileInfo(source).completeBaseName() + QStringLiteral(".dpz");
+    AppLog::write(QStringLiteral("save"),
+                  QStringLiteral("保存工作副本 %1：批注 %2 条")
+                      .arg(QFileInfo(target).fileName())
+                      .arg(canvas->strokeCount()));
+    markDocumentSaved(index);
+    statusBar()->showMessage(QStringLiteral("已保存 %1").arg(m_docs.at(index).title), 4000);
+    return true;
 }
 
 // Ctrl+Shift+S / the island's 「另存为」: choose between a `.dpz` bundle
 // (default) and a flattened, injected PDF that other software can open.
-void MainWindow::saveDocumentAs()
+// Returns true only when a file was actually written.
+bool MainWindow::saveDocumentAs(int index)
 {
-    if (!m_active || m_active->pdfPath().isEmpty())
-        return;
-    const int index = docIndex(m_active);
-    if (index < 0)
-        return;
+    if (index < 0 || index >= m_canvases.size())
+        return false;
+    PdfCanvas *canvas = m_canvases.at(index);
+    if (!canvas || canvas->pdfPath().isEmpty())
+        return false;
     const DocumentInfo info = m_docs.at(index);
 
     // Keep the filter text itself simple, otherwise Qt's suffix handling
@@ -681,11 +847,11 @@ void MainWindow::saveDocumentAs()
                 dlg.selectFile(nameFor(f.contains(QStringLiteral("*.pdf"))));
             });
     if (dlg.exec() != QDialog::Accepted)
-        return;
+        return false;
 
     QString path = dlg.selectedFiles().value(0);
     if (path.isEmpty())
-        return;
+        return false;
 
     const bool inject = (dlg.selectedNameFilter() == injectFilter);
     if (inject) {
@@ -711,27 +877,28 @@ void MainWindow::saveDocumentAs()
                           QStringLiteral("拒绝把源文件当作导出目标：%1").arg(path));
             statusBar()->showMessage(
                 QStringLiteral("不能用源文件本身作为导出目标，请换一个文件名"), 8000);
-            return;
+            return false;
         }
 
         // Injecting never changes the open document's own bundle state.
         QElapsedTimer timer;
         timer.start();
-        if (!PdfExport::exportFlattened(m_active, path, &err)) {
+        if (!PdfExport::exportFlattened(canvas, path, &err)) {
             AppLog::write(QStringLiteral("save"),
                           QStringLiteral("注入 PDF 失败：%1（%2）").arg(path, err));
             QMessageBox::warning(this, QStringLiteral("保存失败"), err);
-            return;
+            return false;
         }
         AppLog::write(QStringLiteral("save"),
                       QStringLiteral("注入 PDF %1：%2 页，%3 KB，%4 ms")
                           .arg(QFileInfo(path).fileName())
-                          .arg(m_active->pageCount())
+                          .arg(canvas->pageCount())
                           .arg(double(QFileInfo(path).size()) / 1024.0, 0, 'f', 0)
                           .arg(timer.elapsed()));
+        markDocumentSaved(index);
         statusBar()->showMessage(
             QStringLiteral("已注入 PDF %1").arg(QFileInfo(path).fileName()), 4000);
-        return;
+        return true;
     }
 
     const QByteArray pdf = readPdfBytes(info.sourcePdf);
@@ -740,31 +907,98 @@ void MainWindow::saveDocumentAs()
                       QStringLiteral("读取源 PDF 失败：%1").arg(info.sourcePdf));
         QMessageBox::warning(this, QStringLiteral("保存失败"),
                              QStringLiteral("无法读取源 PDF：%1").arg(info.sourcePdf));
-        return;
+        return false;
     }
-    if (!AnnotationBundle::write(path, pdf, m_active->exportInk(), &err)) {
+    if (!AnnotationBundle::write(path, pdf, canvas->exportInk(), &err)) {
         AppLog::write(QStringLiteral("save"),
                       QStringLiteral("保存批注包失败：%1（%2）").arg(path, err));
         QMessageBox::warning(this, QStringLiteral("保存失败"), err);
-        return;
+        return false;
     }
     AppLog::write(QStringLiteral("save"),
                   QStringLiteral("保存批注包 %1：%2 KB，批注 %3 条")
                       .arg(QFileInfo(path).fileName())
                       .arg(double(QFileInfo(path).size()) / 1024.0, 0, 'f', 0)
-                      .arg(m_active->strokeCount()));
+                      .arg(canvas->strokeCount()));
 
+    // 另存为 promotes the document to a real bundle: later 保存 go there and
+    // the unsaved marker clears because the bytes are really on disk.
     m_docs[index].bundlePath = path;
     m_docs[index].title = QFileInfo(path).fileName();
-    m_tabs->setTabTitle(index, m_docs.at(index).title);
+    markDocumentSaved(index);
     updateTitle();
     statusBar()->showMessage(
         QStringLiteral("已打包保存 %1").arg(m_docs.at(index).title), 4000);
+    return true;
 }
 
 void MainWindow::onSaveAs()
 {
-    saveDocumentAs();
+    const int index = docIndex(m_active);
+    if (index >= 0)
+        saveDocumentAs(index);
+}
+
+// True when the caller may close the document: it carries no unsaved ink, or
+// the user chose 保存 / 另存为 and something was really written, or 舍弃.
+// 取消 (and dismissing the box) keeps the document open.
+bool MainWindow::confirmCloseDocument(int index)
+{
+    if (index < 0 || index >= m_docs.size())
+        return true;
+    if (!m_docs.at(index).dirty)
+        return true;
+
+    QMessageBox box(this);
+    box.setWindowTitle(QStringLiteral("未保存的批注"));
+    box.setText(QStringLiteral("「%1」有未保存的批注。").arg(m_docs.at(index).title));
+    box.setInformativeText(QStringLiteral("关闭前要保存吗？"));
+    QPushButton *saveButton = box.addButton(QStringLiteral("保存"), QMessageBox::AcceptRole);
+    QPushButton *saveAsButton = box.addButton(QStringLiteral("另存为"), QMessageBox::ActionRole);
+    QPushButton *discardButton =
+        box.addButton(QStringLiteral("舍弃"), QMessageBox::DestructiveRole);
+    box.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
+    box.setDefaultButton(saveButton);
+    const int touch = Theme::metrics(font()).touch;
+    const QList<QAbstractButton *> buttons = box.buttons();
+    for (QAbstractButton *button : buttons)
+        button->setMinimumHeight(int(touch * 0.72));
+    box.exec();
+
+    if (box.clickedButton() == saveButton)
+        return saveDocument(index);
+    if (box.clickedButton() == saveAsButton)
+        return saveDocumentAs(index);
+    if (box.clickedButton() == discardButton)
+        return true;
+    return false;
+}
+
+void MainWindow::markDocumentDirty(PdfCanvas *canvas)
+{
+    const int index = docIndex(canvas);
+    if (index < 0 || m_docs.at(index).dirty)
+        return;
+    m_docs[index].dirty = true;
+    refreshTabTitle(index);
+}
+
+void MainWindow::markDocumentSaved(int index)
+{
+    if (index < 0 || index >= m_docs.size())
+        return;
+    m_docs[index].dirty = false;
+    refreshTabTitle(index);
+}
+
+// The tab strip shows the source name plus a leading `*` while the ink has
+// unsaved changes; the window title keeps the clean name.
+void MainWindow::refreshTabTitle(int index)
+{
+    if (index < 0 || index >= m_docs.size())
+        return;
+    const DocumentInfo &doc = m_docs.at(index);
+    m_tabs->setTabTitle(index, doc.dirty ? QStringLiteral("*") + doc.title : doc.title);
 }
 
 // F11 / the island's 「全屏」: a plain toggle that returns to the window state
@@ -815,7 +1049,19 @@ void MainWindow::onTabCurrentChanged(int index)
     updateTitle();
 }
 
+// The ✕ on a tab / Ctrl+W: ask about unsaved ink first, remove only when the
+// user did not cancel (and any chosen save really wrote).
 void MainWindow::onTabCloseRequested(int index)
+{
+    if (index < 0 || index >= m_canvases.size())
+        return;
+    if (!confirmCloseDocument(index))
+        return;
+    closeTabAt(index);
+}
+
+// The removal itself, after every confirmation has passed.
+void MainWindow::closeTabAt(int index)
 {
     if (index < 0 || index >= m_canvases.size())
         return;

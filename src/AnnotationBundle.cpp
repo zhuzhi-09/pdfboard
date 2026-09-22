@@ -1,6 +1,10 @@
 #include "AnnotationBundle.h"
 
+#include <QCryptographicHash>
+#include <QDateTime>
+#include <QDir>
 #include <QFile>
+#include <QFileInfo>
 #include <QHash>
 #include <QJsonDocument>
 #include <QJsonParseError>
@@ -97,7 +101,8 @@ struct Entry {
 namespace AnnotationBundle {
 
 bool write(const QString &bundlePath, const QByteArray &pdfBytes,
-           const QJsonObject &annotations, QString *errorOut)
+           const QJsonObject &annotations, QString *errorOut,
+           const QJsonObject &sourceFingerprint)
 {
     // A bundle is only ever a .dpz. Refusing every other target is what keeps
     // 保存 from ever overwriting the document it came from: even if a caller
@@ -108,7 +113,13 @@ bool write(const QString &bundlePath, const QByteArray &pdfBytes,
         return false;
     }
 
-    const QByteArray json = QJsonDocument(annotations).toJson(QJsonDocument::Indented);
+    // The fingerprint is an OPTIONAL extra top-level key: real .dpz files carry
+    // none, working copies carry it so a restore can check identity. Readers
+    // ignore keys they do not know, so both forms parse identically.
+    QJsonObject payload = annotations;
+    if (!sourceFingerprint.isEmpty())
+        payload.insert(QStringLiteral("source"), sourceFingerprint);
+    const QByteArray json = QJsonDocument(payload).toJson(QJsonDocument::Indented);
 
     QVector<Entry> entries;
     entries.reserve(2);
@@ -314,6 +325,73 @@ bool isBundle(const QString &path)
     if (!file.open(QIODevice::ReadOnly))
         return false;
     return file.read(4) == QByteArrayLiteral("PK\x03\x04");
+}
+
+QString workingBundlePathFor(const QString &sourcePath)
+{
+    // Native separators first, so the same file picked as D:/x.pdf and as
+    // D:\x.pdf lands on one working copy.
+    const QByteArray key = QDir::toNativeSeparators(sourcePath).toUtf8();
+    const QString hash =
+        QString::fromLatin1(QCryptographicHash::hash(key, QCryptographicHash::Sha1).toHex());
+    return QDir(QDir::tempPath())
+        .filePath(QStringLiteral("pdfboard/work-") + hash + QStringLiteral(".dpz"));
+}
+
+QJsonObject sourceFingerprintFor(const QString &path)
+{
+    const QFileInfo info(path);
+    if (!info.isFile())
+        return {};
+
+    QFile file(info.absoluteFilePath());
+    if (!file.open(QIODevice::ReadOnly))
+        return {};
+
+    constexpr qint64 kHeadBytes = 65536;
+    const QByteArray head = file.read(kHeadBytes);
+    file.close();
+
+    QJsonObject fingerprint;
+    fingerprint.insert(QStringLiteral("path"),
+                       QDir::toNativeSeparators(info.absoluteFilePath()));
+    fingerprint.insert(QStringLiteral("size"), static_cast<double>(info.size()));
+    fingerprint.insert(QStringLiteral("mtimeMs"),
+                       static_cast<double>(info.lastModified().toMSecsSinceEpoch()));
+    fingerprint.insert(
+        QStringLiteral("head"),
+        QString::fromLatin1(
+            QCryptographicHash::hash(head, QCryptographicHash::Sha1).toHex()));
+    return fingerprint;
+}
+
+bool fingerprintMatches(const QJsonObject &recorded, const QJsonObject &actual)
+{
+    // Every one of the four keys must be present with the expected type: a
+    // missing key or a wrong type is never a match, however forgiving the
+    // comparison below would be.
+    const QJsonValue recordedPath = recorded.value(QStringLiteral("path"));
+    const QJsonValue actualPath   = actual.value(QStringLiteral("path"));
+    const QJsonValue recordedSize = recorded.value(QStringLiteral("size"));
+    const QJsonValue actualSize   = actual.value(QStringLiteral("size"));
+    const QJsonValue recordedTime = recorded.value(QStringLiteral("mtimeMs"));
+    const QJsonValue actualTime   = actual.value(QStringLiteral("mtimeMs"));
+    const QJsonValue recordedHead = recorded.value(QStringLiteral("head"));
+    const QJsonValue actualHead   = actual.value(QStringLiteral("head"));
+
+    if (!recordedPath.isString() || !actualPath.isString())
+        return false;
+    if (!recordedSize.isDouble() || !actualSize.isDouble())
+        return false;
+    if (!recordedTime.isDouble() || !actualTime.isDouble())
+        return false;
+    if (!recordedHead.isString() || !actualHead.isString())
+        return false;
+
+    return recordedPath.toString() == actualPath.toString()
+           && recordedSize.toDouble() == actualSize.toDouble()
+           && recordedTime.toDouble() == actualTime.toDouble()
+           && recordedHead.toString() == actualHead.toString();
 }
 
 }   // namespace AnnotationBundle
