@@ -1,25 +1,21 @@
-#  Nightly 自动构建
+#  稳定版发布
 #
-#  触发：推送到 main / 每天一次 / 手动
-#  产物：安装器 + 便携版，发布到固定的 "nightly" 预发布（每次覆盖，不堆积）
-#  说明：产物文件名为固定名，便于覆盖；具体提交号写在发布说明里。
-name: nightly
+#  触发：推送 v* 标签，例如
+#        git tag v1.0.1
+#        git push origin v1.0.1
+#  产物：安装器 + 便携版，发布为正式 Release（非预发布，自动标记 Latest）
+#  版本：取自 installer/pdfboard.iss 的 AppVersion，且**必须与标签一致**，
+#        不一致直接失败——否则会发出版本号与内容错位的包。
+#
+#  发布说明里的"本版变更"是给当前这一版写的，发新版时记得同步改写。
+name: release
 
 on:
   push:
-    branches: [main]
-    # 只改文档就不必重新打包
-    paths-ignore:
-      - "**.md"
-      - "docs/**"
-      - "LICENSE"
-      - ".gitignore"
-  schedule:
-    - cron: "0 18 * * *"        # 每天 UTC 18:00（北京时间次日 02:00）
-  workflow_dispatch:
+    tags: ["v*"]
 
 permissions:
-  contents: write               # 创建/更新 Release 需要
+  contents: write               # 创建 Release 需要
 
 jobs:
   build:
@@ -33,17 +29,19 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Compute version
+      # 标签 v1.0.1 对应 AppVersion 1.0.1（安装器文件名与"应用和功能"里的版本都来自它）。
+      - name: Check version against tag
         id: ver
         shell: pwsh
         run: |
-          $sha = "${{ github.sha }}".Substring(0, 7)
+          $tag  = "${{ github.ref_name }}"
           $base = (Select-String -Path installer/pdfboard.iss -Pattern 'AppVersion\s+"([\d.]+)"').Matches[0].Groups[1].Value
-          "version=$base-nightly.$sha" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
-          "sha=$sha" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+          if ($tag -ne "v$base") {
+            throw "标签 $tag 与 installer/pdfboard.iss 的 AppVersion=$base 不一致：请先同步版本号（pdfboard.iss + assets/app.rc）再打标签"
+          }
+          "version=$base" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
 
-      # 代码签名是可选步骤：仓库里配置了签名密钥才会执行，没配置就跳过
-      # （fork 本仓库的人不会因为缺少密钥而构建失败）。
+      # 代码签名是可选步骤：配置了签名密钥才执行，没配置就跳过（fork 不会因此失败）。
       # 注意：secrets 不能直接写在 if 里，所以先探测再输出布尔值。
       - name: Detect signing secrets
         id: signing
@@ -67,7 +65,6 @@ jobs:
         run: choco install innosetup --no-progress -y
 
       # runner 的 PATH 里 MinGW 排在前面，CMake 会误选 g++ 去链接 MSVC 版 Qt。
-      # 先进入 MSVC 开发环境，让 cl.exe 优先生效。
       - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
         with:
@@ -89,20 +86,22 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist/stage | Out-Null
           Copy-Item build/pdfboard.exe dist/stage/
-          # 不打包 vc_redist：安装器是按当前用户安装（不弹 UAC），本来也无法安装它；
-          # VC++ 运行库是 Windows 上的常见组件。
-          # 不打包全部语言翻译：只随包附上本程序使用的简体中文。
+          # 不打包 vc_redist：按当前用户安装（不弹 UAC）本来也装不了它；
+          # 不打包全部翻译：只随包附上本程序使用的简体中文。
           & "$env:QT_ROOT_DIR/bin/windeployqt.exe" --release --no-translations `
               --no-system-d3d-compiler dist/stage/pdfboard.exe
           if ($LASTEXITCODE -ne 0) { throw "windeployqt failed" }
-          # D3D12 着色器编译器与本程序无关（本地包不含这两者，实测运行正常）。
           Remove-Item dist/stage/dxcompiler.dll, dist/stage/dxil.dll, dist/stage/vc_redist.x64.exe -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force dist/stage/translations | Out-Null
           Copy-Item "$env:QT_ROOT_DIR/translations/*zh_CN.qm" dist/stage/translations/ -ErrorAction SilentlyContinue
-          Get-ChildItem dist/stage -Recurse -File | Measure-Object Length -Sum |
-            ForEach-Object { "staged: {0:N1} MB" -f ($_.Sum / 1MB) }
 
-      # 配置了 secrets.SIGN_PFX_BASE64 / SIGN_PFX_PASS 才会执行
+      # 出门前的门禁：确定性自测（在 dist/stage 里跑，Qt 运行库就在旁边，不依赖 runner 的 PATH）
+      - name: Self test
+        shell: pwsh
+        run: |
+          & dist/stage/pdfboard.exe --selftest-log
+          if ($LASTEXITCODE -ne 0) { throw "self test failed" }
+
       - name: Sign app executable (optional)
         if: steps.signing.outputs.enabled == 'true'
         shell: pwsh
@@ -122,10 +121,10 @@ jobs:
         shell: pwsh
         run: |
           $iscc = Join-Path $env:INNO_DIR "ISCC.exe"
-          & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" `
-                  "/DOutputBase=PDFBoard-nightly-setup" `
-                  "installer/pdfboard.iss"
+          & $iscc "/DAppVersion=${{ steps.ver.outputs.version }}" "installer/pdfboard.iss"
           if ($LASTEXITCODE -ne 0) { throw "Inno Setup failed" }
+          Get-Item "dist/PDFBoard-${{ steps.ver.outputs.version }}-setup.exe" |
+            ForEach-Object { "installer: {0:N1} MB" -f ($_.Length / 1MB) }
 
       - name: Sign installer (optional)
         if: steps.signing.outputs.enabled == 'true'
@@ -139,7 +138,8 @@ jobs:
           $signtool = (Get-ChildItem "C:\Program Files (x86)\Windows Kits\10\bin\*\x64\signtool.exe" |
                        Sort-Object FullName -Descending | Select-Object -First 1).FullName
           & $signtool sign /fd SHA256 /f $pfx /p $env:SIGN_PFX_PASS `
-                           /tr http://timestamp.digicert.com /td SHA256 dist/PDFBoard-nightly-setup.exe
+                           /tr http://timestamp.digicert.com /td SHA256 `
+                           "dist/PDFBoard-${{ steps.ver.outputs.version }}-setup.exe"
           if ($LASTEXITCODE -ne 0) { throw "signing the installer failed" }
 
       - name: Build portable zip
@@ -149,40 +149,42 @@ jobs:
           New-Item -ItemType Directory -Force dist/portable | Out-Null
           Copy-Item dist/stage/* dist/portable -Recurse -Force
           $note = @"
-          大屏 PDF 批注 — 便携版（nightly $ver）
+          大屏 PDF 批注 — 便携版 $ver
 
           1) 解压到任意文件夹，直接运行 pdfboard.exe，无需安装。
           2) 需要 Windows 10/11 64 位；Qt 运行库已随包附带。
           3) 文件关联可在应用内「设置 → 文件关联」一键注册。
-          4) 这是自动构建的夜间版本，可能不稳定；正式版见 Releases 中的版本标签。
+          4) 未做代码签名：SmartScreen 提示时选「更多信息 → 仍要运行」。
 
-          架构：${{ steps.ver.outputs.sha }}    构建时间：$(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC
+          版本：$ver    构建时间：$(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC
           "@
           [System.IO.File]::WriteAllText((Join-Path (Resolve-Path dist/portable) "便携版说明.txt"),
                                           $note, (New-Object System.Text.UTF8Encoding($true)))
-          Compress-Archive -Path "dist/portable/*" -DestinationPath "dist/PDFBoard-nightly-portable.zip" -Force
+          Compress-Archive -Path "dist/portable/*" -DestinationPath "dist/PDFBoard-$ver-portable.zip" -Force
+          Get-Item "dist/PDFBoard-$ver-portable.zip" |
+            ForEach-Object { "portable: {0:N1} MB" -f ($_.Length / 1MB) }
 
-      - name: Publish rolling nightly release
+      - name: Publish stable release
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: nightly
-          name: "Nightly build (${{ steps.ver.outputs.version }})"
-          prerelease: true
+          tag_name: ${{ github.ref_name }}
+          name: "v${{ steps.ver.outputs.version }} — 大屏 PDF 批注"
+          prerelease: false
+          draft: false
+          make_latest: true
+          generate_release_notes: true      # 从提交记录自动生成变更列表
           files: |
-            dist/PDFBoard-nightly-setup.exe
-            dist/PDFBoard-nightly-portable.zip
+            dist/PDFBoard-${{ steps.ver.outputs.version }}-setup.exe
+            dist/PDFBoard-${{ steps.ver.outputs.version }}-portable.zip
           body: |
-            > 这是**自动构建的夜间版本**，随 `main` 的每次提交更新，可能不稳定。
-            > 稳定版本请看 Releases 里的版本标签（如 `v1.0.1`）。
-
-            **提交**：`${{ github.sha }}`
-            **版本号**：`${{ steps.ver.outputs.version }}`
-            **构建时间**：${{ github.event.repository.updated_at }}
-            **变更**：${{ github.event.head_commit.message || '（定时或手动触发）' }}
+            **大屏 PDF 批注 v${{ steps.ver.outputs.version }}** — 面向教室大屏一体机的 PDF 查看 + 手写批注（原生 C++/Qt6，触控与低内存优化）。
 
             | 下载 | 说明 |
             |---|---|
-            | `PDFBoard-nightly-setup.exe` | 安装版：注册到「应用和功能」，可静默部署 `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART` |
-            | `PDFBoard-nightly-portable.zip` | 便携版：解压即用，不写系统 |
+            | `PDFBoard-${{ steps.ver.outputs.version }}-setup.exe` | 安装版：注册到「应用和功能」，支持静默部署 `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART` |
+            | `PDFBoard-${{ steps.ver.outputs.version }}-portable.zip` | 便携版：解压即用，不写系统 |
 
             需要 Windows 10/11 64 位；Qt 运行库已随包附带。
+            未做代码签名，SmartScreen 提示时选「更多信息 → 仍要运行」即可。
+
+            **校验**：构建前跑过 `--selftest-log` 自测门禁；提交 `${{ github.sha }}`。

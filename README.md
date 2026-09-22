@@ -58,7 +58,7 @@
 
 ```powershell
 package.cmd
-# 产物：dist\PDFBoard-1.0.0-setup.exe   （自带 Qt 运行库，约 17 MB）
+# 产物：dist\PDFBoard-1.0.1-setup.exe   （自带 Qt 运行库，约 17 MB）
 ```
 
 安装器做这些事（全部**当前用户**范围，不需要管理员）：
@@ -74,9 +74,9 @@ package.cmd
 **静默部署**（供教室集中管理客户端调用）：
 
 ```bat
-PDFBoard-1.0.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+PDFBoard-1.0.1-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 rem 不要桌面快捷方式：
-PDFBoard-1.0.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
+PDFBoard-1.0.1-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 ```
 
 > 卸载时若程序正在运行，静默模式下无法提示关闭，会残留被占用的文件（Windows 常见行为）。先退出程序再卸载即可完全清除。
@@ -90,8 +90,27 @@ PDFBoard-1.0.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 - 手动触发（Actions → nightly → Run workflow）
 
 产物发布到固定的 **`nightly` 预发布**（每次覆盖同名文件，不会越堆越多）：
-`PDFBoard-nightly-setup.exe` / `PDFBoard-nightly-portable.zip`，版本号形如 `1.0.0-nightly.<提交号>`。
-稳定版本仍以版本标签（如 `v1.0.0`）发布。
+`PDFBoard-nightly-setup.exe` / `PDFBoard-nightly-portable.zip`，版本号形如 `1.0.1-nightly.<提交号>`。
+
+### 稳定版发布
+
+[`.github/workflows/release.yml`](.github/workflows/release.yml) 在推送 `v*` 标签时构建并发布**正式 Release**（非预发布）：
+
+- 产物：`PDFBoard-<版本>-setup.exe` / `PDFBoard-<版本>-portable.zip`
+- 版本号取自 [`installer/pdfboard.iss`](installer/pdfboard.iss) 的 `AppVersion`；workflow 会**校验它与标签一致**，不一致直接失败（防止发出版本号错位的包）
+- 发布前会先跑 `--selftest-log` 自测作为门禁
+
+发版流程：
+
+```powershell
+# 1. 改版本号：installer/pdfboard.iss 的 AppVersion + assets/app.rc 的 FILEVERSION/FileVersion
+# 2. 提交推送
+git commit -am "chore: 版本号 1.0.1"
+git push
+# 3. 打标签并推送，CI 自动出正式 Release
+git tag v1.0.1
+git push origin v1.0.1
+```
 
 ### 代码签名（可选）
 
