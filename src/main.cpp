@@ -9,6 +9,7 @@
 #include "MemProbe.h"
 #include "PaperBase.h"
 #include "PdfCanvas.h"
+#include "SettingsPage.h"
 #include "Theme.h"
 #include "UpdateChecker.h"
 #include "WordConvert.h"
@@ -1408,8 +1409,9 @@ static int runUpdateSelfTest()
     // The fallback server payload (a trimmed copy of the live response shape).
     const QByteArray fallback = QByteArrayLiteral(R"({
         "product":"PDFBoard","version":"1.4.2","tag":"v1.4.2","commit":"ec06228",
-        "notes":"n","downloads":{"setup":"/download/PDFBoard-latest-setup.exe",
-        "portable":"/download/PDFBoard-latest-portable.zip"},
+        "notes":"n","downloads":{
+        "setup":"https://x/download/PDFBoard-1.4.2-setup.exe",
+        "portable":"https://x/download/PDFBoard-1.4.2-portable.zip"},
         "assets":[{"name":"PDFBoard-1.4.2-setup.exe","size":17524694,
         "sha256":"DCDF2C07AA","url":"https://x/download/PDFBoard-1.4.2-setup.exe",
         "stable_url":"https://x/download/PDFBoard-latest-setup.exe"}]})");
@@ -1430,6 +1432,23 @@ static int runUpdateSelfTest()
                                            QStringLiteral("1.0")).valid ? 1 : 0, 0);
 
     // GitHub: with and without the per-asset digest.
+    // URLs are taken VERBATIM: the app never invents a base for them. That is why
+    // the mirror must hand out ABSOLUTE urls (a relative "/download/x" reaches the
+    // browser as a scheme-less URL and the button silently does nothing).
+    check("mirror: portable url verbatim",
+          mirror.portableUrl == QStringLiteral("https://x/download/PDFBoard-1.4.2-portable.zip")
+              ? 1 : 0, 1);
+    {
+        const QByteArray relativePayload = QByteArrayLiteral(R"({
+            "version":"9.9.9","downloads":{"portable":"/download/p.zip"},
+            "assets":[{"name":"PDFBoard-9.9.9-setup.exe","size":1,
+            "sha256":"AA","url":"https://x/setup.exe"}]})");
+        const auto rel = UpdateChecker::parseFallbackJson(relativePayload,
+                                                         QStringLiteral("1.0.0"));
+        check("mirror: no base is invented",
+              rel.portableUrl == QStringLiteral("/download/p.zip") ? 1 : 0, 1);
+    }
+
     const QByteArray ghWithDigest = QByteArrayLiteral(R"({
         "tag_name":"v1.5.0","body":"notes","html_url":"https://github.com/r/rel",
         "assets":[{"name":"PDFBoard-1.5.0-setup.exe","size":10,
@@ -1488,6 +1507,46 @@ static int runUpdateSelfTest()
                                                              QStringLiteral("1.0.0"));
         check("notes: mirror notes kept",
               mirror3.notes.contains(QStringLiteral("备用服务器更新日志")) ? 1 : 0, 1);
+    }
+
+    // The update card is where the changelog stays readable after the dialog is
+    // dismissed, so its content is locked here too. Headless page, and the daily
+    // quiet check is silenced for the duration (restored afterwards): a self test
+    // must stay offline and must not disturb the user's preferences.
+    {
+        const qint64 savedCheck = AppSettings::lastUpdateCheckMs();
+        AppSettings::setLastUpdateCheckMs(QDateTime::currentMSecsSinceEpoch(), nullptr);
+
+        SettingsPage page;
+        page.setAttribute(Qt::WA_DontShowOnScreen, true);
+        page.resize(1200, 900);
+        page.show();
+
+        check("card: notes hidden at first", page.testUpdateNotesShown() ? 0 : 1, 1);
+
+        UpdateChecker::UpdateInfo withNotes;
+        withNotes.valid = true;
+        withNotes.version = QStringLiteral("9.9.9");
+        withNotes.notes = QStringLiteral("- 修好了 A\n- 新增了 B");
+        page.setUpdateInfo(withNotes);
+        check("card: notes shown", page.testUpdateNotesShown() ? 1 : 0, 1);
+        check("card: notes text kept",
+              page.testUpdateNotes().contains(QStringLiteral("修好了 A")) ? 1 : 0, 1);
+
+        UpdateChecker::UpdateInfo noNotes;
+        noNotes.valid = true;
+        noNotes.version = QStringLiteral("9.9.9");
+        page.setUpdateInfo(noNotes);
+        check("card: empty notes explained",
+              page.testUpdateNotes().contains(QStringLiteral("未提供更新日志")) ? 1 : 0, 1);
+
+        const QString unchanged = page.testUpdateNotes();
+        const UpdateChecker::UpdateInfo unparsed2;   // invalid: must change nothing
+        page.setUpdateInfo(unparsed2);
+        check("card: invalid info ignored",
+              page.testUpdateNotes() == unchanged ? 1 : 0, 1);
+
+        AppSettings::setLastUpdateCheckMs(savedCheck, nullptr);
     }
 
     out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")

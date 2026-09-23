@@ -1086,6 +1086,16 @@ void SettingsPage::setUpdateNotes(const QString &notes)
     m_updateNotes->setVisible(true);
 }
 
+QString SettingsPage::testUpdateNotes() const
+{
+    return m_updateNotes ? m_updateNotes->toPlainText() : QString();
+}
+
+bool SettingsPage::testUpdateNotesShown() const
+{
+    return m_updateNotes && m_updateNotes->isVisible();
+}
+
 void SettingsPage::refreshUpdateVersionLine()
 {
     if (!m_updateVersion)

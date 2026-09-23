@@ -46,6 +46,12 @@ public:
     void setUpdateInfo(const UpdateChecker::UpdateInfo &info);
     void focusUpdateSection();
 
+    // --- Test hooks (used by `--selftest-update`) --------------------------
+    // The update card's changelog area is the only place the teacher can read the
+    // release notes after dismissing the dialog, so its content is asserted.
+    QString testUpdateNotes() const;
+    bool    testUpdateNotesShown() const;
+
 signals:
     void themeChanged();     // an appearance mode was picked and stored
     // A transient line for the window's status bar (the Word settings restore
