@@ -151,6 +151,7 @@ static int runSmokeSelfTest(const QString &path)
     int renderNotifies = 0;
     if (canvas) {
         canvas->testResetMaxPaintDepth();
+        canvas->testResetMaxRelayoutDepth();
         QObject::connect(canvas, &PdfCanvas::renderMeasured,
                          [&renderNotifies](qint64, QSize) { ++renderNotifies; });
     }
@@ -247,6 +248,13 @@ static int runSmokeSelfTest(const QString &path)
         QCoreApplication::processEvents();
         check("smoke: paint never re-enters", canvas->testMaxPaintDepth() <= 1 ? 1 : 0, 1);
         check("smoke: render readout still arrives", renderNotifies > 0 ? 1 : 0, 1);
+        // The actual culprit: relayout() toggling a scroll-bar policy resized the
+        // viewport, which re-entered resizeEvent -> relayout() and never settled.
+        check("smoke: relayout never nests", canvas->testMaxRelayoutDepth() <= 4 ? 1 : 0, 1);
+        // Informational: 0 refusals means the structural fix removed the oscillation,
+        // a non-zero count means only the cap is holding it down.
+        out(QStringLiteral("[selftest] 排版拒绝次数 = %1（0 = 反馈环已消失）")
+                .arg(canvas->testRelayoutRefusals()));
     }
 
     // Page switches must not leave a dangling or double-wired control.

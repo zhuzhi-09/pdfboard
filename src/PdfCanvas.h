@@ -149,6 +149,13 @@ public:
     // now refuses to nest; the smoke test asserts the depth never exceeded 1.
     int  testMaxPaintDepth() const;
     void testResetMaxPaintDepth();
+    // relayout() must not nest either: it used to toggle a scroll-bar policy, which
+    // makes Qt resize the viewport, which re-enters resizeEvent -> relayout(). The two
+    // bars then flipped each other's visibility forever - that is the resize
+    // oscillation that exhausted the stack (0xC00000FD) while zooming.
+    int  testMaxRelayoutDepth() const;
+    void testResetMaxRelayoutDepth();
+    int  testRelayoutRefusals() const;   // 0 means the loop is gone, not just capped
     int    strokeCount() const;
     void   clearInk();                  // all pages
     void   clearCurrentPage();          // page under the viewport, undoable
@@ -259,6 +266,14 @@ private:
     qreal m_contentH   = 0;
     qreal m_contentW   = 0;             // widest page (for horizontal panning)
     qreal m_maxPageWpt = 0;
+    // relayout() memo - the layout is a pure function of these, so an identical
+    // request (the resize/scroll-bar feedback loop issues thousands) is a no-op.
+    QPdfDocument *m_layoutDoc = nullptr;
+    qreal m_layoutZoom = -1.0;
+    int   m_layoutW = -1;
+    int   m_layoutH = -1;
+    int   m_layoutPageCount = -1;
+    qreal m_layoutMaxPageWpt = -1.0;
     qreal m_gap        = 14.0;          // vertical gap between pages
     qreal m_marginX    = 10.0;          // left/right gutter
 

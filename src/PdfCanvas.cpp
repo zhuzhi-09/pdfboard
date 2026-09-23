@@ -378,8 +378,46 @@ void PdfCanvas::releaseCachedPages()
     invalidateRenders();
 }
 
+// --- relayout re-entrancy guard ------------------------------------------------
+// relayout() used to end with a scroll-bar POLICY change. A policy change makes
+// QAbstractScrollArea resize the viewport, which re-enters resizeEvent -> relayout();
+// the two bars then kept flipping each other's visibility (the horizontal one depends
+// on the viewport width, the vertical one on its height), and the loop only stopped
+// when the stack ran out - that is the 0xC00000FD we chased through three dumps.
+// Two things prevent it now: the policy is never toggled here (it is set once in the
+// constructor), and this cap turns any residue into a logged no-op.
+static int s_relayoutDepth = 0;
+static int s_relayoutMaxDepth = 0;
+static int s_relayoutRefusals = 0;      // how often the loop asked past the cap
+static constexpr int kRelayoutMaxDepth = 4;
+
+namespace {
+struct RelayoutDepthGuard {
+    RelayoutDepthGuard()
+    {
+        if (++s_relayoutDepth > s_relayoutMaxDepth)
+            s_relayoutMaxDepth = s_relayoutDepth;
+    }
+    ~RelayoutDepthGuard() { --s_relayoutDepth; }
+};
+}   // namespace
+
+int PdfCanvas::testMaxRelayoutDepth() const { return s_relayoutMaxDepth; }
+void PdfCanvas::testResetMaxRelayoutDepth() { s_relayoutMaxDepth = s_relayoutDepth; }
+int PdfCanvas::testRelayoutRefusals() const { return s_relayoutRefusals; }
+
 void PdfCanvas::relayout()
 {
+    if (s_relayoutDepth >= kRelayoutMaxDepth) {
+        // The feedback loop asking yet again: refuse and leave a trace.
+        ++s_relayoutRefusals;
+        CrashLog::breadcrumb("relayout-nested",
+                             QStringLiteral("排版嵌套第 %1 层，已截断")
+                                 .arg(s_relayoutDepth + 1));
+        return;
+    }
+    RelayoutDepthGuard layoutGuard;
+
     if (!m_doc || m_pageSizes.isEmpty()) {
         m_geom.clear();
         m_contentH = 0;
@@ -390,7 +428,23 @@ void PdfCanvas::relayout()
         return;
     }
 
-    const qreal vw = qMax(100, viewport()->width());
+    // Memo: everything below is a pure function of these values, so re-asking with the
+    // same ones - which is exactly what the resize/scroll-bar feedback loop does -
+    // changes nothing and is skipped.
+    const int vwNow = viewport()->width();
+    const int vhNow = viewport()->height();
+    if (m_doc == m_layoutDoc && m_zoom == m_layoutZoom && vwNow == m_layoutW
+        && vhNow == m_layoutH && m_pageSizes.size() == m_layoutPageCount
+        && m_maxPageWpt == m_layoutMaxPageWpt)
+        return;
+    m_layoutDoc        = m_doc;
+    m_layoutZoom       = m_zoom;
+    m_layoutW          = vwNow;
+    m_layoutH          = vhNow;
+    m_layoutPageCount  = m_pageSizes.size();
+    m_layoutMaxPageWpt = m_maxPageWpt;
+
+    const qreal vw = qMax(100, vwNow);
     const qreal availW = qMax<qreal>(100.0, vw - 2.0 * m_marginX);
     m_scale = (m_maxPageWpt > 0 ? availW / m_maxPageWpt : 1.0) * m_zoom;
     m_scale = qBound(0.05, m_scale, 8.0);
@@ -408,9 +462,9 @@ void PdfCanvas::relayout()
     }
     m_contentH = (y > 0 ? y - m_gap + m_ui.pagePadBottom : 0);
 
-    const int maxScroll = qMax(0, int(m_contentH) - viewport()->height());
+    const int maxScroll = qMax(0, int(m_contentH) - vhNow);
     verticalScrollBar()->setRange(0, maxScroll);
-    verticalScrollBar()->setPageStep(qMax(1, viewport()->height()));
+    verticalScrollBar()->setPageStep(qMax(1, vhNow));
     verticalScrollBar()->setSingleStep(48);
 
     // Horizontal: with fit-width the content is exactly the viewport width; when
@@ -418,13 +472,15 @@ void PdfCanvas::relayout()
     qreal widest = 0.0;
     for (const PageGeom &g : m_geom)
         widest = qMax(widest, g.w);
-    m_contentW = qMax<qreal>(viewport()->width(), widest);
-    const int maxHScroll = qMax(0, int(m_contentW) - viewport()->width());
+    m_contentW = qMax<qreal>(vwNow, widest);
+    const int maxHScroll = qMax(0, int(m_contentW) - vwNow);
     horizontalScrollBar()->setRange(0, maxHScroll);
-    horizontalScrollBar()->setPageStep(qMax(1, viewport()->width()));
+    horizontalScrollBar()->setPageStep(qMax(1, vwNow));
     horizontalScrollBar()->setSingleStep(48);
-    setHorizontalScrollBarPolicy(maxHScroll > 0 ? Qt::ScrollBarAsNeeded
-                                                : Qt::ScrollBarAlwaysOff);
+    // The horizontal POLICY is deliberately never touched here (it is set once in the
+    // constructor): toggling it resized the viewport and made this whole function
+    // re-enter itself through resizeEvent. A hidden bar still holds the range and the
+    // value that two-finger panning uses, so nothing is lost.
 }
 
 int PdfCanvas::pageAtContentY(qreal contentY) const
