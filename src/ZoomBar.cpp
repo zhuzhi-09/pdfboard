@@ -132,6 +132,7 @@ ZoomBar::ZoomBar(QWidget *parent)
     m_percent = new QToolButton(this);
     m_percent->setObjectName(QStringLiteral("zoomPercent"));
     m_percent->setAccessibleName(QStringLiteral("缩放比例"));
+    m_percent->setToolTip(QStringLiteral("适配宽度（点击恢复到 100%）"));
     m_percent->setToolButtonStyle(Qt::ToolButtonTextOnly);   // no icon column
     m_percent->setCursor(Qt::PointingHandCursor);
     m_percent->setFocusPolicy(Qt::NoFocus);
@@ -203,13 +204,9 @@ void ZoomBar::syncLabel()
     const int percent = qRound(m_zoom * 100.0);
     m_percent->setText(QStringLiteral("%1%").arg(percent));
 
-    // Never touch the tooltip while the handle is held (or while the pill is under the
-    // pointer): during a drag the percentage pill sits right under the mouse, and
-    // setToolTip() then drives QToolTip's show/hide machinery, which runs nested event
-    // handling. Called on every zoom step it pushed the call stack deeper and deeper
-    // until Qt itself overflowed - the crash reports showed 0xC00000FD inside
-    // Qt6Widgets.dll with a trail of rapid zoom breadcrumbs. A tooltip is not worth a
-    // crash; it is refreshed as soon as the gesture ends.
-    if (!m_slider->isSliderDown() && !m_percent->underMouse())
-        m_percent->setToolTip(QStringLiteral("适配宽度（当前 %1%）").arg(percent));
+    // The tooltip is set ONCE in the constructor and deliberately never written here.
+    // Doing it per zoom step drove QToolTip's nested event handling (the pill sits under
+    // the pointer during a drag) and that is what overflowed the stack inside
+    // Qt6Widgets once already. The current percentage is visible in the label itself, so
+    // a dynamic tooltip buys nothing at all.
 }

@@ -1561,6 +1561,19 @@ void PdfCanvas::setFitWidth(bool on)
 
 void PdfCanvas::applyZoom(qreal targetZoom, const QPointF &anchor, bool immediate)
 {
+    // Re-entry counter for the WHOLE call (a guard object, not a counter around the log
+    // line: incrementing and decrementing around a single statement always reads 1).
+    // A stack overflow means something is nesting, and this breadcrumb names it.
+    static int zoomDepth = 0;
+    struct DepthGuard {
+        int &depth;
+        explicit DepthGuard(int &d) : depth(d) { ++depth; }
+        ~DepthGuard() { --depth; }
+    } guard(zoomDepth);
+    if (zoomDepth > 1)
+        CrashLog::breadcrumb("zoom-reentry",
+                             QStringLiteral("applyZoom 重入第 %1 层").arg(zoomDepth));
+
     if (!m_doc || m_geom.isEmpty())
         return;
 
@@ -1581,8 +1594,7 @@ void PdfCanvas::applyZoom(qreal targetZoom, const QPointF &anchor, bool immediat
         return;
 
     m_zoom = target;
-    // A crash during zooming is the one we are chasing: record the value so the crash
-    // report shows exactly where the last step landed.
+    // Record where the last step landed: the crash report shows the zoom trail.
     CrashLog::breadcrumb("zoom", QString::number(m_zoom, 'f', 3));
     if (immediate) {
         invalidateRenders();
