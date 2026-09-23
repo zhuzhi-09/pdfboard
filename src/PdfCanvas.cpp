@@ -28,9 +28,30 @@
 
 namespace {
 // Input/gesture diagnostics - a no-op unless the opt-in log is enabled.
+//
+// Throttled: a classroom panel delivers these samples far faster than anyone can
+// read them (and some panels repeat each sample several times), so logging every
+// event made the diagnostic itself a stutter source - and made the log unreadable.
+// At most four lines per second, with the merged count appended.
 void eraseLog(const QString &line)
 {
-    AppLog::write(QStringLiteral("input"), line);
+    if (!AppLog::isEnabled())
+        return;                        // no formatting cost when the log is off
+
+    static qint64 lastMs = 0;
+    static int merged = 0;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    if (lastMs != 0 && now - lastMs < 250) {
+        ++merged;
+        return;
+    }
+    QString text = line;
+    if (merged > 0) {
+        text += QStringLiteral("（另有 %1 条同类事件已合并）").arg(merged);
+        merged = 0;
+    }
+    lastMs = now;
+    AppLog::write(QStringLiteral("input"), text);
 }
 }   // namespace
 
@@ -59,6 +80,12 @@ void appendDensified(QVector<QPointF> &pts, const QPointF &p, qreal maxStep)
     const QPointF a = pts.last();
     const QPointF d = p - a;
     const qreal dist = qSqrt(QPointF::dotProduct(d, d));
+    // Panels routinely repeat one physical sample as several identical frames
+    // (a classroom panel was measured at ~420 events/s with 4 duplicates per
+    // sample). Those add nothing but work - the live path would be rebuilt with
+    // 4x the points on every repaint - so drop exact repeats.
+    if (dist < 1e-6)
+        return;
     if (dist <= maxStep) {
         pts.append(p);
         return;
@@ -441,7 +468,16 @@ QImage PdfCanvas::imageFor(int page)
     // (soft) page. Tagging the image with the ratio lets QPainter map it 1:1
     // when it draws into the logical rect.
     const qreal dpr = qMax<qreal>(1.0, viewport() ? viewport()->devicePixelRatioF() : 1.0);
-    QSize target(qMax(1, int(qRound(g.w * dpr))), qMax(1, int(qRound(g.h * dpr))));
+    // While the pen is down (or a pinch is live) a full-resolution raster of a 4K
+    // page costs tens of milliseconds ON THE UI THREAD. That is exactly the stutter
+    // felt at the START of a stroke right after a zoom: the cache was just cleared,
+    // the first repaint re-rasterizes every visible page, and the pen waits for it.
+    // Under load render a coarse raster (4x fewer pixels) instead; the settle timer
+    // sharpens everything once the pen is up.
+    const bool busy = m_drawing || m_erasing || m_pinchActive;
+    const int div = busy ? 2 : 1;
+    QSize target(qMax(1, int(qRound(g.w * dpr)) / div),
+                 qMax(1, int(qRound(g.h * dpr)) / div));
 
     // Safety cap so a single enormous page cannot blow the budget in one shot.
     // ~48 MB = 12 Mpx; A4 stays un-capped up to about 2.9x zoom on a 1366 px
@@ -457,7 +493,9 @@ QImage PdfCanvas::imageFor(int page)
     t.start();
     QImage img = m_doc->render(page, target);
     InputProbe::instance().addRender();
-    img.setDevicePixelRatio(dpr);
+    // A coarse (busy-time) raster is drawn scaled up: tagging it with dpr/div keeps
+    // its LOGICAL size identical to the page rect, so nothing shifts on screen.
+    img.setDevicePixelRatio(dpr / div);
     m_lastRenderMs = t.elapsed();
     m_lastRenderSize = img.size();
     emit renderMeasured(m_lastRenderMs, m_lastRenderSize);
@@ -1164,6 +1202,13 @@ void PdfCanvas::beginInputAt(const QPointF &viewportPos)
     if (m_tool == InkTool::Move)    // free move never draws ink
         return;
 
+    // Writing wins over sharpening: if the page bitmaps are still queued for a
+    // crisp re-render (the 160 ms settle after a zoom), do not start it now - it
+    // would rasterize every visible page while the teacher is writing. endInput()
+    // restarts the timer when the pen comes up.
+    if (m_zoomSettle)
+        m_zoomSettle->stop();
+
     const int page = pageAtViewportPos(viewportPos);
     if (page < 0)
         return;
@@ -1188,8 +1233,16 @@ void PdfCanvas::beginInputAt(const QPointF &viewportPos)
         m_current.width = (pr.width() > 0.0) ? m_penWidth / pr.width()
                                              : kInkDefaultWidthNorm;
     }
+    const int first = m_current.pts.size();
     appendDensified(m_current.pts, toNormalized(page, viewportPos), kInkMaxStepNorm);
-    viewport()->update();
+    if (m_current.pts.size() == first)
+        return;
+    // Same partial repaint as the rest of the stroke: a full-viewport update here
+    // would repaint the whole 4K page just to show the first dot.
+    const QRectF pr = pageRectInViewport(page);
+    const qreal inkPx = qMax<qreal>(1.0, m_current.width * pr.width());
+    viewport()->update(inkDirtyRect(pr, m_current.pts.constData(), m_current.pts.size(),
+                                    0, inkPx * 0.5 + 4.0));
 }
 
 void PdfCanvas::moveInputTo(const QPointF &viewportPos)
@@ -1221,6 +1274,11 @@ void PdfCanvas::moveInputTo(const QPointF &viewportPos)
 
 void PdfCanvas::endInput()
 {
+    // The pen is up: the page may be sharpened again (see beginInputAt). This is
+    // also what replaces a coarse busy-time raster with a crisp one.
+    if (m_zoomSettle)
+        m_zoomSettle->start();
+
     // A two-finger gesture owns the input: never commit a stroke while the ink
     // lock is on (this is where synthesized mouse releases used to leak ink).
     if (m_touchInkBlocked) {
@@ -1776,6 +1834,14 @@ bool PdfCanvas::handleTouch(QTouchEvent *te)
 }
 
 // --- test hooks (used by `--selftest-ink`) --------------------------------
+
+int PdfCanvas::testDensifiedCount(const QVector<QPointF> &raw) const
+{
+    QVector<QPointF> out;                  // runs the real input path
+    for (const QPointF &p : raw)
+        appendDensified(out, p, kInkMaxStepNorm);
+    return out.size();
+}
 
 void PdfCanvas::testZoomAt(const QPointF &viewportAnchor, qreal factor)
 {

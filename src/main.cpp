@@ -208,6 +208,23 @@ static int runInkSelfTest(const QString &path)
               inkDirtyRect(page, nullptr, 0, 0, 4.0).isNull() ? 1 : 0, 1);
     }
 
+    // Panels repeat each physical sample several times (a classroom panel measured
+    // ~420 events/s with 4 identical frames per sample). Storing the repeats would
+    // rebuild the live path with 4x the points on every repaint.
+    {
+        const QVector<QPointF> repeated{QPointF(0.3, 0.3), QPointF(0.3, 0.3),
+                                        QPointF(0.3, 0.3), QPointF(0.3, 0.3)};
+        check("dedupe: repeats collapse", canvas.testDensifiedCount(repeated), 1);
+
+        const QVector<QPointF> clean{QPointF(0.3, 0.3), QPointF(0.5, 0.3)};
+        const QVector<QPointF> noisy{QPointF(0.3, 0.3), QPointF(0.3, 0.3),
+                                     QPointF(0.5, 0.3), QPointF(0.5, 0.3),
+                                     QPointF(0.5, 0.3)};
+        const int plain = canvas.testDensifiedCount(clean);
+        check("dedupe: same as clean path", canvas.testDensifiedCount(noisy), plain);
+        check("dedupe: path still dense", plain > 100 ? 1 : 0, 1);
+    }
+
     canvas.clearInk();
     check("clearInk", canvas.strokeCount(), 0);
 

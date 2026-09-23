@@ -105,6 +105,9 @@ public:
                        const QColor &color, qreal width, int steps = 120,
                        bool densify = true);
     int  testStrokePoints(int page, int index) const;
+    // Number of points the sample path would keep for `raw` (dedupe + densify):
+    // lets the self test prove repeated panel frames are dropped, not stored.
+    int  testDensifiedCount(const QVector<QPointF> &raw) const;
     // On-screen (device px) thickness of a stored stroke at the current zoom.
     qreal testStrokeDeviceWidth(int page, int index) const;
     void  testZoomAt(const QPointF &viewportAnchor, qreal factor);
