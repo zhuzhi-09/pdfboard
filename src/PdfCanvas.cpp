@@ -14,6 +14,8 @@
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QMouseEvent>
+#include <QCursor>
+#include <QGuiApplication>
 #include <QNativeGestureEvent>
 #include <QResizeEvent>
 #include <QScrollBar>
@@ -222,6 +224,16 @@ PdfCanvas::PdfCanvas(QWidget *parent)
     setMinimumSize(320, 240);
     setVerticalScrollBarPolicy(Qt::ScrollBarAsNeeded);
     setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+
+    // The floating island (and the page picker / pen palette) are child widgets, so the
+    // canvas sees no mouse events while the pointer is over them: the eraser ring froze at
+    // the island's edge and could not pass it. A cheap 16 ms poll of the global cursor
+    // keeps the ring and mouse strokes alive across those areas; it idles out immediately
+    // whenever there is nothing to follow.
+    m_pointerTrack = new QTimer(this);
+    m_pointerTrack->setInterval(16);
+    connect(m_pointerTrack, &QTimer::timeout, this, &PdfCanvas::trackPointer);
+    m_pointerTrack->start();
 
     // Chrome look: slim scroll bars, and the gutter beside them in the desk
     // colour so no default widget background shows through.
@@ -794,6 +806,35 @@ void PdfCanvas::paintEmptyState(QPainter &p) const
                QStringLiteral("点击“打开”，或把 PDF / .dpz 批注包拖进来"));
 }
 
+void PdfCanvas::trackPointer()
+{
+    const bool dragging = m_erasing || m_drawing;
+    if (!dragging && m_tool != InkTool::Eraser) {
+        if (m_eraserHover)
+            clearEraserHover();
+        return;
+    }
+    if (dragging && QGuiApplication::mouseButtons() == Qt::NoButton)
+        return;             // touch / stylus drag: those paths track their own pointer
+
+    const QPointF pos = viewport()->mapFromGlobal(QCursor::pos());
+    const bool changed = !m_hasTrackedPos || pos != m_lastTrackedPos;
+    m_lastTrackedPos = pos;
+    m_hasTrackedPos = true;
+
+    if (dragging) {
+        // Keep sampling even where an overlay swallowed the mouse events, so the page
+        // behind the island is still erased instead of the stroke dying at its edge.
+        if (changed && viewport()->rect().contains(pos.toPoint()))
+            moveInputTo(pos);
+        return;
+    }
+    if (viewport()->rect().contains(pos.toPoint()))
+        setEraserHover(pos);
+    else if (m_eraserHover)
+        clearEraserHover();
+}
+
 // --- eraser indicator (screen only) ---------------------------------------------
 // The ring's diameter IS the wipe diameter, so the drawing doubles as the size readout;
 // the glyph in the middle says which tool it is. Both are painted from paintEvent and
@@ -876,7 +917,12 @@ void PdfCanvas::drawEraserIndicator(QPainter &p, const QPointF &viewportPos, qre
 
 void PdfCanvas::applyToolCursor()
 {
-    if (m_tool == InkTool::Eraser && eraserIndicatorVisible()) {
+    // Over an overlay child (island, page picker, pen palette) the indicator is hidden
+    // behind it anyway, so the normal pointer must come back - otherwise the blank cursor
+    // would make those buttons impossible to aim at.
+    const QPointF pos = viewport()->mapFromGlobal(QCursor::pos());
+    const bool overChild = viewport()->childAt(pos.toPoint()) != nullptr;
+    if (!overChild && m_tool == InkTool::Eraser && eraserIndicatorVisible()) {
         // The indicator IS the pointer; two pointers on screen is one too many.
         viewport()->setCursor(Qt::BlankCursor);
         return;

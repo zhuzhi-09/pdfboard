@@ -218,6 +218,8 @@ private:
     void   applyToolCursor();
     void   setEraserHover(const QPointF &viewportPos);
     void   clearEraserHover();
+    // Pointer tracking for the areas the floating overlays swallow (see the .cpp).
+    void   trackPointer();
     void invalidateRenders();           // drop cached bitmaps (on resize/zoom)
     // Applies an absolute zoom while keeping the content point under `anchor`
     // fixed on both axes. `immediate` re-renders at once instead of waiting for
@@ -323,6 +325,11 @@ private:
     // follows this, so a pointer move only repaints two small circles (old + new).
     QPointF m_eraserHoverPos;
     bool    m_eraserHover = false;
+    // Polls the global cursor so the indicator and mouse strokes survive crossing the
+    // floating island (a child widget that would otherwise eat every mouse event).
+    QTimer *m_pointerTrack = nullptr;
+    QPointF m_lastTrackedPos;
+    bool    m_hasTrackedPos = false;
     bool    m_pinchActive = false;      // two-finger zoom+pan in progress
     bool    m_touchInkBlocked = false;  // no inking until every finger lifts
     QVector<QPointF> m_pinchPts;        // last two touch points
