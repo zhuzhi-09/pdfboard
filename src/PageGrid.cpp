@@ -2,6 +2,7 @@
 
 #include "IconPainter.h"
 #include "OverlayDismiss.h"
+#include "PaperBase.h"
 #include "PdfCanvas.h"
 #include "Theme.h"
 
@@ -665,6 +666,11 @@ QImage PageGrid::thumbnailFor(int page)
         return {};
 
     img.setDevicePixelRatio(m_dpr);
+    // The raster carries alpha (a PDF page brings no background of its own), so it
+    // must be laid on paper-white here - otherwise the tile shows the dark "well"
+    // behind it, which is exactly how the thumbnails lost their white paper in
+    // dark mode. Done once, at cache time, instead of on every repaint.
+    img = onPaper(img, Theme::light().paper);
     m_thumbs.insert(page, img);
     m_thumbLru.append(page);
     m_thumbBytes += img.sizeInBytes();

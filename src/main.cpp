@@ -7,6 +7,7 @@
 #include "InkToolbar.h"
 #include "InputProbe.h"
 #include "MemProbe.h"
+#include "PaperBase.h"
 #include "PdfCanvas.h"
 #include "Theme.h"
 #include "UpdateChecker.h"
@@ -223,6 +224,21 @@ static int runInkSelfTest(const QString &path)
         const int plain = canvas.testDensifiedCount(clean);
         check("dedupe: same as clean path", canvas.testDensifiedCount(noisy), plain);
         check("dedupe: path still dense", plain > 100 ? 1 : 0, 1);
+    }
+
+    // A page raster carries alpha, so anything showing a page must lay paper-white
+    // underneath. Missing that backdrop is why the page-picker thumbnails lost
+    // their white paper in dark mode.
+    {
+        QImage transparent(4, 4, QImage::Format_ARGB32_Premultiplied);
+        transparent.fill(Qt::transparent);
+        transparent.setDevicePixelRatio(2.0);
+        const QImage backed = onPaper(transparent, Theme::light().paper);
+        check("paper: size kept", backed.size() == transparent.size() ? 1 : 0, 1);
+        check("paper: dpr kept", qFuzzyCompare(backed.devicePixelRatio(), 2.0) ? 1 : 0, 1);
+        check("paper: now opaque", backed.pixelColor(1, 1).alpha() == 255 ? 1 : 0, 1);
+        check("paper: is paper", backed.pixelColor(1, 1) == Theme::light().paper ? 1 : 0, 1);
+        check("paper: null safe", onPaper(QImage(), Theme::light().paper).isNull() ? 1 : 0, 1);
     }
 
     canvas.clearInk();
