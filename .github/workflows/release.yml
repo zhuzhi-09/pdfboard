@@ -93,6 +93,17 @@ jobs:
               --no-system-d3d-compiler dist/stage/pdfboard.exe
           if ($LASTEXITCODE -ne 0) { throw "windeployqt failed" }
           Remove-Item dist/stage/dxcompiler.dll, dist/stage/dxil.dll, dist/stage/vc_redist.x64.exe -ErrorAction SilentlyContinue
+          # VC++ runtime, deployed app-local: a classroom machine may not have it (the
+          # app then cannot start at all) and vc_redist needs admin rights, which this
+          # per-user installer deliberately avoids. Microsoft supports shipping these
+          # DLLs next to the exe; the VS redist folder is the licensed source.
+          $crt = Get-ChildItem (Join-Path $env:VCToolsRedistDir "..\..") -Directory |
+                 ForEach-Object { Join-Path $_.FullName "x64\Microsoft.VC143.CRT" } |
+                 Where-Object { Test-Path (Join-Path $_ "msvcp140.dll") } |
+                 Select-Object -First 1
+          if (-not $crt) { throw "VC redist folder not found; the package would not start on machines without the runtime" }
+          Copy-Item "$crt\*.dll" dist/stage/ -Force
+          "bundled VC runtime from: $crt"
           New-Item -ItemType Directory -Force dist/stage/translations | Out-Null
           Copy-Item "$env:QT_ROOT_DIR/translations/*zh_CN.qm" dist/stage/translations/ -ErrorAction SilentlyContinue
 

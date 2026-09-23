@@ -97,6 +97,15 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "windeployqt failed" }
           # D3D12 着色器编译器与本程序无关（本地包不含这两者，实测运行正常）。
           Remove-Item dist/stage/dxcompiler.dll, dist/stage/dxil.dll, dist/stage/vc_redist.x64.exe -ErrorAction SilentlyContinue
+          # VC++ runtime, app-local: classroom machines may not have it installed, and
+          # vc_redist needs admin rights this per-user installer avoids.
+          $crt = Get-ChildItem (Join-Path $env:VCToolsRedistDir "..\..") -Directory |
+                 ForEach-Object { Join-Path $_.FullName "x64\Microsoft.VC143.CRT" } |
+                 Where-Object { Test-Path (Join-Path $_ "msvcp140.dll") } |
+                 Select-Object -First 1
+          if (-not $crt) { throw "VC redist folder not found; the package would not start on machines without the runtime" }
+          Copy-Item "$crt\*.dll" dist/stage/ -Force
+          "bundled VC runtime from: $crt"
           New-Item -ItemType Directory -Force dist/stage/translations | Out-Null
           Copy-Item "$env:QT_ROOT_DIR/translations/*zh_CN.qm" dist/stage/translations/ -ErrorAction SilentlyContinue
           Get-ChildItem dist/stage -Recurse -File | Measure-Object Length -Sum |
@@ -190,7 +199,7 @@ jobs:
             dist/PDFBoard-nightly-portable.zip
           body: |
             > 这是**自动构建的夜间版本**，随 `main` 的每次提交更新，可能不稳定。
-            > 稳定版本请看 Releases 里的版本标签（如 `v1.7.5`）。
+            > 稳定版本请看 Releases 里的版本标签（如 `v1.7.6`）。
 
             **提交**：`${{ github.sha }}`
             **版本号**：`${{ steps.ver.outputs.version }}`

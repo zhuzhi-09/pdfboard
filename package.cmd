@@ -35,7 +35,22 @@ copy /y "%~dp0build\pdfboard.exe" "%~dp0dist\stage\" >nul || ( echo [package] co
 rem No --compiler-runtime (the per-user install cannot elevate to install it),
 rem no translation bundle except the Chinese one the app asks for.
 "%QT%\bin\windeployqt.exe" --release --no-translations --no-system-d3d-compiler "%~dp0dist\stage\pdfboard.exe" || ( echo [package] windeployqt failed & exit /b 1 )
-del /q "%~dp0dist\stage\dxcompiler.dll" "%~dp0dist\stage\dxil.dll" "%~dp0dist\stage\vc_redist.x64.exe" 2>nul
+  del /q "%~dp0dist\stage\dxcompiler.dll" "%~dp0dist\stage\dxil.dll" "%~dp0dist\stage\vc_redist.x64.exe" 2>nul
+
+  rem VC++ runtime, deployed app-local. A classroom machine may not have it installed
+  rem at all (then the app cannot start: "MSVCP140.dll is missing"), and vc_redist
+  rem needs admin rights, which this per-user installer deliberately avoids. Copying the
+  rem DLLs next to the exe is Microsoft's supported deployment; the VS redist folder is
+  rem the licensed source. Failing here is better than shipping a package that will not
+  rem start on the machines we care about.
+  set "CRT="
+  for /d %%D in ("%VS%\VC\Redist\MSVC\*") do if exist "%%D\x64\Microsoft.VC143.CRT\msvcp140.dll" set "CRT=%%D\x64\Microsoft.VC143.CRT"
+  if not defined CRT (
+      echo [package] ERROR: VC redist folder not found under "%VS%\VC\Redist\MSVC"
+      exit /b 1
+  )
+  copy /y "%CRT%\*.dll" "%~dp0dist\stage\" >nul || ( echo [package] VC runtime copy failed & exit /b 1 )
+  echo [package] VC runtime bundled from %CRT%
 mkdir "%~dp0dist\stage\translations" 2>nul
 copy /y "%QT%\translations\*zh_CN.qm" "%~dp0dist\stage\translations\" >nul 2>nul
 
