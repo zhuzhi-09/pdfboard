@@ -49,7 +49,14 @@ rem no translation bundle except the Chinese one the app asks for.
       echo [package] ERROR: VC redist folder not found under "%VS%\VC\Redist\MSVC"
       exit /b 1
   )
-  copy /y "%CRT%\*.dll" "%~dp0dist\stage\" >nul || ( echo [package] VC runtime copy failed & exit /b 1 )
+  rem Copy only the modules the app and Qt actually import. The full CRT folder also
+  rem contains brand-new helpers (vcruntime140_threads.dll, msvcp140_atomic_wait.dll)
+  rem that fail to initialise on older Windows - shipping them made the app die at
+  rem startup with 0xC0000142 (DLL init failed) on the build runner.
+  for %%F in (msvcp140.dll msvcp140_1.dll msvcp140_2.dll vcruntime140.dll vcruntime140_1.dll) do (
+      if not exist "%CRT%\%%F" ( echo [package] ERROR: missing %%F in %CRT% & exit /b 1 )
+      copy /y "%CRT%\%%F" "%~dp0dist\stage\" >nul || ( echo [package] copy of %%F failed & exit /b 1 )
+  )
   echo [package] VC runtime bundled from %CRT%
 mkdir "%~dp0dist\stage\translations" 2>nul
 copy /y "%QT%\translations\*zh_CN.qm" "%~dp0dist\stage\translations\" >nul 2>nul

@@ -107,7 +107,17 @@ jobs:
                  Where-Object { Test-Path (Join-Path $_.FullName "msvcp140.dll") } |
                  Select-Object -First 1
           if (-not $crt) { throw "VC redist folder not found; the package would not start on machines without the runtime" }
-          Copy-Item "$($crt.FullName)\*.dll" dist/stage/ -Force
+          # Copy only the modules the app and Qt actually import: the full CRT folder
+          # also holds brand-new helpers (vcruntime140_threads.dll,
+          # msvcp140_atomic_wait.dll) that fail to initialise on older Windows, which
+          # made the app die at startup with 0xC0000142 on this runner.
+          $crtFiles = "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
+                      "vcruntime140.dll", "vcruntime140_1.dll"
+          foreach ($name in $crtFiles) {
+            $from = Join-Path $crt.FullName $name
+            if (-not (Test-Path $from)) { throw "missing $name in $($crt.FullName)" }
+            Copy-Item $from dist/stage/ -Force
+          }
           "bundled VC runtime from: $($crt.FullName)"
           New-Item -ItemType Directory -Force dist/stage/translations | Out-Null
           Copy-Item "$env:QT_ROOT_DIR/translations/*zh_CN.qm" dist/stage/translations/ -ErrorAction SilentlyContinue
