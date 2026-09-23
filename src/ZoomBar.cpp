@@ -122,7 +122,10 @@ ZoomBar::ZoomBar(QWidget *parent)
     m_slider = new QSlider(Qt::Horizontal, this);
     m_slider->setObjectName(QStringLiteral("zoomSlider"));
     m_slider->setAccessibleName(QStringLiteral("缩放滑块"));
-    m_slider->setToolTip(QStringLiteral("拖动调整缩放"));
+    // Deliberately NO tooltip: the handle sits under the pointer for the whole drag,
+    // and QToolTip's hover machinery then runs its nested event handling in the middle
+    // of a paint (0xC00000FD in Qt6Widgets). The control needs no hint anyway - it is
+    // a zoom slider with a percentage readout right next to it.
     m_slider->setRange(0, ZoomBarMath::kSliderMax);
     m_slider->setSingleStep(1);
     m_slider->setPageStep(ZoomBarMath::kSliderMax / 20);   // quiet PageUp / PageDown

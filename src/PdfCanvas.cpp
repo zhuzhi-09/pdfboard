@@ -511,7 +511,17 @@ QImage PdfCanvas::imageFor(int page)
     img.setDevicePixelRatio(dpr / div);
     m_lastRenderMs = t.elapsed();
     m_lastRenderSize = img.size();
-    emit renderMeasured(m_lastRenderMs, m_lastRenderSize);
+    // Queue the readout: it feeds the status bar, which lives outside this paint.
+    // Emitting it straight from here let Qt flush a dirty region immediately and
+    // re-enter painting - that recursion is the 0xC00000FD. Coalesced, so a burst of
+    // renders still costs exactly one queued event.
+    if (!m_renderNotifyPending) {
+        m_renderNotifyPending = true;
+        QMetaObject::invokeMethod(this, [this] {
+            m_renderNotifyPending = false;
+            emit renderMeasured(m_lastRenderMs, m_lastRenderSize);
+        }, Qt::QueuedConnection);
+    }
     // Slow pages are the first thing to look at when scrolling feels bad.
     if (m_lastRenderMs > 40)
         AppLog::write(QStringLiteral("render"),
@@ -728,8 +738,44 @@ void PdfCanvas::paintEmptyState(QPainter &p) const
                QStringLiteral("点击“打开”，或把 PDF / .dpz 批注包拖进来"));
 }
 
+// --- paint re-entrancy guard -----------------------------------------------------
+// The crash we chased was a stack overflow (0xC00000FD) while zooming: ~2200 nested
+// frames, every one of them re-entering this function through Qt6Widgets/Qt6Gui. The
+// trigger was a synchronous repaint started from INSIDE a paint event (a status-bar
+// update made Qt flush the dirty region straight away), and Qt keeps painting while
+// dirty regions exist - so the recursion ends only when the stack does.
+//
+// Painting is idempotent, so refusing to nest costs nothing: whoever asked for the
+// inner paint gets it from the event loop as soon as this one returns. That makes
+// the whole class of crash impossible no matter what the trigger is.
+static int s_paintDepth = 0;
+static int s_paintMaxDepth = 0;
+
+namespace {
+struct PaintDepthGuard {
+    PaintDepthGuard()
+    {
+        if (++s_paintDepth > s_paintMaxDepth)
+            s_paintMaxDepth = s_paintDepth;
+    }
+    ~PaintDepthGuard() { --s_paintDepth; }
+};
+}   // namespace
+
+int PdfCanvas::testMaxPaintDepth() const { return s_paintMaxDepth; }
+void PdfCanvas::testResetMaxPaintDepth() { s_paintMaxDepth = s_paintDepth; }
+
 void PdfCanvas::paintEvent(QPaintEvent *)
 {
+    if (s_paintDepth > 0) {
+        // Already painting: this is exactly the recursion the guard is for.
+        CrashLog::breadcrumb(
+            "paint-nested",
+            QStringLiteral("绘制嵌套第 %1 层，已截断").arg(s_paintDepth + 1));
+        return;
+    }
+    PaintDepthGuard paintGuard;
+
     InputProbe &probe = InputProbe::instance();
     probe.addPaint();
     probe.setZoom(m_zoom);

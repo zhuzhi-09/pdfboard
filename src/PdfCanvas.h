@@ -143,6 +143,12 @@ public:
     qint64 lastRenderMs() const { return m_lastRenderMs; }
     InkToolbar *toolbar() const { return m_toolbar; }   // for host-level actions
     QSize  lastRenderSize() const { return m_lastRenderSize; }
+    // A synchronous repaint started from inside a paint event is what overflowed the
+    // stack (0xC00000FD, ~2200 nested frames, all of them re-entering paintEvent
+    // through Qt6Widgets/Qt6Gui) while the zoom control was dragged. paintEvent()
+    // now refuses to nest; the smoke test asserts the depth never exceeded 1.
+    int  testMaxPaintDepth() const;
+    void testResetMaxPaintDepth();
     int    strokeCount() const;
     void   clearInk();                  // all pages
     void   clearCurrentPage();          // page under the viewport, undoable
@@ -291,4 +297,5 @@ private:
 
     qint64 m_lastRenderMs = 0;
     QSize  m_lastRenderSize;
+    bool   m_renderNotifyPending = false;   // one queued status-bar update at a time
 };

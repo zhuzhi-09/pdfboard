@@ -143,6 +143,18 @@ static int runSmokeSelfTest(const QString &path)
         }
     }
 
+    // The stack overflow (0xC00000FD) was a synchronous repaint started from INSIDE
+    // paintEvent: the render readout went straight from the paint to the status bar,
+    // Qt flushed the dirty region immediately and painting re-entered itself ~2200
+    // frames deep. Two things now hold it down: paintEvent refuses to nest, and the
+    // readout is queued. Both are asserted below.
+    int renderNotifies = 0;
+    if (canvas) {
+        canvas->testResetMaxPaintDepth();
+        QObject::connect(canvas, &PdfCanvas::renderMeasured,
+                         [&renderNotifies](qint64, QSize) { ++renderNotifies; });
+    }
+
     // The reported crash: RAPIDLY adjusting the zoom, reproducible on the classroom
     // VM only. That machine runs 250 % DPI, so every zoom step re-rasterises large
     // page bitmaps and the 160 ms settle timer lands in the middle of the sequence.
@@ -228,6 +240,13 @@ static int runSmokeSelfTest(const QString &path)
             QCoreApplication::processEvents();
         }
         check("smoke: survived ctrl+wheel spam", 1, 1);
+
+        // Regression for the 0xC00000FD: painting must never nest (a nested paint IS
+        // the recursion), and the render readout must still reach the status bar - now
+        // delivered by the event loop instead of from inside the paint.
+        QCoreApplication::processEvents();
+        check("smoke: paint never re-enters", canvas->testMaxPaintDepth() <= 1 ? 1 : 0, 1);
+        check("smoke: render readout still arrives", renderNotifies > 0 ? 1 : 0, 1);
     }
 
     // Page switches must not leave a dangling or double-wired control.
