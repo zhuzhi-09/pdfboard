@@ -20,6 +20,7 @@
 #include <QLineF>
 #include <QTimer>
 #include <QTouchEvent>
+#include <QTabletEvent>
 #include <QtMath>
 
 namespace {
@@ -37,7 +38,7 @@ constexpr int kMaxUndoSnapshots = 100;
 // Densification: a stroke must not contain segments longer than this (in
 // normalized page units), otherwise sparse input (fast drags, touch
 // coalescing) makes erasing coarse and hit-testing unreliable.
-constexpr qreal kInkMaxStepNorm = 0.0025;   // ~0.25% of the page width
+constexpr qreal kInkMaxStepNorm = 0.0015;   // ~0.15% of the page width
 constexpr int   kInkMaxInterpSteps = 400;   // hard cap per input sample
 
 // Fallback normalized stroke width (~0.4 % of the page width) used when the
@@ -536,12 +537,25 @@ void PdfCanvas::drawInk(QPainter &p, int page, const QRectF &rect)
     auto drawStroke = [&p, &rect](const Stroke &s) {
         if (s.pts.size() < 2)
             return;
+        // Smooth through the samples instead of joining them with straight
+        // segments: sparse input (a fast pen stroke, touch coalescing) otherwise
+        // turns into visible corners, and zooming in makes every corner larger.
+        // This is the standard quadratic scheme - the curve runs through the
+        // midpoints and each sample acts as its control point.
+        const auto device = [&rect](const QPointF &n) {
+            return QPointF(rect.left() + n.x() * rect.width(),
+                           rect.top() + n.y() * rect.height());
+        };
         QPainterPath path;
-        const QPointF f = s.pts.first();
-        path.moveTo(rect.left() + f.x() * rect.width(), rect.top() + f.y() * rect.height());
-        for (int i = 1; i < s.pts.size(); ++i) {
-            const QPointF q = s.pts.at(i);
-            path.lineTo(rect.left() + q.x() * rect.width(), rect.top() + q.y() * rect.height());
+        path.moveTo(device(s.pts.first()));
+        if (s.pts.size() == 2) {
+            path.lineTo(device(s.pts.last()));
+        } else {
+            for (int i = 1; i < s.pts.size() - 1; ++i) {
+                const QPointF mid = (s.pts.at(i) + s.pts.at(i + 1)) * 0.5;
+                path.quadTo(device(s.pts.at(i)), device(mid));
+            }
+            path.lineTo(device(s.pts.last()));
         }
         // Stroke width is stored relative to the page width -> scale to device px
         p.setPen(QPen(s.color, qMax<qreal>(0.5, s.width * rect.width()),
@@ -1541,6 +1555,12 @@ bool PdfCanvas::event(QEvent *e)
 bool PdfCanvas::viewportEvent(QEvent *e)
 {
     switch (e->type()) {
+    case QEvent::TabletPress:
+    case QEvent::TabletMove:
+    case QEvent::TabletRelease:
+        if (handleTablet(static_cast<QTabletEvent *>(e)))
+            return true;
+        break;
     case QEvent::TouchBegin:
     case QEvent::TouchUpdate:
     case QEvent::TouchEnd:
@@ -1552,6 +1572,43 @@ bool PdfCanvas::viewportEvent(QEvent *e)
         break;
     }
     return QAbstractScrollArea::viewportEvent(e);
+}
+
+// A pen/stylus reports several times the sample rate of the synthesized mouse
+// events that follow it, so its own positions are used for the stroke. The touch
+// lock is reused to keep those synthesized mouse events out for the duration of
+// the stroke (and briefly after it) - the same trick the touch path uses.
+bool PdfCanvas::handleTablet(QTabletEvent *te)
+{
+    if (m_tool == InkTool::Move)
+        return false;                      // free move is a finger gesture
+    if (!m_doc || m_geom.isEmpty())
+        return false;
+
+    const QPointF pos = te->position();    // viewport coordinates
+    switch (te->type()) {
+    case QEvent::TabletPress:
+        if (m_touchInkBlocked)
+            return true;                   // a gesture owns the input
+        m_touchInkBlocked = true;          // swallow the synthesized mice
+        if (m_touchRelease)
+            m_touchRelease->stop();
+        beginInputAt(pos);
+        return true;
+    case QEvent::TabletMove:
+        if (m_drawing || m_erasing)
+            moveInputTo(pos);
+        return true;
+    case QEvent::TabletRelease:
+        endInput();
+        // Keep the lock for a moment: the synthesized mouse release trails in.
+        if (m_touchRelease)
+            m_touchRelease->start();
+        return true;
+    default:
+        break;
+    }
+    return false;
 }
 
 // One finger draws / erases; two fingers pinch-zoom and pan at the same time.

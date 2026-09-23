@@ -14,6 +14,7 @@
 class QPdfDocument;
 class QPainter;
 class QTouchEvent;
+class QTabletEvent;
 class QTimer;
 class InkToolbar;
 
@@ -202,6 +203,9 @@ private:
     // sample. Returns true while a move drag is in progress.
     bool freePanTo(const QPointF &viewportPos);
     bool handleTouch(QTouchEvent *te);               // 1 finger ink, 2 fingers zoom+pan
+    // Pen/stylus input: a real pen reports several times the sample rate of the
+    // synthesized mouse events, which is what smooth fast writing needs.
+    bool handleTablet(QTabletEvent *te);
     void panBy(const QPointF &delta);
 
     QPdfDocument *m_doc = nullptr;
