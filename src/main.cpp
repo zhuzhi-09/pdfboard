@@ -3,12 +3,14 @@
 #include "AppLog.h"
 #include "AppSettings.h"
 #include "HomePage.h"
+#include "ImageImport.h"
 #include "InkDirty.h"
 #include "InkToolbar.h"
 #include "InputProbe.h"
 #include "MemProbe.h"
 #include "PaperBase.h"
 #include "PdfCanvas.h"
+#include "PdfExport.h"
 #include "SettingsPage.h"
 #include "Theme.h"
 #include "UpdateChecker.h"
@@ -29,6 +31,8 @@
 #include <QLocalSocket>
 #include <QMap>
 #include <QMouseEvent>
+#include <QPainter>
+#include <QRect>
 #include <QScreen>
 #include <QElapsedTimer>
 #include <QImage>
@@ -46,6 +50,7 @@
 #include <QLibraryInfo>
 #include <QLocale>
 #include <QtGlobal>
+#include <QtMath>
 
 #include <cstdio>
 #include <windows.h>
@@ -1554,6 +1559,170 @@ static int runUpdateSelfTest()
     return failed == 0 ? 0 : 3;
 }
 
+// Headless image self test:  pdfboard.exe --selftest-image
+// Fully self-contained: every fixture is generated under QDir::temp(), no
+// network and no external file. Locks the extension filter, the points-per-pixel
+// rule, the PNG naming rule, the lossless image -> PDF -> PNG 1:1 round trip and
+// the oversize downscale, then deletes everything it wrote.
+static int runImageSelfTest()
+{
+    int failed = 0;
+    auto check = [&failed](const char *what, int got, int want) {
+        const bool ok = (got == want);
+        if (!ok)
+            ++failed;
+        out(QStringLiteral("[selftest] %1: got %2 want %3 -> %4")
+                .arg(QString::fromLatin1(what), -28)
+                .arg(got).arg(want)
+                .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+    };
+
+    // --- extension filter ---------------------------------------------------
+    check("isImage: .png", int(ImageImport::isImage(QStringLiteral("C:/a/b.png"))), 1);
+    check("isImage: .PNG", int(ImageImport::isImage(QStringLiteral("C:/a/b.PNG"))), 1);
+    check("isImage: .jpg", int(ImageImport::isImage(QStringLiteral("C:/a/b.jpg"))), 1);
+    check("isImage: .jpeg", int(ImageImport::isImage(QStringLiteral("C:/a/b.jpeg"))), 1);
+    check("isImage: .bmp", int(ImageImport::isImage(QStringLiteral("C:/a/b.bmp"))), 1);
+    check("isImage: .gif", int(ImageImport::isImage(QStringLiteral("C:/a/b.gif"))), 1);
+    check("isImage: .webp", int(ImageImport::isImage(QStringLiteral("C:/a/b.webp"))), 1);
+    check("isImage: .tif", int(ImageImport::isImage(QStringLiteral("C:/a/b.tif"))), 1);
+    check("isImage: .tiff", int(ImageImport::isImage(QStringLiteral("C:/a/b.tiff"))), 1);
+    check("isImage: .pdf rejected", int(ImageImport::isImage(QStringLiteral("C:/a/b.pdf"))), 0);
+    check("isImage: .dpz rejected", int(ImageImport::isImage(QStringLiteral("C:/a/b.dpz"))), 0);
+    check("isImage: .docx rejected", int(ImageImport::isImage(QStringLiteral("C:/a/b.docx"))), 0);
+    check("isImage: .txt rejected", int(ImageImport::isImage(QStringLiteral("C:/a/b.txt"))), 0);
+    check("isImage: no extension rejected",
+          int(ImageImport::isImage(QStringLiteral("C:/a/无后缀"))), 0);
+
+    // --- points per pixel: pixels * 72/96 -----------------------------------
+    const QSizeF pt = ImageImport::pageSizePtFor(QSize(800, 600));
+    check("pageSizePt: width 600", int(qRound(pt.width())), 600);
+    check("pageSizePt: height 450", int(qRound(pt.height())), 450);
+
+    // --- PNG naming rule ----------------------------------------------------
+    check("pngName: pad to width of 12",
+          int(PdfExport::pngPageName(QStringLiteral("C:/a/名"), 3, 12)
+              == QStringLiteral("C:/a/名-03.png")), 1);
+    check("pngName: no pad for 5",
+          int(PdfExport::pngPageName(QStringLiteral("C:/a/名"), 3, 5)
+              == QStringLiteral("C:/a/名-3.png")), 1);
+    check("pngName: single page",
+          int(PdfExport::pngPageName(QStringLiteral("C:/a/名"), 1, 1)
+              == QStringLiteral("C:/a/名-1.png")), 1);
+    check("pngName: backslash path",
+          int(PdfExport::pngPageName(QStringLiteral("C:\\a\\名"), 2, 10)
+              == QStringLiteral("C:\\a\\名-02.png")), 1);
+
+    // --- everything below writes only under %TEMP% --------------------------
+    const QString dir = QDir(QDir::tempPath())
+                            .filePath(QStringLiteral("pdfboard-selftest-image"));
+    QDir().mkpath(dir);
+
+    // --- end-to-end 1:1 round trip -----------------------------------------
+    // 800x600 image -> page 600x450 pt -> rendered at 96 dpi = exactly 800x600.
+    // Distinct solid quadrants plus a 10 px border make any channel swap or
+    // scaling error visible in the sampled pixels.
+    const QString srcPng = QDir(dir).filePath(QStringLiteral("roundtrip-src.png"));
+    const QString pdfPath = QDir(dir).filePath(QStringLiteral("roundtrip.pdf"));
+    const QString basePath = QDir(dir).filePath(QStringLiteral("roundtrip-out"));
+    QFile::remove(srcPng);
+    QFile::remove(pdfPath);
+    QFile::remove(basePath + QStringLiteral("-1.png"));
+
+    const QColor red(0xD3, 0x2F, 0x2F), green(0x2E, 0x7D, 0x32);
+    const QColor blue(0x19, 0x76, 0xD2), yellow(0xF9, 0xA8, 0x25);
+    QImage source(800, 600, QImage::Format_RGB32);
+    {
+        source.fill(Qt::white);
+        QPainter p(&source);
+        p.fillRect(QRect(10, 10, 390, 290), red);
+        p.fillRect(QRect(400, 10, 390, 290), green);
+        p.fillRect(QRect(10, 300, 390, 290), blue);
+        p.fillRect(QRect(400, 300, 390, 290), yellow);
+        p.fillRect(QRect(0, 0, 800, 10), Qt::black);
+        p.fillRect(QRect(0, 590, 800, 10), Qt::black);
+        p.fillRect(QRect(0, 0, 10, 600), Qt::black);
+        p.fillRect(QRect(790, 0, 10, 600), Qt::black);
+    }
+    check("roundtrip: source saved", int(source.save(srcPng, "PNG")), 1);
+
+    QString err;
+    check("roundtrip: image -> pdf", int(ImageImport::toPdf(srcPng, pdfPath, &err)), 1);
+
+    PdfCanvas canvas;
+    canvas.setAttribute(Qt::WA_DontShowOnScreen, true);
+    canvas.resize(1000, 800);
+    canvas.show();
+    QString openErr;
+    check("roundtrip: pdf opens", int(canvas.openPdf(pdfPath, &openErr)), 1);
+
+    err.clear();
+    const int written = PdfExport::exportPngPages(&canvas, basePath, &err);
+    check("roundtrip: one png written", written, 1);
+
+    const QString outPng = PdfExport::pngPageName(basePath, 1, 1);
+    const QImage exported(outPng);
+    check("roundtrip: png loaded", int(!exported.isNull()), 1);
+    check("roundtrip: png is 800x600", int(exported.size() == QSize(800, 600)), 1);
+
+    auto samePixel = [&source, &exported](int x, int y) {
+        const QRgb a = source.pixel(x, y);
+        const QRgb b = exported.pixel(x, y);
+        return qAbs(qRed(a) - qRed(b)) <= 8
+            && qAbs(qGreen(a) - qGreen(b)) <= 8
+            && qAbs(qBlue(a) - qBlue(b)) <= 8;
+    };
+    check("roundtrip: quadrant TL kept", int(samePixel(200, 150)), 1);
+    check("roundtrip: quadrant TR kept", int(samePixel(600, 150)), 1);
+    check("roundtrip: quadrant BL kept", int(samePixel(200, 450)), 1);
+    check("roundtrip: quadrant BR kept", int(samePixel(600, 450)), 1);
+    check("roundtrip: border stayed black",
+          int(qGray(exported.pixel(400, 5)) < 40), 1);
+
+    // --- oversize (18 MPx) must be scaled, aspect kept ----------------------
+    const QString bigSrc = QDir(dir).filePath(QStringLiteral("oversize-src.jpg"));
+    const QString bigPdf = QDir(dir).filePath(QStringLiteral("oversize.pdf"));
+    QFile::remove(bigSrc);
+    QFile::remove(bigPdf);
+    {
+        QImage big(6000, 3000, QImage::Format_RGB32);
+        big.fill(QColor(0x40, 0x80, 0xC0));
+        {
+            QPainter p(&big);
+            p.fillRect(QRect(0, 0, 6000, 300), Qt::white);
+        }
+        check("oversize: source saved", int(big.save(bigSrc, "JPG", 85)), 1);
+    }
+    QString bigErr;
+    check("oversize: image -> pdf", int(ImageImport::toPdf(bigSrc, bigPdf, &bigErr)), 1);
+
+    PdfCanvas bigCanvas;
+    bigCanvas.setAttribute(Qt::WA_DontShowOnScreen, true);
+    bigCanvas.resize(600, 400);
+    bigCanvas.show();
+    QString bigOpenErr;
+    check("oversize: pdf opens", int(bigCanvas.openPdf(bigPdf, &bigOpenErr)), 1);
+    const QSizeF bigPt = bigCanvas.pagePointSize(0);
+    const qint64 keptW = qint64(qRound(bigPt.width() * 96.0 / 72.0));
+    const qint64 keptH = qint64(qRound(bigPt.height() * 96.0 / 72.0));
+    out(QStringLiteral("[selftest] oversize kept: %1x%2 px (page %3x%4 pt)")
+            .arg(keptW).arg(keptH)
+            .arg(bigPt.width(), 0, 'f', 2).arg(bigPt.height(), 0, 'f', 2));
+    check("oversize: kept <= kMaxPixels",
+          int(keptW * keptH <= qint64(ImageImport::kMaxPixels)), 1);
+    check("oversize: aspect stays 2:1",
+          int(qAbs(qreal(keptW) / qreal(keptH) - 2.0) < 0.01), 1);
+
+    // --- cleanup: leave no trace -------------------------------------------
+    bigCanvas.closePdf();
+    canvas.closePdf();
+    check("cleanup: temp dir removed", int(QDir(dir).removeRecursively()), 1);
+
+    out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")
+                    : QStringLiteral("[selftest] %1 CHECK(S) FAILED").arg(failed));
+    return failed == 0 ? 0 : 3;
+}
+
 // Single-instance plumbing: the first process owns a named local socket and
 // every later launch hands its document paths over before exiting, so opening a
 // file never pops up a second window. QtNetwork backs this; no WinAPI needed.
@@ -1712,6 +1881,7 @@ int main(int argc, char **argv)
     const int homeIdx = args.indexOf(QStringLiteral("--selftest-home"));
     const int docxIdx = args.indexOf(QStringLiteral("--selftest-docx"));
     const int updateIdx = args.indexOf(QStringLiteral("--selftest-update"));
+    const int imageIdx = args.indexOf(QStringLiteral("--selftest-image"));
 
     // The shipping build is a GUI executable (no console window when the user
     // double-clicks it). The console-based modes still need their output, so
@@ -1724,7 +1894,8 @@ int main(int argc, char **argv)
         || themeIdx >= 0
         || homeIdx >= 0
         || docxIdx >= 0
-        || updateIdx >= 0) {
+        || updateIdx >= 0
+        || imageIdx >= 0) {
         attachConsoleForCli();
     }
 
@@ -1751,6 +1922,9 @@ int main(int argc, char **argv)
 
     if (updateIdx >= 0)
         return runUpdateSelfTest();
+
+    if (imageIdx >= 0)
+        return runImageSelfTest();
 
     // With a window already running, this process only hands its paths over and
     // exits: a file association, autostart or second command line must never

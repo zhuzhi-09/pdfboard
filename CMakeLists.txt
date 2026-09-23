@@ -20,6 +20,8 @@ qt_add_executable(pdfboard
     src/AnnotationBundle.cpp
     src/PdfExport.h
     src/PdfExport.cpp
+    src/ImageImport.h
+    src/ImageImport.cpp
     src/InkToolbar.h
     src/InkToolbar.cpp
     src/PageGrid.h

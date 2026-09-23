@@ -59,6 +59,10 @@ private:
     struct DocumentInfo {
         QString bundlePath;   // `.dpz` path (empty for a plain-PDF document)
         QString wordPath;     // source `.docx`/`.doc` (empty for PDF / `.dpz`)
+        // Source image (empty unless this document was imported from one). Like a
+        // Word file it is only ever read: the canvas annotates the converted temp
+        // PDF, and the .dpz records the image as its source.
+        QString imagePath;
         QString sourcePdf;    // the PDF the canvas actually opened
         QString title;        // tab strip title
         QString tempPdf;      // temp PDF backing the document (may be empty)

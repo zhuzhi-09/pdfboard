@@ -4,6 +4,7 @@
 #include "AppSettings.h"
 #include "DocumentTabs.h"
 #include "HomePage.h"
+#include "ImageImport.h"
 #include "PdfCanvas.h"
 #include "PdfExport.h"
 #include "InkToolbar.h"
@@ -132,7 +133,8 @@ bool hasLocalDocument(const QMimeData *mime)
         const QString path = url.toLocalFile();
         if (path.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)
             || path.endsWith(QStringLiteral(".dpz"), Qt::CaseInsensitive)
-            || WordConvert::isWordDoc(path))
+            || WordConvert::isWordDoc(path)
+            || ImageImport::isImage(path))
             return true;
     }
     return false;
@@ -393,7 +395,9 @@ void MainWindow::onOpen()
         this, QStringLiteral("打开 PDF / 批注包 / Word 文档"), QString(),
         QStringLiteral("PDF、批注包与 Word (*.pdf *.dpz *.docx *.doc);;"
                        "PDF 文件 (*.pdf);;批注包 (*.dpz);;"
-                       "Word 文档 (*.docx *.doc);;所有文件 (*.*)"));
+                       "Word 文档 (*.docx *.doc);;")
+        + ImageImport::dialogFilter()
+        + QStringLiteral(";;所有文件 (*.*)"));
     if (path.isEmpty())
         return;
     openPath(path);
@@ -417,7 +421,8 @@ void MainWindow::dropEvent(QDropEvent *e)
         const QString path = url.toLocalFile();
         if (!path.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive)
             && !path.endsWith(QStringLiteral(".dpz"), Qt::CaseInsensitive)
-            && !WordConvert::isWordDoc(path))
+            && !WordConvert::isWordDoc(path)
+            && !ImageImport::isImage(path))
             continue;
         e->acceptProposedAction();
         openPath(path);      // opens a new tab (or activates the existing one)
@@ -609,6 +614,7 @@ void MainWindow::openPath(const QString &path)
     timer.start();
     const bool bundle = AnnotationBundle::isBundle(path);
     const bool word = WordConvert::isWordDoc(path);
+    const bool image = ImageImport::isImage(path);
     const QString key = fileKey(path);
 
     // Already open somewhere? Bring that tab forward instead of opening twice.
@@ -616,6 +622,7 @@ void MainWindow::openPath(const QString &path)
         const DocumentInfo &doc = m_docs.at(i);
         const QString open = bundle ? doc.bundlePath
                              : !doc.wordPath.isEmpty() ? doc.wordPath
+                             : !doc.imagePath.isEmpty() ? doc.imagePath
                              : doc.sourcePdf;
         if (!open.isEmpty() && fileKey(open) == key) {
             m_tabs->setCurrentIndex(i);
@@ -688,6 +695,22 @@ void MainWindow::openPath(const QString &path)
         statusBar()->clearMessage();
         // Everything from here on annotates a copy, never the .docx: the tab
         // reads <basename>.dpz from the start.
+        tabTitle = QFileInfo(path).completeBaseName() + QStringLiteral(".dpz");
+    } else if (image) {
+        // An image has no pages, so it is wrapped into a one-page PDF at its own
+        // pixel size (see ImageImport) and everything then works unchanged: zoom,
+        // ink, .dpz. The original image is only ever read.
+        statusBar()->showMessage(QStringLiteral("正在导入图片…"));
+        QApplication::processEvents();
+
+        QString err;
+        if (!ImageImport::toPdf(path, &tempPath, &err)) {
+            AppLog::write(QStringLiteral("open"),
+                          QStringLiteral("图片导入失败：%1（%2）").arg(path, err));
+            statusBar()->showMessage(QStringLiteral("图片导入失败：%1").arg(err), 10000);
+            return;
+        }
+        statusBar()->clearMessage();
         tabTitle = QFileInfo(path).completeBaseName() + QStringLiteral(".dpz");
     } else if (bundle) {
         QString err;
@@ -785,9 +808,10 @@ void MainWindow::openPath(const QString &path)
     DocumentInfo info;
     info.bundlePath = bundle ? path : QString();
     info.wordPath = word ? path : QString();
+    info.imagePath = image ? path : QString();
     info.sourcePdf = tempPath;
     info.title = tabTitle;
-    info.tempPdf = (bundle || word) ? tempPath : QString();
+    info.tempPdf = (bundle || word || image) ? tempPath : QString();
 
     m_canvases.append(canvas);
     m_docs.append(info);
@@ -934,6 +958,7 @@ bool MainWindow::saveDocumentAs(int index)
     // mangles the pre-filled name when the format is switched.
     const QString bundleFilter = QStringLiteral("打包保存 (*.dpz)");
     const QString injectFilter = QStringLiteral("注入 PDF (*.pdf)");
+    const QString pngFilter = QStringLiteral("导出 PNG 图片 (*.png)");
 
     // Once a document is bundle-backed its `sourcePdf` is an internal temp copy;
     // never suggest that path or name to the user. A Word document is instead
@@ -941,6 +966,7 @@ bool MainWindow::saveDocumentAs(int index)
     // the same basename, with a .dpz / -已批注.pdf suffix.
     const QString identity = !info.bundlePath.isEmpty() ? info.bundlePath
                              : !info.wordPath.isEmpty() ? info.wordPath
+                             : !info.imagePath.isEmpty() ? info.imagePath
                              : info.sourcePdf;
     const QFileInfo src(identity);
     // Prefer the user's configured save folder; fall back to the document's own
@@ -952,26 +978,29 @@ bool MainWindow::saveDocumentAs(int index)
     if (base.isEmpty())
         base = QStringLiteral("未命名");
 
-    auto nameFor = [&base](bool inject) {
-        return inject ? base + QStringLiteral("-已批注.pdf")
-                      : base + QStringLiteral(".dpz");
+    auto nameFor = [&base](const QString &filter) {
+        if (filter.contains(QStringLiteral("*.png")))
+            return base + QStringLiteral("-1.png");
+        if (filter.contains(QStringLiteral("*.pdf")))
+            return base + QStringLiteral("-已批注.pdf");
+        return base + QStringLiteral(".dpz");
     };
 
     QFileDialog dlg(this, QStringLiteral("另存为"), dir);
     dlg.setAcceptMode(QFileDialog::AcceptSave);
     dlg.setFileMode(QFileDialog::AnyFile);
-    dlg.setNameFilters({bundleFilter, injectFilter});
+    dlg.setNameFilters({bundleFilter, injectFilter, pngFilter});
     dlg.selectNameFilter(bundleFilter);      // 打包保存 is the default
-    dlg.selectFile(nameFor(false));
+    dlg.selectFile(nameFor(bundleFilter));
     // The "for sharing" guidance lives on the file-type label so the filter
     // strings stay clean.
     dlg.setLabelText(QFileDialog::FileType,
-                     QStringLiteral("保存类型（注入 PDF 适合分享，其他软件可直接打开）"));
+                     QStringLiteral("保存类型（注入 PDF 适合分享；PNG 每页导出一张）"));
     // Re-fill the name on every format switch: Qt's own suffix juggling is what
     // garbled the suggestion.
     connect(&dlg, &QFileDialog::filterSelected, &dlg,
             [&dlg, &nameFor](const QString &f) {
-                dlg.selectFile(nameFor(f.contains(QStringLiteral("*.pdf"))));
+                dlg.selectFile(nameFor(f));
             });
     if (dlg.exec() != QDialog::Accepted)
         return false;
@@ -981,7 +1010,11 @@ bool MainWindow::saveDocumentAs(int index)
         return false;
 
     const bool inject = (dlg.selectedNameFilter() == injectFilter);
-    if (inject) {
+    const bool png = (dlg.selectedNameFilter() == pngFilter);
+    if (png) {
+        if (!path.endsWith(QStringLiteral(".png"), Qt::CaseInsensitive))
+            path += QStringLiteral(".png");
+    } else if (inject) {
         if (!path.endsWith(QStringLiteral(".pdf"), Qt::CaseInsensitive))
             path += QStringLiteral(".pdf");
     } else {
@@ -990,6 +1023,58 @@ bool MainWindow::saveDocumentAs(int index)
     }
 
     QString err;
+
+    if (png) {
+        // One PNG per page: <base>-<n>.png, the index padded to the page count
+        // (PdfExport::pngPageName owns that rule). Exporting is not saving: the
+        // document stays dirty until its own .dpz is written.
+        QString basePath = path;
+        if (basePath.endsWith(QStringLiteral(".png"), Qt::CaseInsensitive))
+            basePath.chop(4);
+
+        // Never write over the source file: with a base such as "img" a one-page
+        // export would happily overwrite the teacher's own "img-1.png".
+        const auto samePath = [](const QString &a, const QString &b) {
+            if (a.isEmpty() || b.isEmpty())
+                return false;
+            return QFileInfo(a).absoluteFilePath().compare(QFileInfo(b).absoluteFilePath(),
+                                                          Qt::CaseInsensitive) == 0;
+        };
+        const int pages = qMax(1, canvas->pageCount());
+        for (int i = 1; i <= pages; ++i) {
+            const QString out = PdfExport::pngPageName(basePath, i, pages);
+            if (samePath(out, info.imagePath) || samePath(out, info.sourcePdf)
+                || samePath(out, info.bundlePath)) {
+                AppLog::write(QStringLiteral("save"),
+                              QStringLiteral("拒绝把源文件当作导出目标：%1").arg(out));
+                statusBar()->showMessage(
+                    QStringLiteral("不能用源文件本身作为导出目标，请换个文件名"), 8000);
+                return false;
+            }
+        }
+
+        QElapsedTimer timer;
+        timer.start();
+        const int written = PdfExport::exportPngPages(canvas, basePath, &err);
+        if (written < 0) {
+            AppLog::write(QStringLiteral("save"),
+                          QStringLiteral("导出 PNG 失败：%1（%2）").arg(path, err));
+            QMessageBox::warning(this, QStringLiteral("导出失败"), err);
+            return false;
+        }
+        AppLog::write(QStringLiteral("save"),
+                      QStringLiteral("导出 PNG %1：%2 张，%3 ms")
+                          .arg(QFileInfo(path).fileName()).arg(written).arg(timer.elapsed()));
+        statusBar()->showMessage(
+            written == 1
+                ? QStringLiteral("已导出 %1").arg(QFileInfo(
+                      PdfExport::pngPageName(basePath, 1, 1)).fileName())
+                : QStringLiteral("已导出 %1 张 PNG：%2-1.png …")
+                      .arg(written).arg(QFileInfo(basePath).completeBaseName()),
+            6000);
+        return true;
+    }
+
     if (inject) {
         // Never write over the document being annotated: the export target must
         // be a different file (the dialog suggests <basename>-已批注.pdf).
@@ -999,7 +1084,8 @@ bool MainWindow::saveDocumentAs(int index)
             return QFileInfo(a).absoluteFilePath().compare(QFileInfo(b).absoluteFilePath(),
                                                           Qt::CaseInsensitive) == 0;
         };
-        if (sameFile(path, info.wordPath) || sameFile(path, info.sourcePdf)) {
+        if (sameFile(path, info.wordPath) || sameFile(path, info.imagePath)
+            || sameFile(path, info.sourcePdf)) {
             AppLog::write(QStringLiteral("save"),
                           QStringLiteral("拒绝把源文件当作导出目标：%1").arg(path));
             statusBar()->showMessage(

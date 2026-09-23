@@ -10,6 +10,8 @@
 
 ### 查看
 - 纵向**连续滚动**翻阅（像 Word），适宽自动缩放
+- **图片直接打开**：png / jpg / jpeg / bmp / gif / webp / tif 等按**原像素**导入为一页文档，
+  之后的一切与 PDF 完全相同（缩放、批注、保存 `.dpz`、导出）——原图只读，不会被改写
 - **双指捏合缩放**（以两指中心为锚点，横纵都不漂移）
 - **双指拖动平移**（含横向），单指/鼠标滚动
 - 适配宽度一键复位，且**保持当前焦点位置不跳**
@@ -35,6 +37,8 @@
 - **另存为**：
   - `打包保存 (*.dpz)`（默认）
   - `注入 PDF (*.pdf)`：把批注烧录进页面，**适合分享、任何阅读器都能打开**
+- **导出 PNG 图片**：把页面（含批注，按**原页面等像素**渲染）导出成 PNG；多页就导出多张，
+  命名为 `原名-1.png`、`原名-2.png`…（≥10 页时自动补零成 `-01.png`，避免排序错乱）
 - **设置为 PDF 默认打开方式**（一键注册 + 引导到系统「默认应用」确认）
 - **开机自启动**开关
 - **默认保存路径**：可指定批注默认存到哪个文件夹，或跟随源文件所在目录
@@ -70,7 +74,7 @@
 
 ```powershell
 package.cmd
-# 产物：dist\PDFBoard-1.6.0-setup.exe   （自带 Qt 运行库，约 17 MB）
+# 产物：dist\PDFBoard-1.7.0-setup.exe   （自带 Qt 运行库，约 17 MB）
 ```
 
 安装器做这些事（全部**当前用户**范围，不需要管理员）：
@@ -86,9 +90,9 @@ package.cmd
 **静默部署**（供教室集中管理客户端调用）：
 
 ```bat
-PDFBoard-1.6.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+PDFBoard-1.7.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 rem 不要桌面快捷方式：
-PDFBoard-1.6.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
+PDFBoard-1.7.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 ```
 
 > 卸载时若程序正在运行，静默模式下无法提示关闭，会残留被占用的文件（Windows 常见行为）。先退出程序再卸载即可完全清除。
@@ -102,7 +106,7 @@ PDFBoard-1.6.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 - 手动触发（Actions → nightly → Run workflow）
 
 产物发布到固定的 **`nightly` 预发布**（每次覆盖同名文件，不会越堆越多）：
-`PDFBoard-nightly-setup.exe` / `PDFBoard-nightly-portable.zip`，版本号形如 `1.6.0-nightly.<提交号>`。
+`PDFBoard-nightly-setup.exe` / `PDFBoard-nightly-portable.zip`，版本号形如 `1.7.0-nightly.<提交号>`。
 
 ### 稳定版发布
 
@@ -120,26 +124,26 @@ PDFBoard-1.6.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 ```powershell
 # 1. 改版本号：installer/pdfboard.iss 的 AppVersion + assets/app.rc 的 FILEVERSION/FileVersion
 # 2. 提交推送
-git commit -am "chore: 版本号 1.6.0"
+git commit -am "chore: 版本号 1.7.0"
 git push
 
 # 3. 写更新日志到文件（推荐；UTF-8 保存）。
 #    别用 PowerShell 的 `-m "多行…"`——它会把字符串里的换行弄坏，标签注解就残缺了。
 @'
-v1.6.0
+v1.7.0
 - 修复：缩略图在深色模式下没有白底
 - 新增：打开文件时提示更新日志
 '@ | Set-Content -Encoding utf8 notes.txt
 
 # 4. 打「注解」标签（-a）把更新日志写进 tag message，再推送；CI 自动出正式 Release
-git tag -a v1.6.0 -F notes.txt
-git push origin v1.6.0
+git tag -a v1.7.0 -F notes.txt
+git push origin v1.7.0
 ```
 
 > 不想用文件？也可以重复 `-m`，每次一行（Git 会把它们连成多段）：
-> `git tag -a v1.6.0 -m "v1.6.0" -m "- 修复：…" -m "- 新增：…"`
+> `git tag -a v1.7.0 -m "v1.7.0" -m "- 修复：…" -m "- 新增：…"`
 >
-> 忘记写注解（`git tag v1.6.0` 的轻量标签）不会失败，但 Release 只会是自动生成的提交列表——老师点开更新提示几乎看不到有用内容。
+> 忘记写注解（`git tag v1.7.0` 的轻量标签）不会失败，但 Release 只会是自动生成的提交列表——老师点开更新提示几乎看不到有用内容。
 
 ### 代码签名（可选）
 
@@ -230,6 +234,9 @@ build\pdfboard.exe --selftest-theme
 
 # 工具岛 80% 缩放比例、拖动位置钳制、拖动阈值（点击不误判为拖动）
 build\pdfboard.exe --selftest-ui
+
+# 图片导入 + PNG 导出的端到端断言（自造图片、1:1 像素回环，全离线）
+build\pdfboard.exe --selftest-image
 
 # 渲染耗时与内存基准
 build\pdfboard.exe --bench path\to\test.pdf
