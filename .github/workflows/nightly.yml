@@ -1,21 +1,26 @@
 #  Nightly 自动构建
 #
-#  触发：推送到 main / 每天一�?/ 手动
-#  产物：安装器 + 便携版，发布到固定的 "nightly" 预发布（每次覆盖，不堆积�?#  说明：产物文件名为固定名，便于覆盖；具体提交号写在发布说明里�?name: nightly
+#  触发：推送到 main / 每天一次 / 手动
+#  产物：安装器 + 便携版，发布到固定的 "nightly" 预发布（每次覆盖，不堆积）
+#  说明：产物文件名为固定名，便于覆盖；具体提交号写在发布说明里。
+name: nightly
 
 on:
   push:
     branches: [main]
-    # 只改文档就不必重新打�?    paths-ignore:
+    # 只改文档就不必重新打包
+    paths-ignore:
       - "**.md"
       - "docs/**"
       - "LICENSE"
       - ".gitignore"
   schedule:
-    - cron: "0 18 * * *"        # 每天 UTC 18:00（北京时间次�?02:00�?  workflow_dispatch:
+    - cron: "0 18 * * *"        # 每天 UTC 18:00（北京时间次日 02:00）
+  workflow_dispatch:
 
 permissions:
-  contents: write               # 创建/更新 Release 需�?
+  contents: write               # 创建/更新 Release 需要
+
 jobs:
   build:
     runs-on: windows-latest
@@ -37,7 +42,10 @@ jobs:
           "version=$base-nightly.$sha" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
           "sha=$sha" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
 
-      # 代码签名是可选步骤：仓库里配置了签名密钥才会执行，没配置就跳�?      # （fork 本仓库的人不会因为缺少密钥而构建失败）�?      # 注意：secrets 不能直接写在 if 里，所以先探测再输出布尔值�?      - name: Detect signing secrets
+      # 代码签名是可选步骤：仓库里配置了签名密钥才会执行，没配置就跳过
+      # （fork 本仓库的人不会因为缺少密钥而构建失败）。
+      # 注意：secrets 不能直接写在 if 里，所以先探测再输出布尔值。
+      - name: Detect signing secrets
         id: signing
         shell: pwsh
         env:
@@ -58,7 +66,9 @@ jobs:
         shell: pwsh
         run: choco install innosetup --no-progress -y
 
-      # runner �?PATH �?MinGW 排在前面，CMake 会误�?g++ 去链�?MSVC �?Qt�?      # 先进�?MSVC 开发环境，�?cl.exe 优先生效�?      - name: Set up MSVC
+      # runner 的 PATH 里 MinGW 排在前面，CMake 会误选 g++ 去链接 MSVC 版 Qt。
+      # 先进入 MSVC 开发环境，让 cl.exe 优先生效。
+      - name: Set up MSVC
         uses: ilammy/msvc-dev-cmd@v1
         with:
           arch: x64
@@ -79,16 +89,22 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist/stage | Out-Null
           Copy-Item build/pdfboard.exe dist/stage/
-          # 不打�?vc_redist：安装器是按当前用户安装（不�?UAC），本来也无法安装它�?          # VC++ 运行库是 Windows 上的常见组件�?          # 不打包全部语言翻译：只随包附上本程序使用的简体中文�?          & "$env:QT_ROOT_DIR/bin/windeployqt.exe" --release --no-translations `
+          # 不打包 vc_redist：安装器是按当前用户安装（不弹 UAC），本来也无法安装它；
+          # VC++ 运行库是 Windows 上的常见组件。
+          # 不打包全部语言翻译：只随包附上本程序使用的简体中文。
+          & "$env:QT_ROOT_DIR/bin/windeployqt.exe" --release --no-translations `
               --no-system-d3d-compiler dist/stage/pdfboard.exe
           if ($LASTEXITCODE -ne 0) { throw "windeployqt failed" }
-          # D3D12 着色器编译器与本程序无关（本地包不含这两者，实测运行正常）�?          Remove-Item dist/stage/dxcompiler.dll, dist/stage/dxil.dll, dist/stage/vc_redist.x64.exe -ErrorAction SilentlyContinue
+          # D3D12 着色器编译器与本程序无关（本地包不含这两者，实测运行正常）。
+          Remove-Item dist/stage/dxcompiler.dll, dist/stage/dxil.dll, dist/stage/vc_redist.x64.exe -ErrorAction SilentlyContinue
           New-Item -ItemType Directory -Force dist/stage/translations | Out-Null
           Copy-Item "$env:QT_ROOT_DIR/translations/*zh_CN.qm" dist/stage/translations/ -ErrorAction SilentlyContinue
           Get-ChildItem dist/stage -Recurse -File | Measure-Object Length -Sum |
             ForEach-Object { "staged: {0:N1} MB" -f ($_.Sum / 1MB) }
 
-      # 出门前的门禁：与正式发版同一套确定性自测（都不需要外部文件、不联网）�?      # �?Start-Process 显式取退出码：直�?`& exe` �?pwsh �?$LASTEXITCODE �?CI 里不可靠�?      - name: Self test
+      # 出门前的门禁：与正式发版同一套确定性自测（都不需要外部文件、不联网）。
+      # 用 Start-Process 显式取退出码：直接 `& exe` 时 pwsh 的 $LASTEXITCODE 在 CI 里不可靠。
+      - name: Self test
         shell: pwsh
         run: |
           $flags = @("--selftest-log", "--selftest-theme", "--selftest-ui",
@@ -103,7 +119,7 @@ jobs:
             }
           }
 
-      # 配置�?secrets.SIGN_PFX_BASE64 / SIGN_PFX_PASS 才会执行
+      # 配置了 secrets.SIGN_PFX_BASE64 / SIGN_PFX_PASS 才会执行
       - name: Sign app executable (optional)
         if: steps.signing.outputs.enabled == 'true'
         shell: pwsh
@@ -150,11 +166,16 @@ jobs:
           New-Item -ItemType Directory -Force dist/portable | Out-Null
           Copy-Item dist/stage/* dist/portable -Recurse -Force
           $note = @"
-          落墨·大屏批注 �?便携版（nightly $ver�?
-          1) 解压到任意文件夹，直接运�?pdfboard.exe，无需安装�?          2) 需�?Windows 10/11 64 位；Qt 运行库已随包附带�?          3) 文件关联可在应用内「设�?�?文件关联」一键注册�?          4) 这是自动构建的夜间版本，可能不稳定；正式版见 Releases 中的版本标签�?
-          架构�?{{ steps.ver.outputs.sha }}    构建时间�?(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC
+          落墨·大屏批注 — 便携版（nightly $ver）
+
+          1) 解压到任意文件夹，直接运行 pdfboard.exe，无需安装。
+          2) 需要 Windows 10/11 64 位；Qt 运行库已随包附带。
+          3) 文件关联可在应用内「设置 → 文件关联」一键注册。
+          4) 这是自动构建的夜间版本，可能不稳定；正式版见 Releases 中的版本标签。
+
+          架构：${{ steps.ver.outputs.sha }}    构建时间：$(Get-Date -Format 'yyyy-MM-dd HH:mm') UTC
           "@
-          [System.IO.File]::WriteAllText((Join-Path (Resolve-Path dist/portable) "便携版说�?txt"),
+          [System.IO.File]::WriteAllText((Join-Path (Resolve-Path dist/portable) "便携版说明.txt"),
                                           $note, (New-Object System.Text.UTF8Encoding($true)))
           Compress-Archive -Path "dist/portable/*" -DestinationPath "dist/PDFBoard-nightly-portable.zip" -Force
 
@@ -168,15 +189,17 @@ jobs:
             dist/PDFBoard-nightly-setup.exe
             dist/PDFBoard-nightly-portable.zip
           body: |
-            > 这是**自动构建的夜间版�?*，随 `main` 的每次提交更新，可能不稳定�?            > 稳定版本请看 Releases 里的版本标签（如 `v1.7.4`）�?
+            > 这是**自动构建的夜间版本**，随 `main` 的每次提交更新，可能不稳定。
+            > 稳定版本请看 Releases 里的版本标签（如 `v1.7.4`）。
+
             **提交**：`${{ github.sha }}`
-            **版本�?*：`${{ steps.ver.outputs.version }}`
-            **构建时间**�?{{ github.event.repository.updated_at }}
-            **变更**�?{{ github.event.head_commit.message || '（定时或手动触发�? }}
+            **版本号**：`${{ steps.ver.outputs.version }}`
+            **构建时间**：${{ github.event.repository.updated_at }}
+            **变更**：${{ github.event.head_commit.message || '（定时或手动触发）' }}
 
             | 下载 | 说明 |
             |---|---|
-            | `PDFBoard-nightly-setup.exe` | 安装版：注册到「应用和功能」，可静默部�?`/VERYSILENT /SUPPRESSMSGBOXES /NORESTART` |
-            | `PDFBoard-nightly-portable.zip` | 便携版：解压即用，不写系�?|
+            | `PDFBoard-nightly-setup.exe` | 安装版：注册到「应用和功能」，可静默部署 `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART` |
+            | `PDFBoard-nightly-portable.zip` | 便携版：解压即用，不写系统 |
 
-            需�?Windows 10/11 64 位；Qt 运行库已随包附带�?
+            需要 Windows 10/11 64 位；Qt 运行库已随包附带。
