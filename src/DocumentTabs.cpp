@@ -31,7 +31,7 @@ DocumentTabs::DocumentTabs(QWidget *parent)
     : QWidget(parent)
 {
     setObjectName(QStringLiteral("documentTabs"));
-    setMouseTracking(true);                 // hover feedback for chips / "+"
+    setMouseTracking(true);                 // hover feedback for the chips
     setFocusPolicy(Qt::NoFocus);
     setAttribute(Qt::WA_OpaquePaintEvent, true);
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
@@ -55,12 +55,12 @@ DocumentTabs::DocumentTabs(QWidget *parent)
     m_textMaxW = int(m.touch * 4.5);
     m_iconBox  = qMin(qMax(m.icon, int(m_chipH * 0.55)), int(m_chipH * 0.62));
 
-    // The leading "+" home chip: a square-ish touch target, its own pinned
+    // The leading house (主页) chip: a square-ish touch target, its own pinned
     // zone, never part of the document chip list (see relayout).
     m_homeW    = qMax(m_chipH, int(m.touch * 0.9));
 
     // The Settings chip (gear glyph + 「设置」) is pinned between the scrolling
-    // document chips and "+", so it is reachable with zero documents open. Its
+    // document chips and 「打开」, so it is reachable with zero documents open. Its
     // zone must budget the strip padding, the inner padding, the glyph and the
     // label, or the label gets clipped.
     m_settingsW = 2 * m_stripPad + 2 * m_padX + m_iconBox + Theme::Space2
@@ -154,7 +154,7 @@ void DocumentTabs::setCurrentIndex(int index)
     index = qBound(0, index, int(m_titles.size()) - 1);
     const bool wasOverlay = m_settingsActive || m_homeActive;
     m_settingsActive = false;           // activating a document clears the gear
-    m_homeActive = false;               // ... and the leading "+" highlight
+    m_homeActive = false;               // ... and the leading house highlight
     if (index == m_current && !wasOverlay) {
         update();
         return;
@@ -211,7 +211,7 @@ void DocumentTabs::relayout()
     if (!pending.isEmpty())
         content += m_gap * int(pending.size() - 1);
 
-    // The leading "+" home chip is pinned to the far LEFT; the 「打开」 chip and
+    // The leading house chip is pinned to the far LEFT; the 「打开」 chip and
     // the Settings chip are pinned to the right. Only the document chips in
     // between scroll. m_chipsLeft / m_chipsRight border that scrolling window:
     // the home chip enters the geometry ONLY here, so m_chips still holds
@@ -370,7 +370,7 @@ void DocumentTabs::paintEvent(QPaintEvent *)
     }
     p.restore();
 
-    // --- pinned leading "+" home chip ---------------------------------------
+    // --- pinned leading house (主页) chip ------------------------------------
     const QRectF homeBox(homeInner());
     if (homeBox.width() > 4.0) {
         const QRectF box = homeBox.adjusted(0.5, 0.5, -0.5, -0.5);
@@ -391,19 +391,16 @@ void DocumentTabs::paintEvent(QPaintEvent *)
             p.drawRoundedRect(box, radius, radius);
         }
 
-        // A plus glyph, not a document chip: "+ returns to the home page".
+        // A house, not a plus: the chip is a way back to the 主页, and a "+"
+        // read as "new tab". Same glyph box and stroke weight as the Settings
+        // chip's gear, so the two pinned chips match at every DPI.
         const QColor ink = m_homeActive ? pal.accent
                                         : (m_hoverHome ? pal.text : pal.textMuted);
-        const qreal plus = qMin<qreal>(m_iconBox, homeBox.height() * 0.42);
+        const int glyphPx = qMin(m_iconBox, int(homeBox.height() * 0.62));
         const QPointF centre = homeBox.center();
-        const QRectF glyphBox(centre.x() - plus / 2.0, centre.y() - plus / 2.0,
-                              plus, plus);
-        const qreal stroke = qMax<qreal>(1.8, plus * 0.16);
-        p.setPen(QPen(ink, stroke, Qt::SolidLine, Qt::RoundCap));
-        p.drawLine(QPointF(glyphBox.left(), glyphBox.center().y()),
-                   QPointF(glyphBox.right(), glyphBox.center().y()));
-        p.drawLine(QPointF(glyphBox.center().x(), glyphBox.top()),
-                   QPointF(glyphBox.center().x(), glyphBox.bottom()));
+        const QRectF glyphBox(centre.x() - glyphPx / 2.0, centre.y() - glyphPx / 2.0,
+                              glyphPx, glyphPx);
+        IconPainter::paintGlyph(p, IconPainter::Glyph::House, glyphBox, ink, 2.0);
     }
 
     // Hairline between the pinned home chip and the scrolling chips.
@@ -520,16 +517,25 @@ void DocumentTabs::mouseMoveEvent(QMouseEvent *e)
         update();
     }
 
-    if (settings)
+    // The tooltip and the accessible name always describe whatever is under the
+    // pointer - the chips are painted regions of this one widget, so this is the
+    // only name assistive tech can read for them.
+    if (settings) {
         setToolTip(QStringLiteral("设置"));
-    else if (home)
+        setAccessibleName(QStringLiteral("设置"));
+    } else if (home) {
         setToolTip(QStringLiteral("主页"));
-    else if (chip >= 0)
+        setAccessibleName(QStringLiteral("主页"));
+    } else if (chip >= 0) {
         setToolTip(m_chips.at(chip).title);
-    else if (add)
+        setAccessibleName(m_chips.at(chip).title);
+    } else if (add) {
         setToolTip(QStringLiteral("新建标签"));
-    else
+        setAccessibleName(QStringLiteral("打开"));
+    } else {
         setToolTip(QString());
+        setAccessibleName(QString());
+    }
     setCursor((chip >= 0 || add || settings || home) ? Qt::PointingHandCursor
                                                      : Qt::ArrowCursor);
 }

@@ -317,6 +317,59 @@ QWidget *makeTextRow(QWidget *parent, const QString &title, const QString &body,
     return row;
 }
 
+// ---------------------------------------------------------------------------
+// 按钮行：设置页里每一行按钮都由下面这一套构造，行内间距、最小高度、字体与
+// 状态配色因此完全一致——曾经每一行各写各的 QHBoxLayout（分段行的 spacing 还是
+// 0），深色主题下相邻按钮的底色连成一片，看起来像「贴在一起」。
+// ---------------------------------------------------------------------------
+
+struct ButtonRow {
+    QWidget     *box = nullptr;   // 放进卡片行的容器
+    QHBoxLayout *row = nullptr;   // 按钮按加入顺序横排
+};
+
+// 行内按钮的用途：普通按钮 / 等宽分段按钮（选中态 = 强调色胶囊）/ 主操作按钮。
+enum class RowButton { Plain, Segment, Primary };
+
+ButtonRow makeButtonRow(QWidget *parent, const QFont &font)
+{
+    const Theme::Metrics m = Theme::metrics(font);
+
+    ButtonRow row;
+    row.box = new QWidget(parent);
+    row.row = new QHBoxLayout(row.box);
+    row.row->setContentsMargins(0, 0, 0, 0);
+    // 8 逻辑像素起步（Space2），并跟随字号同比放大：全页每行都取同一个值，
+    // 100 % 与 250 % 下都留出清晰可见的间隔，绝不会退化成 0。
+    row.row->setSpacing(qMax(int(Theme::Space2), m.gap * 2));
+    return row;
+}
+
+QPushButton *addRowButton(ButtonRow &row, const QFont &font, const QString &text,
+                          RowButton kind = RowButton::Plain)
+{
+    const Theme::Metrics m = Theme::metrics(font);
+
+    auto *button = new QPushButton(text, row.box);
+    button->setCursor(Qt::PointingHandCursor);
+    button->setFont(Theme::chromeFont(font));
+    button->setMinimumHeight(m.touch);         // 触控目标：整页按钮行统一高度
+    int stretch = 0;
+    if (kind == RowButton::Segment) {
+        // 分段按钮：等宽分满整行，选中态由 pageSheet 的
+        // QPushButton#settingsSegment:checked 画成强调色胶囊。
+        button->setObjectName(QStringLiteral("settingsSegment"));
+        button->setCheckable(true);
+        button->setFocusPolicy(Qt::NoFocus);
+        button->setMinimumWidth(m.touch * 2);
+        stretch = 1;
+    } else if (kind == RowButton::Primary) {
+        button->setObjectName(QStringLiteral("settingsPrimary"));
+    }
+    row.row->addWidget(button, stretch);
+    return button;
+}
+
 QLabel *makeSectionHeader(QWidget *parent, const QString &text)
 {
     auto *label = new QLabel(text, parent);
@@ -424,26 +477,17 @@ void SettingsPage::buildUi()
 
     const Card wordOpen = makeCard(m_column);
     {
-        auto *segments = new QWidget(wordOpen.frame);
-        auto *sh = new QHBoxLayout(segments);
-        sh->setContentsMargins(0, 0, 0, 0);
-        sh->setSpacing(0);
+        ButtonRow segments = makeButtonRow(wordOpen.frame, font());
 
         m_wordGroup = new QButtonGroup(this);
         m_wordGroup->setExclusive(true);
         const QString labels[3] = { QStringLiteral("每次询问"), QStringLiteral("批注"),
                                     QStringLiteral("用 Word 打开") };
         for (int i = 0; i < 3; ++i) {
-            auto *button = new QPushButton(labels[i], segments);
-            button->setObjectName(QStringLiteral("settingsSegment"));
-            button->setCheckable(true);
-            button->setFocusPolicy(Qt::NoFocus);
-            button->setCursor(Qt::PointingHandCursor);
-            button->setFont(Theme::chromeFont(font()));
-            button->setMinimumSize(QSize(m.touch * 2, m.touch));
+            QPushButton *button =
+                addRowButton(segments, font(), labels[i], RowButton::Segment);
             m_wordGroup->addButton(button, i);
             m_wordSegments[i] = button;
-            sh->addWidget(button, 1);
         }
         connect(m_wordGroup, &QButtonGroup::idClicked,
                 this, &SettingsPage::onWordModePicked);
@@ -452,7 +496,7 @@ void SettingsPage::buildUi()
         wordOpen.col->addWidget(makeTextRow(wordOpen.frame,
                                             QStringLiteral("打开 Word 文档时"),
                                             QStringLiteral("每次询问 / 批注 / 用 Word 打开"),
-                                            segments, Theme::Space4, Theme::Space4));
+                                            segments.box, Theme::Space4, Theme::Space4));
         wordOpen.col->addWidget(makeRowSeparator(wordOpen.frame));
 
         // The nag fix: a toggle that persists AppSettings::wordNagFixEnabled,
@@ -526,26 +570,17 @@ void SettingsPage::buildUi()
 
     const Card appearance = makeCard(m_column);
     {
-        auto *segments = new QWidget(appearance.frame);
-        auto *sh = new QHBoxLayout(segments);
-        sh->setContentsMargins(0, 0, 0, 0);
-        sh->setSpacing(0);
+        ButtonRow segments = makeButtonRow(appearance.frame, font());
 
         m_themeGroup = new QButtonGroup(this);
         m_themeGroup->setExclusive(true);
         const QString labels[3] = { QStringLiteral("系统"), QStringLiteral("浅色"),
                                     QStringLiteral("深色") };
         for (int i = 0; i < 3; ++i) {
-            auto *button = new QPushButton(labels[i], segments);
-            button->setObjectName(QStringLiteral("settingsSegment"));
-            button->setCheckable(true);
-            button->setFocusPolicy(Qt::NoFocus);
-            button->setCursor(Qt::PointingHandCursor);
-            button->setFont(Theme::chromeFont(font()));
-            button->setMinimumSize(QSize(m.touch * 2, m.touch));
+            QPushButton *button =
+                addRowButton(segments, font(), labels[i], RowButton::Segment);
             m_themeGroup->addButton(button, i);
             m_themeSegments[i] = button;
-            sh->addWidget(button, 1);
         }
         connect(m_themeGroup, &QButtonGroup::idClicked,
                 this, &SettingsPage::onThemePicked);
@@ -554,7 +589,7 @@ void SettingsPage::buildUi()
         appearance.col->addWidget(makeTextRow(appearance.frame,
                                               QStringLiteral("外观"),
                                               QStringLiteral("跟随系统 / 浅色 / 深色"),
-                                              segments, Theme::Space4, Theme::Space4));
+                                              segments.box, Theme::Space4, Theme::Space4));
         appearance.col->addWidget(makeRowSeparator(appearance.frame));
 
         // The hint that explains what 系统 currently resolves to.
@@ -599,21 +634,10 @@ void SettingsPage::buildUi()
         saveTexts->addWidget(m_savePathLabel);
         h->addLayout(saveTexts, 1);
 
-        auto *saveButtons = new QWidget(saveRow);
-        auto *bh = new QHBoxLayout(saveButtons);
-        bh->setContentsMargins(0, 0, 0, 0);
-        bh->setSpacing(Theme::Space2);
-        auto makeBtn = [&](const QString &text) {
-            auto *b = new QPushButton(text, saveButtons);
-            b->setCursor(Qt::PointingHandCursor);
-            b->setFont(Theme::chromeFont(font()));
-            b->setMinimumHeight(int(m.touch * 0.72));
-            bh->addWidget(b);
-            return b;
-        };
-        m_chooseSaveDir = makeBtn(QStringLiteral("选择文件夹…"));
-        m_resetSaveDir  = makeBtn(QStringLiteral("跟随源文件"));
-        h->addWidget(saveButtons, 0, Qt::AlignVCenter);
+        ButtonRow saveButtons = makeButtonRow(saveRow, font());
+        m_chooseSaveDir = addRowButton(saveButtons, font(), QStringLiteral("选择文件夹…"));
+        m_resetSaveDir  = addRowButton(saveButtons, font(), QStringLiteral("跟随源文件"));
+        h->addWidget(saveButtons.box, 0, Qt::AlignVCenter);
 
         saveCard.col->addWidget(saveRow);
         col->addWidget(saveCard.frame);
@@ -807,40 +831,32 @@ void SettingsPage::buildUi()
         buttonsLayout->setContentsMargins(Theme::Space4, Theme::Space3, Theme::Space4, Theme::Space3);
         buttonsLayout->setSpacing(Theme::Space2);
 
-        m_updateGh = new QPushButton(QStringLiteral("GitHub 下载并安装"), buttonsRow);
-        m_updateGh->setObjectName(QStringLiteral("settingsPrimary"));
-    m_updateMirror = new QPushButton(QStringLiteral("加速通道 下载并安装"), buttonsRow);
-    m_updateMirror->setToolTip(QStringLiteral("经公共 GitHub 加速通道下载（教室网络通常打不开 github.com）；"
-                                              "安装包仍会做 sha256 校验"));
-    m_updateSite = new QPushButton(QStringLiteral("用浏览器下载安装包"), buttonsRow);
-    m_updateSite->setToolTip(QStringLiteral("交给浏览器通过加速通道下载，适合软件内下载失败时"));
-        for (QPushButton *button : { m_updateGh, m_updateMirror, m_updateSite }) {
-            button->setCursor(Qt::PointingHandCursor);
-            button->setFont(Theme::chromeFont(buttonsRow->font()));
-            button->setMinimumHeight(int(m.touch * 0.72));
-            buttonsLayout->addWidget(button);
-        }
+        ButtonRow installButtons = makeButtonRow(buttonsRow, font());
+        m_updateGh = addRowButton(installButtons, font(),
+                                  QStringLiteral("GitHub 下载并安装"), RowButton::Primary);
+        m_updateMirror = addRowButton(installButtons, font(),
+                                      QStringLiteral("加速通道 下载并安装"));
+        m_updateMirror->setToolTip(QStringLiteral(
+            "经公共 GitHub 加速通道下载（教室网络通常打不开 github.com）；"
+            "安装包仍会做 sha256 校验"));
+        m_updateSite = addRowButton(installButtons, font(),
+                                    QStringLiteral("用浏览器下载安装包"));
+        m_updateSite->setToolTip(QStringLiteral(
+            "交给浏览器通过加速通道下载，适合软件内下载失败时"));
+        buttonsLayout->addWidget(installButtons.box, 0, Qt::AlignVCenter);
         buttonsLayout->addStretch(1);
         update.col->addWidget(buttonsRow);
     }
     update.col->addWidget(makeRowSeparator(update.frame));
     {
-        auto *portable = new QWidget(update.frame);
-        auto *h = new QHBoxLayout(portable);
-        h->setContentsMargins(0, 0, 0, 0);
-        h->setSpacing(Theme::Space2);
-        m_updatePortableGh = new QPushButton(QStringLiteral("GitHub 便携版"), portable);
-        m_updatePortableMirror = new QPushButton(QStringLiteral("加速通道便携版"), portable);
-        for (QPushButton *button : { m_updatePortableGh, m_updatePortableMirror }) {
-            button->setCursor(Qt::PointingHandCursor);
-            button->setFont(Theme::chromeFont(font()));
-            button->setMinimumHeight(int(m.touch * 0.72));
-            h->addWidget(button);
-        }
+        ButtonRow portable = makeButtonRow(update.frame, font());
+        m_updatePortableGh = addRowButton(portable, font(), QStringLiteral("GitHub 便携版"));
+        m_updatePortableMirror =
+            addRowButton(portable, font(), QStringLiteral("加速通道便携版"));
         update.col->addWidget(makeTextRow(
             update.frame, QStringLiteral("便携版"),
             QStringLiteral("压缩包交给浏览器下载，解压后覆盖即可，不运行安装程序。"),
-            portable, Theme::Space3, Theme::Space3));
+            portable.box, Theme::Space3, Theme::Space3));
     }
     update.col->addWidget(makeRowSeparator(update.frame));
     {

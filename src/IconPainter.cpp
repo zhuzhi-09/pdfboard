@@ -214,6 +214,34 @@ void glyphGear(QPainter &p, const Grid &g, const QColor &c, qreal w)
     p.drawEllipse(centre, 2.8 * g.s, 2.8 * g.s);
 }
 
+// House: a roof over a wall with a door - 「主页」. The outline spans the same
+// 3.5 .. 20.5 band as the gear, so the two read as one icon family on the tab
+// strip; the walls drop straight from the eaves, which keeps every corner clean
+// at small sizes.
+void glyphHouse(QPainter &p, const Grid &g, const QColor &c, qreal w)
+{
+    setStroke(p, c, w);
+
+    QPainterPath outline;
+    outline.moveTo(g.p(3.6, 10.6));    // 左屋檐
+    outline.lineTo(g.p(12.0, 3.8));    // 屋脊
+    outline.lineTo(g.p(20.4, 10.6));   // 右屋檐
+    outline.lineTo(g.p(20.4, 20.6));   // 右墙
+    outline.lineTo(g.p(3.6, 20.6));    // 地面
+    outline.closeSubpath();            // 左墙回到屋檐
+    p.drawPath(outline);
+
+    // Door: rounded at the top, flush with the floor.
+    QPainterPath door;
+    door.moveTo(g.p(9.8, 20.6));
+    door.lineTo(g.p(9.8, 15.4));
+    door.quadTo(g.p(9.8, 14.5), g.p(10.7, 14.5));
+    door.lineTo(g.p(13.3, 14.5));
+    door.quadTo(g.p(14.2, 14.5), g.p(14.2, 15.4));
+    door.lineTo(g.p(14.2, 20.6));
+    p.drawPath(door);
+}
+
 // Four rounded tiles in a 2 x 2 block: the page-thumbnail picker.
 void glyphPages(QPainter &p, const Grid &g, const QColor &c, qreal w)
 {
@@ -424,6 +452,9 @@ void paintGlyph(QPainter &p, Glyph glyph, const QRectF &box,
         break;
     case Glyph::Gear:
         glyphGear(p, g, color, w);
+        break;
+    case Glyph::House:
+        glyphHouse(p, g, color, w);
         break;
     case Glyph::Pages:
         glyphPages(p, g, color, w);

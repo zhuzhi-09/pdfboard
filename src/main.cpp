@@ -924,6 +924,50 @@ static int runLogSelfTest()
     return failed == 0 ? 0 : 3;
 }
 
+// 人工复核用的确定性截图：整页设置页 + 底部标签栏。只有在开发者机器上存在
+// D:/dev/tmp 时才写文件；CI 上没有该目录，这里直接跳过——不报错，也不产生
+// 任何输出。--selftest-ui 在纯数学断言之后调用它。
+static void captureUiReviewImages()
+{
+    const QString dir = QStringLiteral("D:/dev/tmp");
+    if (!QDir(dir).exists())
+        return;
+
+    // 无屏窗口：与 --selftest-smoke 一样，不弹窗也能完成布局与绘制，
+    // 设置页通过 MainWindow::showSettingsPage()（Q_INVOKABLE）切过去。
+    MainWindow window;
+    window.setAttribute(Qt::WA_DontShowOnScreen, true);
+    window.resize(1440, 1000);
+    window.show();
+    QCoreApplication::processEvents();
+
+    // 标签栏先抓：启动即主页，房子芯片此时是选中态（强调色），形状最清楚。
+    if (auto *tabs = window.findChild<QWidget *>(QStringLiteral("documentTabs"))) {
+        const QString path = dir + QStringLiteral("/tab-bar.png");
+        const bool saved = tabs->grab().save(path, "PNG");
+        out(QStringLiteral("[selftest] 标签栏截图：%1（%2）")
+                .arg(path, saved ? QStringLiteral("已写出") : QStringLiteral("写出失败")));
+    }
+
+    if (!QMetaObject::invokeMethod(&window, "showSettingsPage"))
+        return;
+    QCoreApplication::processEvents();
+
+    if (auto *page = window.findChild<SettingsPage *>()) {
+        // 把窗口撑到内容高度，让全部分组一次装进滚动区：抓出来的整页图里
+        // 不会出现滚动条把「更新 / 关于」截掉。
+        for (int i = 0; i < 4 && page->verticalScrollBar()->isVisible(); ++i) {
+            window.resize(window.width(),
+                          window.height() + page->verticalScrollBar()->maximum() + 40);
+            QCoreApplication::processEvents();
+        }
+        const QString path = dir + QStringLiteral("/settings-page.png");
+        const bool saved = page->grab().save(path, "PNG");
+        out(QStringLiteral("[selftest] 设置页截图：%1（%2）")
+                .arg(path, saved ? QStringLiteral("已写出") : QStringLiteral("写出失败")));
+    }
+}
+
 // Headless UI-geometry self test:  pdfboard.exe --selftest-ui
 // Pure maths, no widgets: the island metrics must shrink to 80% (font and
 // floors together), and the drag clamp must keep the bar inside the viewport
@@ -957,6 +1001,8 @@ static int runUiSelfTest()
     check("clamp: host smaller -> 0,0",
           (InkToolbar::clampToolbarPos(QPoint(50, 50), QSize(800, 600), QSize(900, 700))
                == QPoint(0, 0)) ? 1 : 0, 1);
+
+    captureUiReviewImages();
 
     out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")
                     : QStringLiteral("[selftest] %1 CHECK(S) FAILED").arg(failed));

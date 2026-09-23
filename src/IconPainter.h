@@ -26,6 +26,7 @@ enum class Glyph {
     ChevronUp,   // collapse/expand affordance: shown while expanded
     ChevronDown, // collapse/expand affordance: shown while collapsed
     Gear,        // settings: ring with teeth
+    House,       // home: roof over a wall with a door
     Pages,      // page picker: four thumbnail tiles
     Save,       // floppy disk: save annotations
     SaveAs,     // floppy disk + export arrow: save as / inject

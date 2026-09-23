@@ -12,8 +12,8 @@
 // One chip per open document: the file name (middle elided when long) plus a
 // close "x". The active chip is a surface card with an accent underline. Two
 // non-document chips are pinned OUTSIDE the scrolling document-chip list, so
-// the chip index -> document index mapping stays exact: a leading "+" chip that
-// returns to the home page, and a trailing 「打开」 chip that opens a new
+// the chip index -> document index mapping stays exact: a leading house chip
+// that returns to the home page, and a trailing 「打开」 chip that opens a new
 // document, with the non-closeable Settings chip (gear glyph + 「设置」) right
 // before it. When the chips overflow the strip scrolls horizontally (wheel or
 // drag) instead of squashing them; both pinned chips stay reachable with zero
@@ -42,8 +42,8 @@ public:
     void setSettingsActive(bool on);
     bool isSettingsActive() const { return m_settingsActive; }
 
-    // The leading "+" home chip highlights the same way while the home page is
-    // the visible page.
+    // The leading house (主页) chip highlights the same way while the home page
+    // is the visible page.
     void setHomeActive(bool on);
     bool isHomeActive() const { return m_homeActive; }
 
@@ -55,7 +55,7 @@ signals:
     void closeRequested(int index);
     void addRequested();
     void settingsRequested();   // the Settings chip was activated
-    void homeRequested();       // the leading "+" home chip was activated
+    void homeRequested();       // the leading house chip was activated
 
 protected:
     void paintEvent(QPaintEvent *e) override;
@@ -82,7 +82,7 @@ private:
     int  chipAt(const QPoint &pos) const;   // -1 when not on a chip
     QRect addRect() const { return m_addRect; }
     QRect settingsInner() const;            // painted box of the Settings chip
-    QRect homeInner() const;                // painted box of the leading "+" chip
+    QRect homeInner() const;                // painted box of the leading house chip
 
     QVector<Chip> m_chips;
     QStringList   m_titles;
@@ -115,7 +115,7 @@ private:
     int m_content   = 0;        // total scrolling content width (last relayout)
     int m_chipsLeft = 0;        // left edge of the scrolling chip area
     int m_chipsRight = 0;       // right edge of the scrolling chip area
-    QRect m_homeRect;           // pinned "+" home chip (leading)
+    QRect m_homeRect;           // pinned house (主页) chip (leading)
     QRect m_addRect;
     QRect m_settingsRect;       // pinned zone between the chips and "+"
     bool m_settingsActive = false;
