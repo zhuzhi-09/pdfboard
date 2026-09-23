@@ -44,7 +44,7 @@ rem no translation bundle except the Chinese one the app asks for.
   rem the licensed source. Failing here is better than shipping a package that will not
   rem start on the machines we care about.
   set "CRT="
-  for /d %%D in ("%VS%\VC\Redist\MSVC\*") do if exist "%%D\x64\Microsoft.VC143.CRT\msvcp140.dll" set "CRT=%%D\x64\Microsoft.VC143.CRT"
+  for /d %%D in ("%VS%\VC\Redist\MSVC\*") do for /d %%C in ("%%D\x64\Microsoft.VC*.CRT") do if exist "%%C\msvcp140.dll" set "CRT=%%C"
   if not defined CRT (
       echo [package] ERROR: VC redist folder not found under "%VS%\VC\Redist\MSVC"
       exit /b 1

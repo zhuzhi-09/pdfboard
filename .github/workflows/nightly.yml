@@ -99,13 +99,18 @@ jobs:
           Remove-Item dist/stage/dxcompiler.dll, dist/stage/dxil.dll, dist/stage/vc_redist.x64.exe -ErrorAction SilentlyContinue
           # VC++ runtime, app-local: classroom machines may not have it installed, and
           # vc_redist needs admin rights this per-user installer avoids.
-          $crt = Get-ChildItem (Join-Path $env:VCToolsRedistDir "..\..") -Directory |
-                 ForEach-Object { Join-Path $_.FullName "x64\Microsoft.VC143.CRT" } |
-                 Where-Object { Test-Path (Join-Path $_ "msvcp140.dll") } |
+          # The CRT folder is named Microsoft.VC143.CRT on VS2022 but Microsoft.VC145.CRT
+          # on newer toolsets, so match the pattern instead of guessing the version.
+          $roots = @($env:VCToolsRedistDir)
+          if ($env:VCINSTALLDIR) { $roots += (Join-Path $env:VCINSTALLDIR "Redist") }
+          $roots = $roots | Where-Object { $_ -and (Test-Path $_) }
+          $crt = $roots |
+                 ForEach-Object { Get-ChildItem $_ -Recurse -Directory -Filter "Microsoft.VC*.CRT" -ErrorAction SilentlyContinue } |
+                 Where-Object { Test-Path (Join-Path $_.FullName "msvcp140.dll") } |
                  Select-Object -First 1
           if (-not $crt) { throw "VC redist folder not found; the package would not start on machines without the runtime" }
-          Copy-Item "$crt\*.dll" dist/stage/ -Force
-          "bundled VC runtime from: $crt"
+          Copy-Item "$($crt.FullName)\*.dll" dist/stage/ -Force
+          "bundled VC runtime from: $($crt.FullName)"
           New-Item -ItemType Directory -Force dist/stage/translations | Out-Null
           Copy-Item "$env:QT_ROOT_DIR/translations/*zh_CN.qm" dist/stage/translations/ -ErrorAction SilentlyContinue
           Get-ChildItem dist/stage -Recurse -File | Measure-Object Length -Sum |
@@ -199,7 +204,7 @@ jobs:
             dist/PDFBoard-nightly-portable.zip
           body: |
             > 这是**自动构建的夜间版本**，随 `main` 的每次提交更新，可能不稳定。
-            > 稳定版本请看 Releases 里的版本标签（如 `v1.7.7`）。
+            > 稳定版本请看 Releases 里的版本标签（如 `v1.7.8`）。
 
             **提交**：`${{ github.sha }}`
             **版本号**：`${{ steps.ver.outputs.version }}`
