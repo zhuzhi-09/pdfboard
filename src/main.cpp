@@ -201,9 +201,16 @@ static int runSmokeSelfTest(const QString &path)
                     // stack (0xC00000FD); with the fix the slider stays the master.
                     if (step == 30) {
                         const int held = slider->value();
+                        auto *pill = bar->findChild<QToolButton *>(QStringLiteral("zoomPercent"));
+                        const QString tip = pill ? pill->toolTip() : QString();
                         bar->setZoom(ZoomBarMath::kMinZoom);
                         check("smoke: drag not overridden by canvas",
                               slider->value() == held ? 1 : 0, 1);
+                        // ...and it must not touch the tooltip either: setToolTip during
+                        // a drag drives QToolTip's nested event handling, which is what
+                        // overflowed the stack inside Qt6Widgets.dll.
+                        check("smoke: drag leaves the tooltip alone",
+                              (pill && pill->toolTip() == tip) ? 1 : 0, 1);
                     }
                 }
                 const int endX = (sweep % 2 == 0) ? slider->width() - hw / 2 : hw / 2;

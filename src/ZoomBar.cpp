@@ -202,5 +202,14 @@ void ZoomBar::syncLabel()
 {
     const int percent = qRound(m_zoom * 100.0);
     m_percent->setText(QStringLiteral("%1%").arg(percent));
-    m_percent->setToolTip(QStringLiteral("适配宽度（当前 %1%）").arg(percent));
+
+    // Never touch the tooltip while the handle is held (or while the pill is under the
+    // pointer): during a drag the percentage pill sits right under the mouse, and
+    // setToolTip() then drives QToolTip's show/hide machinery, which runs nested event
+    // handling. Called on every zoom step it pushed the call stack deeper and deeper
+    // until Qt itself overflowed - the crash reports showed 0xC00000FD inside
+    // Qt6Widgets.dll with a trail of rapid zoom breadcrumbs. A tooltip is not worth a
+    // crash; it is refreshed as soon as the gesture ends.
+    if (!m_slider->isSliderDown() && !m_percent->underMouse())
+        m_percent->setToolTip(QStringLiteral("适配宽度（当前 %1%）").arg(percent));
 }
