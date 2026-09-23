@@ -66,26 +66,10 @@ jobs:
         run: choco install innosetup --no-progress -y
 
       # runner 的 PATH 里 MinGW 排在前面，CMake 会误选 g++ 去链接 MSVC 版 Qt。
-      # Pinned to VS2022 (v143) instead of letting the action pick the newest VS: the
-      # app ships the VC++ runtime app-locally, and the newest toolset's CRT (14.5x)
-      # fails to initialise on older Windows (0xC0000142) - including the classroom
-      # machines those DLLs exist for. v143's 14.4x CRT runs everywhere we support, and
-      # the runner image ships VS2022. The whole vcvars environment is exported so the
-      # later steps (and VCToolsRedistDir) see the same toolset.
-      - name: Set up MSVC (VS2022 / v143) and export its environment
-        shell: pwsh
-        run: |
-          $vcvars = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\*\VC\Auxiliary\Build\vcvars64.bat" -ErrorAction SilentlyContinue |
-                    Select-Object -First 1
-          if (-not $vcvars) { throw "VS2022 vcvars64.bat not found on this runner" }
-          "using $($vcvars.FullName)"
-          $lines = cmd /c "`"$($vcvars.FullName)`" >nul 2>&1 && set"
-          $utf8 = New-Object System.Text.UTF8Encoding($false)
-          foreach ($line in $lines) {
-            if ($line -match '^([^=]+)=(.*)$') {
-              [System.IO.File]::AppendAllText($env:GITHUB_ENV, "$($matches[1])=$($matches[2])`n", $utf8)
-            }
-          }
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
 
       - name: Configure and build
         shell: pwsh
@@ -113,28 +97,18 @@ jobs:
           # app then cannot start at all) and vc_redist needs admin rights, which this
           # per-user installer deliberately avoids. Microsoft supports shipping these
           # DLLs next to the exe; the VS redist folder is the licensed source.
-          # The CRT folder is named Microsoft.VC143.CRT on VS2022 but Microsoft.VC145.CRT
-          # on newer toolsets, so match the pattern instead of guessing the version.
-          $roots = @($env:VCToolsRedistDir)
-          if ($env:VCINSTALLDIR) { $roots += (Join-Path $env:VCINSTALLDIR "Redist") }
-          $roots = $roots | Where-Object { $_ -and (Test-Path $_) }
-          $crt = $roots |
-                 ForEach-Object { Get-ChildItem $_ -Recurse -Directory -Filter "Microsoft.VC*.CRT" -ErrorAction SilentlyContinue } |
-                 Where-Object { Test-Path (Join-Path $_.FullName "msvcp140.dll") } |
-                 Select-Object -First 1
-          if (-not $crt) { throw "VC redist folder not found; the package would not start on machines without the runtime" }
-          # Copy only the modules the app and Qt actually import: the full CRT folder
-          # also holds brand-new helpers (vcruntime140_threads.dll,
-          # msvcp140_atomic_wait.dll) that fail to initialise on older Windows, which
-          # made the app die at startup with 0xC0000142 on this runner.
-          $crtFiles = "msvcp140.dll", "msvcp140_1.dll", "msvcp140_2.dll",
-                      "vcruntime140.dll", "vcruntime140_1.dll"
+          # VC++ runtime, app-local. Source: this machine's System32, i.e. the exact
+          # version the staged exe already loads successfully in the Self test below.
+          # Copying the newest VS redist instead shipped a 14.5x CRT that fails to
+          # initialise on older Windows (0xC0000142) - including the classroom machines
+          # these DLLs are for. Only what dumpbin lists as needed is copied.
+          $crtFiles = "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"
           foreach ($name in $crtFiles) {
-            $from = Join-Path $crt.FullName $name
-            if (-not (Test-Path $from)) { throw "missing $name in $($crt.FullName)" }
+            $from = Join-Path $env:SystemRoot "System32\$name"
+            if (-not (Test-Path $from)) { throw "$name not found in System32" }
             Copy-Item $from dist/stage/ -Force
           }
-          "bundled VC runtime from: $($crt.FullName)"
+          "bundled VC runtime from $env:SystemRoot\System32"
           New-Item -ItemType Directory -Force dist/stage/translations | Out-Null
           Copy-Item "$env:QT_ROOT_DIR/translations/*zh_CN.qm" dist/stage/translations/ -ErrorAction SilentlyContinue
 

@@ -37,27 +37,16 @@ rem no translation bundle except the Chinese one the app asks for.
 "%QT%\bin\windeployqt.exe" --release --no-translations --no-system-d3d-compiler "%~dp0dist\stage\pdfboard.exe" || ( echo [package] windeployqt failed & exit /b 1 )
   del /q "%~dp0dist\stage\dxcompiler.dll" "%~dp0dist\stage\dxil.dll" "%~dp0dist\stage\vc_redist.x64.exe" 2>nul
 
-  rem VC++ runtime, deployed app-local. A classroom machine may not have it installed
-  rem at all (then the app cannot start: "MSVCP140.dll is missing"), and vc_redist
-  rem needs admin rights, which this per-user installer deliberately avoids. Copying the
-  rem DLLs next to the exe is Microsoft's supported deployment; the VS redist folder is
-  rem the licensed source. Failing here is better than shipping a package that will not
-  rem start on the machines we care about.
-  set "CRT="
-  for /d %%D in ("%VS%\VC\Redist\MSVC\*") do for /d %%C in ("%%D\x64\Microsoft.VC*.CRT") do if exist "%%C\msvcp140.dll" set "CRT=%%C"
-  if not defined CRT (
-      echo [package] ERROR: VC redist folder not found under "%VS%\VC\Redist\MSVC"
-      exit /b 1
+  rem VC++ runtime, deployed app-local. Source: this machine's System32 - the exact
+  rem version the app already loads here, so it is guaranteed to initialise. The newest
+  rem VS redist ships a 14.5x CRT that dies on older Windows with 0xC0000142 (DLL init
+  rem failed), and a classroom machine may have no runtime at all, which is why this is
+  rem bundled rather than assumed. Only what dumpbin lists as needed is copied.
+  for %%F in (msvcp140.dll vcruntime140.dll vcruntime140_1.dll) do (
+      if not exist "%SystemRoot%\System32\%%F" ( echo [package] ERROR: %%F not found in System32 & exit /b 1 )
+      copy /y "%SystemRoot%\System32\%%F" "%~dp0dist\stage\" >nul || ( echo [package] copy of %%F failed & exit /b 1 )
   )
-  rem Copy only the modules the app and Qt actually import. The full CRT folder also
-  rem contains brand-new helpers (vcruntime140_threads.dll, msvcp140_atomic_wait.dll)
-  rem that fail to initialise on older Windows - shipping them made the app die at
-  rem startup with 0xC0000142 (DLL init failed) on the build runner.
-  for %%F in (msvcp140.dll msvcp140_1.dll msvcp140_2.dll vcruntime140.dll vcruntime140_1.dll) do (
-      if not exist "%CRT%\%%F" ( echo [package] ERROR: missing %%F in %CRT% & exit /b 1 )
-      copy /y "%CRT%\%%F" "%~dp0dist\stage\" >nul || ( echo [package] copy of %%F failed & exit /b 1 )
-  )
-  echo [package] VC runtime bundled from %CRT%
+  echo [package] VC runtime bundled from %SystemRoot%\System32
 mkdir "%~dp0dist\stage\translations" 2>nul
 copy /y "%QT%\translations\*zh_CN.qm" "%~dp0dist\stage\translations\" >nul 2>nul
 
