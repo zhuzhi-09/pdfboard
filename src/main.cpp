@@ -1987,6 +1987,83 @@ static int runImageSelfTest()
     check("roundtrip: png loaded", int(!exported.isNull()), 1);
     check("roundtrip: png is 800x600", int(exported.size() == QSize(800, 600)), 1);
 
+    // Eraser indicator: a screen-only ring whose diameter IS the wipe diameter, with the
+    // eraser glyph in the middle so the tool is recognisable. Three things must hold:
+    // the ring is drawn, it scales with the radius it is given, and none of it reaches an
+    // export (both export paths rasterise through pageThumbnail, never through paintEvent).
+    {
+        PdfCanvas bare;                       // no document: desk colour + ring only
+        bare.setAttribute(Qt::WA_DontShowOnScreen, true);
+        bare.resize(600, 400);
+        bare.show();
+        const QPointF hover(300, 200);
+        // Measure against the background colour instead of "dark": the desk follows the
+        // theme, so an absolute threshold would count the whole image in dark mode.
+        auto differs = [](QRgb a, QRgb b) {
+            return qAbs(qRed(a) - qRed(b)) + qAbs(qGreen(a) - qGreen(b))
+                   + qAbs(qBlue(a) - qBlue(b)) > 60;
+        };
+        auto ringSpan = [&differs](const QImage &im) {
+            const QRgb bg = im.pixel(0, 0);
+            int minx = im.width(), maxx = -1, miny = im.height(), maxy = -1;
+            for (int y = 0; y < im.height(); ++y) {
+                const QRgb *row = reinterpret_cast<const QRgb *>(im.constScanLine(y));
+                for (int x = 0; x < im.width(); ++x) {
+                    if (differs(row[x], bg)) {
+                        minx = qMin(minx, x); maxx = qMax(maxx, x);
+                        miny = qMin(miny, y); maxy = qMax(maxy, y);
+                    }
+                }
+            }
+            return QSize(maxx - minx + 1, maxy - miny + 1);
+        };
+        // NB: not "small"/"big" - <rpcndr.h> defines `small` as a macro (char).
+        const QSize spanSmall =
+            ringSpan(bare.testRenderEraserIndicator(hover, 9.0, QSize(600, 400)));
+        const QSize spanBig =
+            ringSpan(bare.testRenderEraserIndicator(hover, 26.0, QSize(600, 400)));
+        check("eraser: ring drawn", int(spanSmall.width() >= 16), 1);
+        check("eraser: ring scales with the wipe size",
+              int(spanBig.width() >= spanSmall.width() + 30), 1);
+        check("eraser: ring is round", int(qAbs(spanBig.width() - spanBig.height()) <= 2), 1);
+
+        // The glyph must be visible in the middle, in a window the ring does not cross.
+        const QImage art = bare.testRenderEraserIndicator(hover, 26.0, QSize(600, 400));
+        int glyphPx = 0;
+        const QRgb artBg = art.pixel(0, 0);
+        for (int y = int(hover.y()) - 4; y <= int(hover.y()) + 4; ++y) {
+            const QRgb *row = reinterpret_cast<const QRgb *>(art.constScanLine(y));
+            for (int x = int(hover.x()) - 4; x <= int(hover.x()) + 4; ++x) {
+                if (differs(row[x], artBg))
+                    ++glyphPx;
+            }
+        }
+        check("eraser: glyph visible in the middle", int(glyphPx > 6), 1);
+
+        // Eyeball artefact, only where the dev temp dir exists (never required on CI).
+        if (QDir(QStringLiteral("D:/dev/tmp")).exists()) {
+            canvas.setTool(PdfCanvas::InkTool::Eraser);
+            canvas.testSetEraserHover(QPointF(300, 240));
+            const QString shot = QStringLiteral("D:/dev/tmp/eraser-indicator.png");
+            const bool saved =
+                canvas.testRenderEraserIndicator(QPointF(300, 240), 14.0, QSize(600, 400))
+                    .save(shot, "PNG");
+            check("eraser: screenshot written", saved ? 1 : 0, 1);
+            out(QStringLiteral("[selftest] eraser indicator: %1").arg(shot));
+        }
+
+        // An export must be byte-identical with and without the overlay on screen.
+        QString exportErr;
+        const QString leakA = QDir(dir).filePath(QStringLiteral("leak-with-overlay"));
+        PdfExport::exportPngPages(&canvas, leakA, &exportErr);
+        const QImage shotA(PdfExport::pngPageName(leakA, 1, 1));
+        canvas.testClearEraserHover();
+        const QString leakB = QDir(dir).filePath(QStringLiteral("leak-without-overlay"));
+        PdfExport::exportPngPages(&canvas, leakB, &exportErr);
+        const QImage shotB(PdfExport::pngPageName(leakB, 1, 1));
+        check("eraser: export ignores the overlay", int(!shotA.isNull() && shotA == shotB), 1);
+    }
+
     auto samePixel = [&source, &exported](int x, int y) {
         const QRgb a = source.pixel(x, y);
         const QRgb b = exported.pixel(x, y);

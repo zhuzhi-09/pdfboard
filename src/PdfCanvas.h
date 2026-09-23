@@ -156,6 +156,16 @@ public:
     int  testMaxRelayoutDepth() const;
     void testResetMaxRelayoutDepth();
     int  testRelayoutRefusals() const;   // 0 means the loop is gone, not just capped
+
+    // Eraser indicator: a ring whose diameter IS the wipe diameter, with the eraser glyph
+    // in the middle so the tool is recognisable at a glance. Screen only - it is drawn in
+    // paintEvent and both export paths rasterise through pageThumbnail, so it can never
+    // reach a PDF or a PNG. Exposed so the self test can render it at two radii and prove
+    // the size is actually readable from the drawing.
+    void   testSetEraserHover(const QPointF &viewportPos);
+    void   testClearEraserHover();
+    QImage testRenderEraserIndicator(const QPointF &viewportPos, qreal radiusPx,
+                                     const QSize &imageSize);
     int    strokeCount() const;
     void   clearInk();                  // all pages
     void   clearCurrentPage();          // page under the viewport, undoable
@@ -198,6 +208,16 @@ private:
     using InkModel = QHash<int, QVector<Stroke>>;
 
     void relayout();
+    // Eraser indicator: the ring shows the wipe size, the glyph shows the tool. Screen
+    // only - see the block in the .cpp for why it cannot reach an export.
+    bool   eraserIndicatorVisible() const;
+    QRect  eraserIndicatorBounds(const QPointF &viewportPos, qreal radiusPx) const;
+    void   updateEraserIndicator(const QPointF &from, bool hadFrom,
+                                 const QPointF &to, bool hasTo);
+    void   drawEraserIndicator(QPainter &p, const QPointF &viewportPos, qreal radiusPx);
+    void   applyToolCursor();
+    void   setEraserHover(const QPointF &viewportPos);
+    void   clearEraserHover();
     void invalidateRenders();           // drop cached bitmaps (on resize/zoom)
     // Applies an absolute zoom while keeping the content point under `anchor`
     // fixed on both axes. `immediate` re-renders at once instead of waiting for
@@ -299,6 +319,10 @@ private:
     bool m_erasePushed = false;         // this drag already took a snapshot
     QPointF m_lastErasePos;             // previous eraser sample (for sweeping)
     bool    m_hasLastErasePos = false;
+    // Eraser indicator: where the pointer is and whether it is on the canvas. The ring
+    // follows this, so a pointer move only repaints two small circles (old + new).
+    QPointF m_eraserHoverPos;
+    bool    m_eraserHover = false;
     bool    m_pinchActive = false;      // two-finger zoom+pan in progress
     bool    m_touchInkBlocked = false;  // no inking until every finger lifts
     QVector<QPointF> m_pinchPts;        // last two touch points

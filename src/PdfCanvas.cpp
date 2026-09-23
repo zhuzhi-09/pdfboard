@@ -794,6 +794,137 @@ void PdfCanvas::paintEmptyState(QPainter &p) const
                QStringLiteral("点击“打开”，或把 PDF / .dpz 批注包拖进来"));
 }
 
+// --- eraser indicator (screen only) ---------------------------------------------
+// The ring's diameter IS the wipe diameter, so the drawing doubles as the size readout;
+// the glyph in the middle says which tool it is. Both are painted from paintEvent and
+// nowhere else, and the PDF/PNG export paths rasterise through pageThumbnail, so the
+// indicator cannot leak into a saved file.
+
+bool PdfCanvas::eraserIndicatorVisible() const
+{
+    return m_tool == InkTool::Eraser && !m_pinchActive && !m_touchInkBlocked
+           && !m_moveDragActive && (m_erasing || m_eraserHover);
+}
+
+QRect PdfCanvas::eraserIndicatorBounds(const QPointF &viewportPos, qreal radiusPx) const
+{
+    const qreal r = radiusPx + 4.0;          // ring + halo + anti-aliasing bleed
+    return QRectF(viewportPos.x() - r, viewportPos.y() - r, 2.0 * r, 2.0 * r)
+        .toAlignedRect();
+}
+
+void PdfCanvas::updateEraserIndicator(const QPointF &from, bool hadFrom,
+                                      const QPointF &to, bool hasTo)
+{
+    QRect dirty;
+    if (hadFrom)
+        dirty = eraserIndicatorBounds(from, kEraserRadiusPx);
+    if (hasTo) {
+        const QRect now = eraserIndicatorBounds(to, kEraserRadiusPx);
+        dirty = dirty.isNull() ? now : dirty.united(now);
+    }
+    if (!dirty.isNull())
+        viewport()->update(dirty);
+}
+
+void PdfCanvas::drawEraserIndicator(QPainter &p, const QPointF &viewportPos, qreal radiusPx)
+{
+    // A single stroke colour cannot stay visible on the white paper AND on a dark desk,
+    // so pick by what the indicator actually sits on.
+    const bool onPaper = pageAtViewportPos(viewportPos) >= 0;
+    const QColor desk = Theme::light().desk;
+    const bool darkDesk = (0.299 * desk.redF() + 0.587 * desk.greenF()
+                           + 0.114 * desk.blueF()) < 0.5;
+    const bool darkBg = !onPaper && darkDesk;
+    const QColor ringLine = darkBg ? QColor(0xFF, 0xFF, 0xFF, 0xE6)
+                                   : QColor(0x1F, 0x24, 0x2B, 0xE0);
+    const QColor glyphColor = darkBg ? QColor(0xFF, 0xFF, 0xFF, 0xF0)
+                                     : Theme::light().accent;
+    const QRectF ring(viewportPos.x() - radiusPx, viewportPos.y() - radiusPx,
+                      radiusPx * 2.0, radiusPx * 2.0);
+
+    p.save();
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setBrush(Qt::NoBrush);
+    // The halo is always drawn. On blank paper it is invisible, but the moment the ring
+    // crosses ink, a photo or the dark desk it is what keeps the outline readable - a
+    // first render with a bare 1.6 px line disappeared inside dark page content.
+    p.setPen(QPen(QColor(255, 255, 255, darkBg ? 170 : 120), 3.4));
+    p.drawEllipse(ring);
+    p.setPen(QPen(ringLine, 2.0));
+    p.drawEllipse(ring);
+
+    if (m_erasing) {
+        // Accent wash over the disc being removed: the page stays readable while cutting.
+        p.setPen(Qt::NoPen);
+        p.setBrush(Theme::light().accentSoft);
+        p.drawEllipse(ring);
+        p.setBrush(Qt::NoBrush);
+    }
+
+    // The glyph uses the accent colour - the app's "active" colour - rather than the ring's
+    // neutral, so the two shapes never merge at small radii. It is capped so it stays a
+    // small recognisable icon instead of growing into a huge eraser; while cutting it
+    // presses down by one pixel.
+    const qreal side = qBound<qreal>(10.0, radiusPx * 1.05, 20.0);
+    const qreal press = m_erasing ? 1.0 : 0.0;
+    const QRectF box(viewportPos.x() - side / 2.0,
+                     viewportPos.y() - side / 2.0 + press, side, side);
+    IconPainter::paintGlyph(p, IconPainter::Glyph::Eraser, box, glyphColor, 2.0);
+    p.restore();
+}
+
+void PdfCanvas::applyToolCursor()
+{
+    if (m_tool == InkTool::Eraser && eraserIndicatorVisible()) {
+        // The indicator IS the pointer; two pointers on screen is one too many.
+        viewport()->setCursor(Qt::BlankCursor);
+        return;
+    }
+    viewport()->setCursor(m_tool == InkTool::Eraser ? Qt::PointingHandCursor
+                         : m_tool == InkTool::Move   ? Qt::SizeAllCursor
+                                                     : Qt::CrossCursor);
+}
+
+void PdfCanvas::setEraserHover(const QPointF &viewportPos)
+{
+    const bool had = m_eraserHover;
+    const QPointF from = m_eraserHoverPos;
+    m_eraserHover = true;
+    m_eraserHoverPos = viewportPos;
+    applyToolCursor();
+    updateEraserIndicator(from, had, viewportPos, true);
+}
+
+void PdfCanvas::clearEraserHover()
+{
+    const bool had = m_eraserHover;
+    const QPointF from = m_eraserHoverPos;
+    m_eraserHover = false;
+    applyToolCursor();
+    updateEraserIndicator(from, had, from, false);
+}
+
+void PdfCanvas::testSetEraserHover(const QPointF &viewportPos) { setEraserHover(viewportPos); }
+void PdfCanvas::testClearEraserHover() { clearEraserHover(); }
+
+QImage PdfCanvas::testRenderEraserIndicator(const QPointF &viewportPos, qreal radiusPx,
+                                            const QSize &imageSize)
+{
+    // Same composition as paintEvent, on an offscreen image: page raster first, then the
+    // indicator. A test can measure the ring in it; a human can eyeball the art.
+    QImage img(imageSize, QImage::Format_RGB32);
+    img.fill(Theme::light().desk);
+    {
+        QPainter p(&img);
+        const QImage page = pageThumbnail(0, imageSize);
+        if (!page.isNull())
+            p.drawImage(QPoint(0, 0), page);
+        drawEraserIndicator(p, viewportPos, radiusPx);
+    }
+    return img;
+}
+
 // --- paint re-entrancy guard -----------------------------------------------------
 // The crash we chased was a stack overflow (0xC00000FD) while zooming: ~2200 nested
 // frames, every one of them re-entering this function through Qt6Widgets/Qt6Gui. The
@@ -901,6 +1032,11 @@ void PdfCanvas::paintEvent(QPaintEvent *)
         p.setBrush(Qt::NoBrush);
         p.drawPath(paper);
     }
+
+    // Screen-only eraser indicator, drawn last so it floats above every page and edge -
+    // and drawn only here, which is why it can never reach an exported PDF or PNG.
+    if (eraserIndicatorVisible())
+        drawEraserIndicator(p, m_eraserHoverPos, kEraserRadiusPx);
 }
 
 QPointF PdfCanvas::toNormalized(int page, const QPointF &viewportPos) const
@@ -1070,9 +1206,10 @@ void PdfCanvas::setTool(InkTool tool)
         return;
     m_tool = tool;
     cancelGesture();
-    viewport()->setCursor(tool == InkTool::Eraser ? Qt::PointingHandCursor
-                        : tool == InkTool::Move   ? Qt::SizeAllCursor
-                                                  : Qt::CrossCursor);
+    // Tool changes reset the indicator: the cursor logic lives in applyToolCursor() so the
+    // "blank while the indicator shows" rule cannot drift out of sync.
+    m_eraserHover = false;
+    applyToolCursor();
     viewport()->update();
     emit toolChanged();
 }
@@ -1301,9 +1438,12 @@ bool PdfCanvas::eraseAtPointer(int page, const QPointF &viewportPos)
     // Only the eraser circle changed, so only that needs repainting - the rest
     // of the page is untouched. A full update here ran for every sweep step (a
     // 40 px flick is ~7 steps), which is a lot of wasted 4K repainting.
-    const qreal pad = kEraserRadiusPx + 2.0;   // +2 for anti-aliasing bleed
-    viewport()->update(QRectF(viewportPos, QSizeF(1.0, 1.0)).toAlignedRect()
-                           .adjusted(int(-pad), int(-pad), int(pad), int(pad)));
+    // The eraser circle changed, and the indicator following the pointer is a little
+    // larger than that circle, so repaint the indicator's bounds (which contain it).
+    // Keeping the hover position in sync here also makes a touch-driven erase show the
+    // ring at the right place.
+    m_eraserHoverPos = viewportPos;
+    viewport()->update(eraserIndicatorBounds(viewportPos, kEraserRadiusPx));
     emit inkChanged(strokeCount());
     return true;
 }
@@ -1368,6 +1508,7 @@ void PdfCanvas::moveInputTo(const QPointF &viewportPos)
             m_hasLastErasePos = true;
         }
         // Erase along the whole travelled path, not just at this sample.
+        setEraserHover(viewportPos);
         eraseSweep(pageAtViewportPos(viewportPos), m_lastErasePos, viewportPos);
         m_lastErasePos = viewportPos;
         return;
@@ -1503,6 +1644,13 @@ void PdfCanvas::mouseMoveEvent(QMouseEvent *e)
             QAbstractScrollArea::mouseMoveEvent(e);
         else
             e->accept();
+        return;
+    }
+    if (m_tool == InkTool::Eraser && !m_drawing && !m_erasing) {
+        // Hovering with the eraser: the indicator follows the pointer so the wipe size is
+        // visible before touching anything. Only the two affected circles are repainted.
+        setEraserHover(e->position());
+        e->accept();
         return;
     }
     if (!m_drawing && !m_erasing) {
@@ -1786,6 +1934,10 @@ bool PdfCanvas::event(QEvent *e)
 bool PdfCanvas::viewportEvent(QEvent *e)
 {
     switch (e->type()) {
+    case QEvent::Leave:
+        // The pointer left the canvas: drop the indicator (and give the cursor back).
+        clearEraserHover();
+        break;
     case QEvent::Wheel:
         if (handleWheel(static_cast<QWheelEvent *>(e)))
             return true;
