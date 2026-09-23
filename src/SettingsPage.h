@@ -6,7 +6,9 @@
 
 class QAbstractButton;
 class QButtonGroup;
+class QFrame;
 class QLabel;
+class QPlainTextEdit;
 class QPushButton;
 class QProgressBar;
 class QWidget;
@@ -37,6 +39,12 @@ public:
     // Re-applies the palette-derived pieces (page background, sheet, gear
     // pixmap) after the application theme changed.
     void refreshTheme();
+
+    // Show a check result that came from elsewhere (the launch / file-open check
+    // in MainWindow) so the update card always reflects the newest news, and bring
+    // the card into view when the teacher accepts the "new version" dialog.
+    void setUpdateInfo(const UpdateChecker::UpdateInfo &info);
+    void focusUpdateSection();
 
 signals:
     void themeChanged();     // an appearance mode was picked and stored
@@ -106,6 +114,8 @@ private:
     QProgressBar *m_updateProgress = nullptr;
     QLabel       *m_updateVersion  = nullptr;   // 当前版本 / 线上最新
     QLabel       *m_updateNote     = nullptr;   // state line
+    QPlainTextEdit *m_updateNotes  = nullptr;   // release notes (changelog)
+    QFrame         *m_updateCard   = nullptr;   // brought into view on demand
     QPushButton  *m_updateGh       = nullptr;
     QPushButton  *m_updateMirror   = nullptr;
     QPushButton  *m_updateSite     = nullptr;
@@ -141,6 +151,7 @@ private:
     void startUpdateDownload(int channel);
     void finishUpdateBusy();
     void setUpdateState(const QString &text);
+    void setUpdateNotes(const QString &notes);
     void refreshUpdateVersionLine();
     void openPortablePage(int channel);
 

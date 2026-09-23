@@ -108,6 +108,12 @@ public:
     // Number of points the sample path would keep for `raw` (dedupe + densify):
     // lets the self test prove repeated panel frames are dropped, not stored.
     int  testDensifiedCount(const QVector<QPointF> &raw) const;
+    // Headless touch entry points + the overlay rule, so the "writing across the
+    // island" behaviour is locked without a touchscreen.
+    void  testTouchBegin(const QPointF &viewportPos);
+    void  testTouchMove(const QPointF &viewportPos);
+    void  testTouchEnd();
+    bool  testTouchBelongsToOverlay(const QVector<QPointF> &viewportPts) const;
     // On-screen (device px) thickness of a stored stroke at the current zoom.
     qreal testStrokeDeviceWidth(int page, int index) const;
     void  testZoomAt(const QPointF &viewportAnchor, qreal factor);
@@ -198,6 +204,12 @@ private:
     // Sweeps the eraser from `from` to `to` so fast drags do not skip ink
     // between successive pointer samples.
     bool eraseSweep(int pageHint, const QPointF &from, const QPointF &to);
+
+    // True when a touch frame must be handed to a floating overlay (toolbar,
+    // palette, page grid) instead of the page. Only a touch that would START
+    // something is redirected; a stroke already running keeps every sample, so
+    // writing across the island works and the ink simply goes underneath it.
+    bool touchBelongsToOverlay(const QVector<QPointF> &viewportPts) const;
     // Shared input entry points (used by both mouse and touch handlers).
     void beginInputAt(const QPointF &viewportPos);   // pen stroke / erase start
     void moveInputTo(const QPointF &viewportPos);

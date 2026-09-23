@@ -1704,6 +1704,25 @@ bool PdfCanvas::handleTablet(QTabletEvent *te)
 }
 
 // One finger draws / erases; two fingers pinch-zoom and pan at the same time.
+bool PdfCanvas::touchBelongsToOverlay(const QVector<QPointF> &viewportPts) const
+{
+    // A gesture that is already running owns the touch. The island, palette and
+    // page grid are children of the viewport, so anything written across them is
+    // covered by them on screen - the ink goes underneath, which is exactly what
+    // "keep writing" means. Refusing these samples mid-stroke used to set the ink
+    // lock, and endInput() then cancelled the WHOLE stroke: one line dragged over
+    // the island made the part before it disappear too.
+    if (m_drawing || m_erasing || m_pinchActive || m_moveDragActive)
+        return false;
+
+    for (const QPointF &p : viewportPts) {
+        QWidget *child = viewport()->childAt(p.toPoint());
+        if (child && child->isVisible())
+            return true;               // that widget gets the touch instead
+    }
+    return false;
+}
+
 bool PdfCanvas::handleTouch(QTouchEvent *te)
 {
     // Free move pans the view, so it works on a blank canvas too.
@@ -1719,17 +1738,15 @@ bool PdfCanvas::handleTouch(QTouchEvent *te)
     }
     InputProbe::instance().addEvent(pts.size());
 
-    // A touch that lands on one of our floating overlays (toolbar, palette,
-    // page grid) belongs to that widget, not to the page: never ink underneath
-    // them and never treat it as a pinch source.
-    for (const QPointF &p : pts) {
-        QWidget *child = viewport()->childAt(p.toPoint());
-        if (child && child->isVisible()) {
-            m_touchInkBlocked = true;
-            if (m_touchRelease)
-                m_touchRelease->start();
-            return true;
-        }
+    // A touch that LANDS on a floating overlay (toolbar, palette, page grid)
+    // belongs to that widget: never start a stroke underneath it and never treat
+    // it as a pinch source. A touch that arrives while something is already
+    // running is handled by touchBelongsToOverlay() - it must not interrupt.
+    if (touchBelongsToOverlay(pts)) {
+        m_touchInkBlocked = true;
+        if (m_touchRelease)
+            m_touchRelease->start();
+        return true;
     }
 
     const bool ended = (te->type() == QEvent::TouchEnd);
@@ -1841,6 +1858,18 @@ int PdfCanvas::testDensifiedCount(const QVector<QPointF> &raw) const
     for (const QPointF &p : raw)
         appendDensified(out, p, kInkMaxStepNorm);
     return out.size();
+}
+
+// The real touch entry points, headless: lets the self test prove that a stroke
+// started on the page survives being dragged across the floating island (and that
+// a touch landing on the island itself is still left to the island).
+void PdfCanvas::testTouchBegin(const QPointF &viewportPos) { beginInputAt(viewportPos); }
+void PdfCanvas::testTouchMove(const QPointF &viewportPos) { moveInputTo(viewportPos); }
+void PdfCanvas::testTouchEnd() { endInput(); }
+
+bool PdfCanvas::testTouchBelongsToOverlay(const QVector<QPointF> &viewportPts) const
+{
+    return touchBelongsToOverlay(viewportPts);
 }
 
 void PdfCanvas::testZoomAt(const QPointF &viewportAnchor, qreal factor)

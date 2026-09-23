@@ -17,6 +17,7 @@
 #include <QApplication>
 #include <QCloseEvent>
 #include <QCryptographicHash>
+#include <QDateTime>
 #include <QDesktopServices>
 #include <QDialog>
 #include <QDir>
@@ -28,18 +29,21 @@
 #include <QFileDialog>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QHBoxLayout>
 #include <QJsonObject>
 #include <QKeyEvent>
 #include <QLabel>
 #include <QMessageBox>
 #include <QMimeData>
 #include <QPalette>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScreen>
 #include <QStackedWidget>
 #include <QStatusBar>
 #include <QStyleHints>
 #include <QTimer>
+#include <QVBoxLayout>
 #include <QUrl>
 #include <QVBoxLayout>
 
@@ -253,6 +257,25 @@ MainWindow::MainWindow(QWidget *parent)
                 if (statusBar())
                     statusBar()->showMessage(message, 6000);
             });
+
+    // Update check: once shortly after launch, and again after each document opens
+    // (throttled inside checkForUpdates). A newer release is announced at most once
+    // per session, so opening twenty files in a lesson never means twenty dialogs;
+    // the changelog stays in the Settings update card for whenever it is wanted.
+    m_updateClient = new UpdateChecker::Client(this);
+    connect(m_updateClient, &UpdateChecker::Client::checked, this,
+            [this](const UpdateChecker::UpdateInfo &info) {
+                if (m_settingsPage)
+                    m_settingsPage->setUpdateInfo(info);
+                if (UpdateChecker::shouldPrompt(info, m_updateAnnouncedVersion,
+                                                UpdateChecker::currentVersion())) {
+                    m_updateAnnouncedVersion = info.version;
+                    promptUpdate(info);
+                }
+            });
+    // A failed check stays silent: an offline classroom must never see a dialog
+    // about the network.
+    QTimer::singleShot(1500, this, [this] { checkForUpdates(false); });
 
     connect(QGuiApplication::styleHints(), &QStyleHints::colorSchemeChanged,
             this, &MainWindow::onSystemColorSchemeChanged);
@@ -497,6 +520,89 @@ void MainWindow::onSystemColorSchemeChanged()
         applyTheme();
 }
 
+// Once after launch, and again after a document opens - the second one throttled,
+// because a lesson can open a dozen files and GitHub should not see a dozen
+// requests. Both are silent unless a newer version shows up.
+void MainWindow::checkForUpdates(bool fromFileOpen)
+{
+    if (!m_updateClient)
+        return;
+    const qint64 now = QDateTime::currentMSecsSinceEpoch();
+    constexpr qint64 kThrottleMs = 10 * 60 * 1000;
+    if (fromFileOpen && m_lastUpdateCheckMs > 0 && now - m_lastUpdateCheckMs < kThrottleMs)
+        return;
+    m_lastUpdateCheckMs = now;
+    AppSettings::setLastUpdateCheckMs(now, nullptr);
+    m_updateClient->check(UpdateChecker::Channel::GitHub);
+}
+
+// "发现新版本" conversation. The changelog is right here, and accepting goes to the
+// Settings update card - where the download buttons and their sha256 gate live.
+void MainWindow::promptUpdate(const UpdateChecker::UpdateInfo &info)
+{
+    const QString notes = info.notes.trimmed();
+    const int touch = Theme::metrics(font()).touch;
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("发现新版本"));
+    dialog.setModal(true);
+
+    auto *layout = new QVBoxLayout(&dialog);
+    layout->setContentsMargins(Theme::Space5, Theme::Space5, Theme::Space5, Theme::Space5);
+    layout->setSpacing(Theme::Space4);
+
+    auto *title = new QLabel(QStringLiteral("发现新版本 v%1").arg(info.version), &dialog);
+    title->setFont(Theme::titleFont(dialog.font()));
+    layout->addWidget(title);
+
+    auto *body = new QLabel(
+        QStringLiteral("当前 v%1。确认后打开「设置 → 更新」，在那里下载并安装"
+                       "（安装包校验通过后才会运行）。")
+            .arg(UpdateChecker::currentVersion()), &dialog);
+    body->setWordWrap(true);
+    body->setFont(Theme::bodyFont(dialog.font()));
+    layout->addWidget(body);
+
+    if (!notes.isEmpty()) {
+        auto *caption = new QLabel(QStringLiteral("更新日志"), &dialog);
+        caption->setFont(Theme::bodyFont(dialog.font()));
+        layout->addWidget(caption);
+
+        auto *view = new QPlainTextEdit(notes, &dialog);
+        view->setReadOnly(true);
+        view->setFont(Theme::captionFont(dialog.font()));
+        view->setMinimumHeight(touch * 5);
+        layout->addWidget(view, 1);
+    }
+
+    auto *row = new QHBoxLayout;
+    row->setSpacing(Theme::Space3);
+    auto *later = new QPushButton(QStringLiteral("稍后"), &dialog);
+    auto *go = new QPushButton(QStringLiteral("立即更新"), &dialog);
+    for (QPushButton *button : {later, go}) {
+        button->setMinimumSize(QSize(touch * 2, touch));
+        button->setCursor(Qt::PointingHandCursor);
+    }
+    go->setDefault(true);
+    row->addStretch(1);
+    row->addWidget(later);
+    row->addWidget(go);
+    layout->addLayout(row);
+
+    connect(later, &QPushButton::clicked, &dialog, &QDialog::reject);
+    connect(go, &QPushButton::clicked, &dialog, &QDialog::accept);
+
+    if (dialog.exec() == QDialog::Accepted)
+        openUpdateSettings();
+}
+
+void MainWindow::openUpdateSettings()
+{
+    showSettingsPage();
+    if (m_settingsPage)
+        m_settingsPage->focusUpdateSection();
+}
+
 void MainWindow::openPath(const QString &path)
 {
     QElapsedTimer timer;
@@ -694,6 +800,9 @@ void MainWindow::openPath(const QString &path)
         statusBar()->showMessage(QStringLiteral("已恢复上次未另存的批注"), 5000);
     else if (workingCopyMismatch)
         statusBar()->showMessage(QStringLiteral("工作副本与源文件不一致，未恢复批注"), 8000);
+
+    // Opening a file is a natural moment to check for a new version (throttled).
+    checkForUpdates(true);
 }
 
 int MainWindow::docIndex(PdfCanvas *canvas) const

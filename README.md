@@ -53,6 +53,8 @@
 - 笔调色板浮层
 - **WinUI 风格全屏设置页**（作为标签页，含「关于」与 MIT 许可证）
 - 自绘矢量图标，随 DPI 缩放，无图片资源依赖
+- **新版本提示**：启动后和每次打开文件时自动查一次（10 分钟内不重复请求），有新版就弹窗
+  并展示该版本的**更新日志**，点「立即更新」直达「设置 → 更新」；同一版本每次运行只提示一次
 
 ### 工程
 - **内存有界**：整页位图 LRU 缓存，上限 128 MB；单页位图超 100 MB 自动降采样；多文档切换时释放非活动文档的位图
@@ -68,7 +70,7 @@
 
 ```powershell
 package.cmd
-# 产物：dist\PDFBoard-1.5.6-setup.exe   （自带 Qt 运行库，约 17 MB）
+# 产物：dist\PDFBoard-1.6.0-setup.exe   （自带 Qt 运行库，约 17 MB）
 ```
 
 安装器做这些事（全部**当前用户**范围，不需要管理员）：
@@ -84,9 +86,9 @@ package.cmd
 **静默部署**（供教室集中管理客户端调用）：
 
 ```bat
-PDFBoard-1.5.6-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+PDFBoard-1.6.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 rem 不要桌面快捷方式：
-PDFBoard-1.5.6-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
+PDFBoard-1.6.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 ```
 
 > 卸载时若程序正在运行，静默模式下无法提示关闭，会残留被占用的文件（Windows 常见行为）。先退出程序再卸载即可完全清除。
@@ -100,7 +102,7 @@ PDFBoard-1.5.6-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 - 手动触发（Actions → nightly → Run workflow）
 
 产物发布到固定的 **`nightly` 预发布**（每次覆盖同名文件，不会越堆越多）：
-`PDFBoard-nightly-setup.exe` / `PDFBoard-nightly-portable.zip`，版本号形如 `1.5.6-nightly.<提交号>`。
+`PDFBoard-nightly-setup.exe` / `PDFBoard-nightly-portable.zip`，版本号形如 `1.6.0-nightly.<提交号>`。
 
 ### 稳定版发布
 
@@ -109,18 +111,35 @@ PDFBoard-1.5.6-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 - 产物：`PDFBoard-<版本>-setup.exe` / `PDFBoard-<版本>-portable.zip`
 - 版本号取自 [`installer/pdfboard.iss`](installer/pdfboard.iss) 的 `AppVersion`；workflow 会**校验它与标签一致**，不一致直接失败（防止发出版本号错位的包）
 - 发布前会先跑 `--selftest-log` 自测作为门禁
+- **发布说明（Release body）就是标签注解（tag message）本身**：把这一版的更新日志写进**注解标签**（`git tag -a`）即可，不用改 workflow 里的文案
+- 标签注解为空（轻量标签）时，自动回退到 GitHub 自动生成的变更列表
+- 应用会在启动 / 打开文件时拉取最新 Release 的 body 并以**纯文本**展示（「发现新版本」对话框、设置页更新区），所以更新日志请写成**易读的中文散文或简单的 `- ` 列表**，不要写 JSON / HTML
 
 发版流程：
 
 ```powershell
 # 1. 改版本号：installer/pdfboard.iss 的 AppVersion + assets/app.rc 的 FILEVERSION/FileVersion
 # 2. 提交推送
-git commit -am "chore: 版本号 1.5.6"
+git commit -am "chore: 版本号 1.6.0"
 git push
-# 3. 打标签并推送，CI 自动出正式 Release
-git tag v1.5.6
-git push origin v1.5.6
+
+# 3. 写更新日志到文件（推荐；UTF-8 保存）。
+#    别用 PowerShell 的 `-m "多行…"`——它会把字符串里的换行弄坏，标签注解就残缺了。
+@'
+v1.6.0
+- 修复：缩略图在深色模式下没有白底
+- 新增：打开文件时提示更新日志
+'@ | Set-Content -Encoding utf8 notes.txt
+
+# 4. 打「注解」标签（-a）把更新日志写进 tag message，再推送；CI 自动出正式 Release
+git tag -a v1.6.0 -F notes.txt
+git push origin v1.6.0
 ```
+
+> 不想用文件？也可以重复 `-m`，每次一行（Git 会把它们连成多段）：
+> `git tag -a v1.6.0 -m "v1.6.0" -m "- 修复：…" -m "- 新增：…"`
+>
+> 忘记写注解（`git tag v1.6.0` 的轻量标签）不会失败，但 Release 只会是自动生成的提交列表——老师点开更新提示几乎看不到有用内容。
 
 ### 代码签名（可选）
 

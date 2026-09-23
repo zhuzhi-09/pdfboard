@@ -84,6 +84,16 @@ int UpdateChecker::compareVersion(const QString &a, const QString &b)
     return 0;
 }
 
+bool UpdateChecker::shouldPrompt(const UpdateInfo &info, const QString &announcedVersion,
+                                 const QString &runningVersion)
+{
+    if (!info.valid || info.version.isEmpty())
+        return false;
+    if (!announcedVersion.isEmpty() && info.version == announcedVersion)
+        return false;                  // already announced in this session
+    return compareVersion(info.version, runningVersion) > 0;
+}
+
 UpdateChecker::UpdateInfo UpdateChecker::parseFallbackJson(const QByteArray &json,
                                                           const QString &currentVersion)
 {

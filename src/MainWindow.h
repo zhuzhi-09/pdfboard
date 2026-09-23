@@ -1,5 +1,7 @@
 #pragma once
 
+#include "UpdateChecker.h"
+
 #include <QMainWindow>
 #include <QVector>
 
@@ -86,6 +88,14 @@ private:
     void       markDocumentSaved(int index);
     void       refreshTabTitle(int index);  // source name + the dirty `*`
 
+    // Update check: once shortly after launch, and again after every document
+    // opens (throttled). A newer release is announced at most once per session -
+    // a teacher opening twenty files must not be interrupted twenty times, and
+    // the Settings page keeps the changelog for whenever they look.
+    void       checkForUpdates(bool fromFileOpen);
+    void       promptUpdate(const UpdateChecker::UpdateInfo &info);
+    void       openUpdateSettings();        // settings page, update card in view
+
     QStackedWidget *m_stack = nullptr;      // one PdfCanvas per open document
     DocumentTabs   *m_tabs  = nullptr;      // the docked strip under the pages
 
@@ -110,4 +120,8 @@ private:
     QLabel *m_renderLabel = nullptr;
     QLabel *m_inkLabel    = nullptr;
     QLabel *m_memLabel    = nullptr;
+
+    UpdateChecker::Client *m_updateClient = nullptr;
+    QString                m_updateAnnouncedVersion;  // per session
+    qint64                 m_lastUpdateCheckMs = 0;   // throttles file-open checks
 };

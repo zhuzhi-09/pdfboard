@@ -42,6 +42,14 @@ int compareVersion(const QString &a, const QString &b);
 UpdateInfo parseFallbackJson(const QByteArray &json, const QString &currentVersion);
 UpdateInfo parseGitHubJson(const QByteArray &json, const QString &currentVersion);
 
+// Should a "new version" dialog be shown? Kept pure so the self test can lock the
+// decision: only for a parsed release that is really newer than the running
+// version AND has not been announced yet in this session. A teacher opens dozens
+// of files in a lesson - being interrupted by the same dialog each time would be
+// worse than not being told at all.
+bool shouldPrompt(const UpdateInfo &info, const QString &announcedVersion,
+                  const QString &runningVersion);
+
 // Version of the running executable, read from its own version resource.
 QString currentVersion();
 

@@ -241,6 +241,45 @@ static int runInkSelfTest(const QString &path)
         check("paper: null safe", onPaper(QImage(), Theme::light().paper).isNull() ? 1 : 0, 1);
     }
 
+    // Writing across the floating island must never lose the stroke: the island is
+    // a child of the viewport, so the ink is covered by it (goes underneath).
+    // Landing ON the island is a different gesture - that touch belongs to the
+    // island, where a drag moves it, and must not start ink under it.
+    // Uses a canvas of its own so the undo counts below stay untouched.
+    {
+        PdfCanvas probe;
+        probe.setAttribute(Qt::WA_DontShowOnScreen, true);
+        probe.resize(1000, 800);
+        probe.show();
+        QString openErr;
+        check("overlay: probe opened", probe.openPdf(path, &openErr) ? 1 : 0, 1);
+
+        InkToolbar *bar = probe.toolbar();
+        const QSize vp = probe.testViewportSize();
+        check("overlay: toolbar exists", bar ? 1 : 0, 1);
+        const QPoint barPt = bar ? bar->geometry().center()
+                                 : QPoint(vp.width() / 2, vp.height() - 40);
+
+        // A viewport point that really lies on a page (not in the desk margin).
+        QPointF pagePt(20.0, vp.height() / 2.0);
+        for (int i = 0; i < 60 && pagePt.y() < vp.height()
+                        && probe.testPageAtViewportY(pagePt.y()) < 0; ++i)
+            pagePt.setY(pagePt.y() + 10.0);
+        check("overlay: page point found",
+              probe.testPageAtViewportY(pagePt.y()) >= 0 ? 1 : 0, 1);
+
+        check("overlay: island touch stays with island",
+              probe.testTouchBelongsToOverlay(QVector<QPointF>{QPointF(barPt)}) ? 1 : 0, 1);
+
+        probe.testTouchBegin(pagePt);
+        probe.testTouchMove(pagePt + QPointF(80.0, 0.0));
+        check("overlay: running stroke keeps island samples",
+              probe.testTouchBelongsToOverlay(QVector<QPointF>{QPointF(barPt)}) ? 0 : 1, 1);
+        probe.testTouchMove(QPointF(barPt));      // dragged across the island
+        probe.testTouchEnd();
+        check("overlay: ink survives the island", probe.strokeCount(), 1);
+    }
+
     canvas.clearInk();
     check("clearInk", canvas.strokeCount(), 0);
 
@@ -1419,6 +1458,37 @@ static int runUpdateSelfTest()
     check("current version is 3 parts",
           current.count(QLatin1Char('.')) >= 2 ? 1 : 0, 1);
     (void)UpdateChecker::isInstalledCopy();
+
+    // Release notes + the prompt decision: the dialog may only appear for a parsed,
+    // newer, not-yet-announced version, and whatever the release body says has to
+    // reach the teacher as plain text.
+    {
+        const QByteArray ghNotes = QByteArrayLiteral(R"({
+            "tag_name":"v9.9.9","body":"- 修好了 A\n- 新增了 B",
+            "html_url":"https://github.com/r/rel",
+            "assets":[{"name":"PDFBoard-9.9.9-setup.exe","size":10,
+            "browser_download_url":"https://x/setup.exe"}]})");
+        const auto gh3 = UpdateChecker::parseGitHubJson(ghNotes, QStringLiteral("1.0.0"));
+        check("notes: github body -> notes",
+              gh3.notes.contains(QStringLiteral("修好了 A")) ? 1 : 0, 1);
+        check("notes: prompt for newer",
+              UpdateChecker::shouldPrompt(gh3, QString(), QStringLiteral("1.0.0")) ? 1 : 0, 1);
+        check("notes: no second prompt",
+              UpdateChecker::shouldPrompt(gh3, QStringLiteral("9.9.9"),
+                                          QStringLiteral("1.0.0")) ? 0 : 1, 1);
+        check("notes: nothing for same version",
+              UpdateChecker::shouldPrompt(gh3, QString(), QStringLiteral("9.9.9")) ? 0 : 1, 1);
+        const UpdateChecker::UpdateInfo unparsed;
+        check("notes: nothing when unparsed",
+              UpdateChecker::shouldPrompt(unparsed, QString(), QStringLiteral("1.0.0")) ? 0 : 1, 1);
+
+        const QByteArray mirrorNotes = QByteArrayLiteral(R"({
+            "version":"9.9.9","tag":"v9.9.9","notes":"备用服务器更新日志"})");
+        const auto mirror3 = UpdateChecker::parseFallbackJson(mirrorNotes,
+                                                             QStringLiteral("1.0.0"));
+        check("notes: mirror notes kept",
+              mirror3.notes.contains(QStringLiteral("备用服务器更新日志")) ? 1 : 0, 1);
+    }
 
     out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")
                     : QStringLiteral("[selftest] %1 CHECK(S) FAILED").arg(failed));

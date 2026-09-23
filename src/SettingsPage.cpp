@@ -30,6 +30,8 @@
 
 #include "UpdateChecker.h"
 
+#include <QPlainTextEdit>
+
 #include <QCoreApplication>
 #include <QDateTime>
 #include <QProgressBar>
@@ -185,6 +187,9 @@ QString pageSheet(const QFont &font)
                " border: 1px solid %4;"
                " border-radius: %5; }"
                "QFrame#settingsRowLine { background: %6; border: none; }"
+               "QPlainTextEdit#updateNotes {"
+               " background: %3; border: 1px solid %4; border-radius: %5;"
+               " color: %1; padding: 6px; }"
                "QPushButton {"
                " color: %1;"
                " background: %7;"
@@ -853,8 +858,20 @@ void SettingsPage::buildUi()
         m_updateNote->setObjectName(QStringLiteral("settingsRowBody"));
         m_updateNote->setFont(Theme::scaledFont(progressRow->font(), 0.95, QFont::Normal));
         m_updateNote->setWordWrap(true);
-        progressCol->addWidget(m_updateNote);
-        update.col->addWidget(progressRow);
+    progressCol->addWidget(m_updateNote);
+    update.col->addWidget(progressRow);
+
+    // Release notes (changelog), shown once a check actually returned text - an
+    // older release without notes leaves no empty box behind.
+    update.col->addWidget(makeRowSeparator(update.frame));
+    m_updateNotes = new QPlainTextEdit(update.frame);
+    m_updateNotes->setObjectName(QStringLiteral("updateNotes"));
+    m_updateNotes->setReadOnly(true);
+    m_updateNotes->setFont(Theme::captionFont(update.frame->font()));
+    m_updateNotes->setMinimumHeight(int(m.touch * 2.2));
+    m_updateNotes->setVisible(false);
+    update.col->addWidget(m_updateNotes);
+    m_updateCard = update.frame;
     }
     col->addWidget(update.frame);
 
@@ -1031,6 +1048,42 @@ void SettingsPage::setUpdateState(const QString &text)
 {
     if (m_updateNote)
         m_updateNote->setText(text);
+}
+
+// Called by MainWindow when its own (launch / file-open) check found something,
+// so the card shows the same news without a second request.
+void SettingsPage::setUpdateInfo(const UpdateChecker::UpdateInfo &info)
+{
+    if (!info.valid)
+        return;
+    if (!info.version.isEmpty()) {
+        const int channel = 0;                     // GitHub is the primary source
+        m_updateChecked[channel] = true;
+        m_updateSetupUrl[channel] = info.setupUrl;
+        m_updateSetupSha[channel] = info.setupSha256;
+        m_updatePortableUrl[channel] = info.portableUrl;
+        m_updatePageUrl[channel] = info.pageUrl;
+        m_updateOnline[channel] = info.version;
+        refreshUpdateVersionLine();
+    }
+    setUpdateNotes(info.notes);
+}
+
+void SettingsPage::focusUpdateSection()
+{
+    if (m_updateCard)
+        ensureWidgetVisible(m_updateCard, 0, 0);
+}
+
+void SettingsPage::setUpdateNotes(const QString &notes)
+{
+    if (!m_updateNotes)
+        return;
+    const QString text = notes.trimmed();
+    m_updateNotes->setPlainText(text.isEmpty()
+                                    ? QStringLiteral("本次更新未提供更新日志。")
+                                    : text);
+    m_updateNotes->setVisible(true);
 }
 
 void SettingsPage::refreshUpdateVersionLine()

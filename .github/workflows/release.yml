@@ -7,7 +7,8 @@
 #  版本：取自 installer/pdfboard.iss 的 AppVersion，且**必须与标签一致**，
 #        不一致直接失败——否则会发出版本号与内容错位的包。
 #
-#  发布说明里的"本版变更"是给当前这一版写的，发新版时记得同步改写。
+#  发布说明（Release body）= 注解标签的 tag message（更新日志），见 README「稳定版发布」；
+#  轻量标签没有注解时回退到 GitHub 自动生成的变更列表。
 name: release
 
 on:
@@ -170,7 +171,32 @@ jobs:
           Get-Item "dist/PDFBoard-$ver-portable.zip" |
             ForEach-Object { "portable: {0:N1} MB" -f ($_.Length / 1MB) }
 
-      - name: Publish stable release
+      # 发布说明（Release body）= 注解标签的 tag message 本身。发版时把完整更新日志写进标签注解，
+      # 例如 `git tag -a v1.5.6 -F notes.txt`（PowerShell 直接 `-m "多行文本"` 会弄坏换行，
+      # 见 README「稳定版发布」）。轻量标签没有注解 → 回退到 GitHub 自动生成的变更列表。
+      - name: Read tag message as release notes
+        id: notes
+        shell: pwsh
+        run: |
+          $tag = "${{ github.ref_name }}"
+          # actions/checkout 默认浅克隆且不取标签：显式补取注解标签对象，保证能读到 tag message。
+          git fetch --force origin "refs/tags/${tag}:refs/tags/${tag}"
+          $msg = (git tag -l --format='%(contents)' $tag) -join "`n"
+          $msg = $msg.Trim()
+          New-Item -ItemType Directory -Force dist | Out-Null
+          [System.IO.File]::WriteAllText((Join-Path (Resolve-Path dist) "release-notes.md"),
+                                          $msg, (New-Object System.Text.UTF8Encoding($false)))
+          if ($msg) {
+            "has_body=true" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+            Write-Host "release notes: tag message ($($msg.Length) chars)"
+          } else {
+            "has_body=false" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT
+            Write-Host "release notes: tag has no message, will use generated notes"
+          }
+
+      # 标签带了更新日志：直接把它作为 Release body（应用会以纯文本展示）。
+      - name: Publish stable release (tag message as changelog)
+        if: steps.notes.outputs.has_body == 'true'
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ github.ref_name }}
@@ -178,19 +204,22 @@ jobs:
           prerelease: false
           draft: false
           make_latest: true
-          generate_release_notes: true      # 从提交记录自动生成变更列表
+          body_path: dist/release-notes.md
           files: |
             dist/PDFBoard-${{ steps.ver.outputs.version }}-setup.exe
             dist/PDFBoard-${{ steps.ver.outputs.version }}-portable.zip
-          body: |
-            **大屏 PDF 批注 v${{ steps.ver.outputs.version }}** — 面向教室大屏一体机的 PDF 查看 + 手写批注（原生 C++/Qt6，触控与低内存优化）。
 
-            | 下载 | 说明 |
-            |---|---|
-            | `PDFBoard-${{ steps.ver.outputs.version }}-setup.exe` | 安装版：注册到「应用和功能」，支持静默部署 `/VERYSILENT /SUPPRESSMSGBOXES /NORESTART` |
-            | `PDFBoard-${{ steps.ver.outputs.version }}-portable.zip` | 便携版：解压即用，不写系统 |
-
-            需要 Windows 10/11 64 位；Qt 运行库已随包附带。
-            未做代码签名，SmartScreen 提示时选「更多信息 → 仍要运行」即可。
-
-            **校验**：构建前跑过 `--selftest-log` 自测门禁；提交 `${{ github.sha }}`。
+      # 轻量标签没有注解：回退到 GitHub 自动生成的变更列表（避免发出"空说明"的版本）。
+      - name: Publish stable release (generated notes fallback)
+        if: steps.notes.outputs.has_body != 'true'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ github.ref_name }}
+          name: "v${{ steps.ver.outputs.version }} — 大屏 PDF 批注"
+          prerelease: false
+          draft: false
+          make_latest: true
+          generate_release_notes: true
+          files: |
+            dist/PDFBoard-${{ steps.ver.outputs.version }}-setup.exe
+            dist/PDFBoard-${{ steps.ver.outputs.version }}-portable.zip
