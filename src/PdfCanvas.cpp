@@ -1,6 +1,7 @@
 #include "PdfCanvas.h"
 #include "AppLog.h"
 #include "IconPainter.h"
+#include "InkDirty.h"
 #include "InkToolbar.h"
 #include "InputProbe.h"
 #include "Theme.h"
@@ -727,7 +728,12 @@ void PdfCanvas::paintEvent(QPaintEvent *)
 
         p.save();
         p.setClipPath(paper);
-        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        // Bilinear scaling of a page-sized bitmap that does not match the current
+        // zoom yet is the most expensive thing in a pinch frame. During the
+        // gesture those bitmaps are knowingly stale previews anyway, so drop the
+        // smoothing (nearest neighbour) and re-render crisply once the gesture
+        // settles.
+        p.setRenderHint(QPainter::SmoothPixmapTransform, !m_pinchActive);
         const QImage img = imageFor(page);
         if (!img.isNull())
             p.drawImage(r, img);
@@ -1139,7 +1145,12 @@ bool PdfCanvas::eraseAtPointer(int page, const QPointF &viewportPos)
     if (m_ink.value(page).isEmpty())
         m_ink.remove(page);
 
-    viewport()->update();
+    // Only the eraser circle changed, so only that needs repainting - the rest
+    // of the page is untouched. A full update here ran for every sweep step (a
+    // 40 px flick is ~7 steps), which is a lot of wasted 4K repainting.
+    const qreal pad = kEraserRadiusPx + 2.0;   // +2 for anti-aliasing bleed
+    viewport()->update(QRectF(viewportPos, QSizeF(1.0, 1.0)).toAlignedRect()
+                           .adjusted(int(-pad), int(-pad), int(pad), int(pad)));
     emit inkChanged(strokeCount());
     return true;
 }
@@ -1195,9 +1206,17 @@ void PdfCanvas::moveInputTo(const QPointF &viewportPos)
     }
     if (!m_drawing)
         return;
+    // Repaint only the neighbourhood of the new samples: a full-viewport update
+    // per sample is what made handwriting lag behind the finger (see InkDirty.h).
+    const int first = m_current.pts.size();
     appendDensified(m_current.pts, toNormalized(m_drawPage, viewportPos),
                     kInkMaxStepNorm);
-    viewport()->update();
+    if (m_current.pts.size() == first)
+        return;
+    const QRectF pr = pageRectInViewport(m_drawPage);
+    const qreal inkPx = qMax<qreal>(1.0, m_current.width * pr.width());
+    viewport()->update(inkDirtyRect(pr, m_current.pts.constData(), m_current.pts.size(),
+                                    first - 2, inkPx * 0.5 + 4.0));
 }
 
 void PdfCanvas::endInput()

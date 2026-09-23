@@ -40,6 +40,7 @@ qt_add_executable(pdfboard
     src/IconPainter.cpp
     src/Theme.h
   src/InputProbe.h
+  src/InkDirty.h
 )
 
 target_link_libraries(pdfboard PRIVATE

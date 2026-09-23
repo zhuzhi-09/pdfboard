@@ -3,6 +3,7 @@
 #include "AppLog.h"
 #include "AppSettings.h"
 #include "HomePage.h"
+#include "InkDirty.h"
 #include "InkToolbar.h"
 #include "InputProbe.h"
 #include "MemProbe.h"
@@ -186,6 +187,25 @@ static int runInkSelfTest(const QString &path)
         check("probe: zoom reported", line.contains(QStringLiteral("2.50x")) ? 1 : 0, 1);
         check("probe: resets counts",
               probe.take(2000).contains(QStringLiteral("输入 0 事件")) ? 1 : 0, 1);
+    }
+
+    // Partial repaint geometry: a new sample may only dirty its own
+    // neighbourhood, never the whole viewport (a full 4K repaint per sample is
+    // what made handwriting lag behind the finger).
+    {
+        const QRectF page(0, 0, 1000, 1400);
+        QPointF pts[3] = {QPointF(0.10, 0.50), QPointF(0.20, 0.50), QPointF(0.22, 0.52)};
+        const QRect r = inkDirtyRect(page, pts, 3, 1, 4.0);
+        const qreal area = qreal(r.width()) * qreal(r.height());
+        check("dirty: far smaller than view", area < 1000.0 * 1400.0 / 20.0 ? 1 : 0, 1);
+        check("dirty: covers new sample", r.contains(QPoint(220, 728)) ? 1 : 0, 1);
+        check("dirty: covers prev sample", r.contains(QPoint(200, 700)) ? 1 : 0, 1);
+        check("dirty: ignores older samples", r.contains(QPoint(100, 700)) ? 0 : 1, 1);
+        check("dirty: pad applied", r.height() >= 34 ? 1 : 0, 1);
+        const QRect one = inkDirtyRect(page, pts, 1, 0, 4.0);
+        check("dirty: single sample box", (one.width() >= 8 && one.width() <= 12) ? 1 : 0, 1);
+        check("dirty: empty input safe",
+              inkDirtyRect(page, nullptr, 0, 0, 4.0).isNull() ? 1 : 0, 1);
     }
 
     canvas.clearInk();
