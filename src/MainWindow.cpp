@@ -2,6 +2,7 @@
 #include "AnnotationBundle.h"
 #include "AppLog.h"
 #include "AppSettings.h"
+#include "CrashLog.h"
 #include "DocumentTabs.h"
 #include "HomePage.h"
 #include "ImageImport.h"
@@ -30,6 +31,7 @@
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFontMetrics>
 #include <QGuiApplication>
 #include <QHBoxLayout>
 #include <QJsonObject>
@@ -359,7 +361,11 @@ MainWindow::MainWindow(QWidget *parent)
     statusBar()->addWidget(m_pageLabel);
     statusBar()->addWidget(m_renderLabel);
     statusBar()->addWidget(m_inkLabel);
-    statusBar()->addPermanentWidget(m_memLabel);
+    // 内存信息归到左侧：它右边的滑动条必须钉住不动，而这个标签的文本宽度每秒
+    // 都在变（177.7 MB → 106.9 MB）。固定宽度也让左侧那一组不再互相推动。
+    m_memLabel->setFixedWidth(QFontMetrics(statusFont)
+                                  .horizontalAdvance(QStringLiteral("内存 WS 9999.9 MB / Private 9999.9 MB")));
+    statusBar()->addWidget(m_memLabel);
 
     // Word-like zoom control at the far right of the status bar. It never invents a
     // zoom value: the active canvas reports its own zoom (pinch, Ctrl+wheel,
@@ -655,6 +661,7 @@ void MainWindow::openUpdateSettings()
 
 void MainWindow::openPath(const QString &path)
 {
+    CrashLog::breadcrumb("open", QFileInfo(path).fileName());
     QElapsedTimer timer;
     timer.start();
     const bool bundle = AnnotationBundle::isBundle(path);

@@ -1,5 +1,6 @@
 #include "PdfCanvas.h"
 #include "AppLog.h"
+#include "CrashLog.h"
 #include "IconPainter.h"
 #include "InkDirty.h"
 #include "InkToolbar.h"
@@ -1570,6 +1571,9 @@ void PdfCanvas::applyZoom(qreal targetZoom, const QPointF &anchor, bool immediat
         return;
 
     m_zoom = target;
+    // A crash during zooming is the one we are chasing: record the value so the crash
+    // report shows exactly where the last step landed.
+    CrashLog::breadcrumb("zoom", QString::number(m_zoom, 'f', 3));
     if (immediate) {
         invalidateRenders();
         relayout();

@@ -2,6 +2,7 @@
 #include "AnnotationBundle.h"
 #include "AppLog.h"
 #include "AppSettings.h"
+#include "CrashLog.h"
 #include "HomePage.h"
 #include "ImageImport.h"
 #include "InkDirty.h"
@@ -25,6 +26,10 @@
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QNetworkProxyFactory>
+#include <QSlider>
+#include <QMouseEvent>
+#include <QStyle>
+#include <QThread>
 #include <QHash>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -85,6 +90,142 @@ static void out(const QString &s)
 // Headless self test:  pdfboard.exe --bench <file.pdf>
 // Prints page count, per-page render time and process memory, then exits.
 // This is the M0 evidence collector for the memory / render-time budget.
+// Headless smoke test of the real window:  pdfboard.exe --selftest-smoke <file.pdf>
+// Builds MainWindow exactly as the app does, opens a document, walks document →
+// settings → home → document again and drives the status-bar zoom control through
+// its ordinary signal chain. It exists because the unit tests never construct the
+// window: a crash that only happens once the zoom control is docked, or once a page
+// switch rewires it, would otherwise ship unnoticed.
+static int runSmokeSelfTest(const QString &path)
+{
+    int failed = 0;
+    auto check = [&failed](const char *what, int got, int want) {
+        const bool ok = (got == want);
+        if (!ok)
+            ++failed;
+        out(QStringLiteral("[selftest] %1: got %2 want %3 -> %4")
+                .arg(QString::fromLatin1(what), -28)
+                .arg(got).arg(want)
+                .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+    };
+
+    MainWindow window;
+    window.setAttribute(Qt::WA_DontShowOnScreen, true);
+    window.resize(1280, 800);
+    window.show();
+    check("smoke: window built", 1, 1);
+
+    ZoomBar *bar = window.findChild<ZoomBar *>();
+    check("smoke: zoom bar exists", bar ? 1 : 0, 1);
+    check("smoke: hidden on the home page", (bar && bar->isVisible()) ? 0 : 1, 1);
+
+    window.openPath(path);
+    PdfCanvas *canvas = window.findChild<PdfCanvas *>();
+    check("smoke: document opened", canvas ? 1 : 0, 1);
+    check("smoke: bar shown on a document", (bar && bar->isVisible()) ? 1 : 0, 1);
+
+    if (canvas) {
+        const qreal before = canvas->testZoom();
+        canvas->zoomIn();
+        check("smoke: shortcut zoom works", canvas->testZoom() > before ? 1 : 0, 1);
+    }
+
+    // The zoom control's own chain: slider → zoomRequested → MainWindow → canvas.
+    if (canvas && bar) {
+        if (auto *slider = bar->findChild<QSlider *>(QStringLiteral("zoomSlider"))) {
+            const qreal before = canvas->testZoom();
+            slider->setValue(ZoomBarMath::sliderForZoom(before * 1.5));
+            check("smoke: slider drives the canvas", canvas->testZoom() > before ? 1 : 0, 1);
+        } else {
+            check("smoke: slider found", 0, 1);
+        }
+    }
+
+    // The reported crash: RAPIDLY adjusting the zoom, reproducible on the classroom
+    // VM only. That machine runs 250 % DPI, so every zoom step re-rasterises large
+    // page bitmaps and the 160 ms settle timer lands in the middle of the sequence.
+    // Drive the real signal chain (slider included) and pump the event loop between
+    // steps, which is the interleaving a teacher produces by dragging the slider.
+    if (canvas && bar) {
+        auto *slider = bar->findChild<QSlider *>(QStringLiteral("zoomSlider"));
+        for (int i = 0; i < 120; ++i) {
+            const qreal target = (i % 2 == 0) ? ZoomBarMath::kMinZoom : ZoomBarMath::kMaxZoom;
+            if (!slider || i % 3 == 0)
+                canvas->setZoomLevel(target);                            // canvas-driven
+            else
+                slider->setValue(ZoomBarMath::sliderForZoom(target));    // widget-driven
+            QCoreApplication::processEvents();
+            if (i % 8 == 0)
+                QThread::msleep(30);              // let the settle timer fire mid-stress
+        }
+        check("smoke: survived 120 rapid zooms", 1, 1);
+    }
+
+    // Closest possible stand-in for the classroom VM: a 4K-sized window (at 250 %
+    // DPI that means huge page bitmaps, like the panel'), a REAL mouse drag on the
+    // slider (press → moves → release, which is what emits sliderMoved) and finally
+    // Ctrl+wheel spam.
+    if (canvas && bar) {
+        window.resize(3840, 2160);
+        QCoreApplication::processEvents();
+
+        if (auto *slider = bar->findChild<QSlider *>(QStringLiteral("zoomSlider"))) {
+            // Press ON THE HANDLE, not on the groove: a groove press is a page step
+            // and never enters Qt's drag state, so it would not emit sliderMoved -
+            // the very path a teacher dragging the control exercises.
+            const int hw = qMax(8, slider->style()->pixelMetric(QStyle::PM_SliderThickness,
+                                                               nullptr, slider));
+            for (int sweep = 0; sweep < 6; ++sweep) {
+                const int y = slider->height() / 2;
+                const int from = slider->style()->sliderPositionFromValue(
+                                     0, slider->maximum(), slider->value(),
+                                     qMax(1, slider->width() - hw))
+                                 + hw / 2;
+                QMouseEvent press(QEvent::MouseButtonPress, QPointF(from, y),
+                                  slider->mapToGlobal(QPoint(from, y)), Qt::LeftButton,
+                                  Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(slider, &press);
+                for (int step = 0; step <= 60; ++step) {
+                    const int span = qMax(1, slider->width() - hw);
+                    const int x = (sweep % 2 == 0) ? hw / 2 + step * span / 60
+                                                   : slider->width() - hw / 2 - step * span / 60;
+                    QMouseEvent move(QEvent::MouseMove, QPointF(x, y),
+                                     slider->mapToGlobal(QPoint(x, y)), Qt::NoButton,
+                                     Qt::LeftButton, Qt::NoModifier);
+                    QApplication::sendEvent(slider, &move);
+                    QCoreApplication::processEvents();
+                }
+                const int endX = (sweep % 2 == 0) ? slider->width() - hw / 2 : hw / 2;
+                QMouseEvent release(QEvent::MouseButtonRelease, QPointF(endX, y),
+                                    slider->mapToGlobal(QPoint(endX, y)), Qt::LeftButton,
+                                    Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(slider, &release);
+            }
+            check("smoke: survived slider drag sweeps", 1, 1);
+        }
+
+        const QPointF middle(canvas->width() / 2.0, canvas->height() / 2.0);
+        for (int i = 0; i < 200; ++i) {
+            canvas->testWheelAt(middle, (i % 2 == 0) ? 120 : -120, /*ctrl=*/true);
+            QCoreApplication::processEvents();
+        }
+        check("smoke: survived ctrl+wheel spam", 1, 1);
+    }
+
+    // Page switches must not leave a dangling or double-wired control.
+    QMetaObject::invokeMethod(&window, "onSettings");
+    check("smoke: hidden on settings", (bar && bar->isVisible()) ? 0 : 1, 1);
+    QMetaObject::invokeMethod(&window, "showHomePage");
+    check("smoke: hidden on home", (bar && bar->isVisible()) ? 0 : 1, 1);
+    QMetaObject::invokeMethod(&window, "onTabCurrentChanged", Q_ARG(int, 0));
+    check("smoke: still alive after switches", 1, 1);
+    check("smoke: bar back on a document", (bar && bar->isVisible()) ? 1 : 0, 1);
+
+    out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")
+                    : QStringLiteral("[selftest] %1 CHECK(S) FAILED").arg(failed));
+    return failed == 0 ? 0 : 3;
+}
+
 static int runBench(const QString &path)
 {
     out(QStringLiteral("[bench] start"));
@@ -1548,6 +1689,18 @@ static int runUpdateSelfTest()
           current.count(QLatin1Char('.')) >= 2 ? 1 : 0, 1);
     (void)UpdateChecker::isInstalledCopy();
 
+    // Crash evidence: the ring must record and stay bounded (it is what a crash
+    // report shows), and the directory must resolve.
+    {
+        const int before = CrashLog::testBreadcrumbCount();
+        for (int i = 0; i < 40; ++i)
+            CrashLog::breadcrumb("selftest", QStringLiteral("第 %1 次").arg(i));
+        check("crash: breadcrumbs recorded",
+              CrashLog::testBreadcrumbCount() > before ? 1 : 0, 1);
+        check("crash: ring is bounded", CrashLog::testBreadcrumbCount() <= 24 ? 1 : 0, 1);
+        check("crash: directory resolves", CrashLog::directory().isEmpty() ? 0 : 1, 1);
+    }
+
     // Release notes + the prompt decision: the dialog may only appear for a parsed,
     // newer, not-yet-announced version, and whatever the release body says has to
     // reach the teacher as plain text.
@@ -1909,6 +2062,12 @@ int main(int argc, char **argv)
     QNetworkProxyFactory::setUseSystemConfiguration(true);
     app.setApplicationName(QStringLiteral("PDFBoard"));
 
+    // Crash evidence first: a log, a minidump and the last operations, written even
+    // when the diagnostics log is switched off. Installed here (not before the
+    // QApplication) so the path resolves to .../PDFBoard/logs.
+    CrashLog::install();
+    CrashLog::breadcrumb("startup", QCoreApplication::applicationVersion());
+
     // Qt's own dialogs (message boxes) should follow the system language.
     {
         auto *translator = new QTranslator(&app);
@@ -1957,6 +2116,8 @@ int main(int argc, char **argv)
     const int docxIdx = args.indexOf(QStringLiteral("--selftest-docx"));
     const int updateIdx = args.indexOf(QStringLiteral("--selftest-update"));
     const int imageIdx = args.indexOf(QStringLiteral("--selftest-image"));
+    const int smokeIdx = args.indexOf(QStringLiteral("--selftest-smoke"));
+    const int crashIdx = args.indexOf(QStringLiteral("--selftest-crash"));
 
     // The shipping build is a GUI executable (no console window when the user
     // double-clicks it). The console-based modes still need their output, so
@@ -1970,7 +2131,8 @@ int main(int argc, char **argv)
         || homeIdx >= 0
         || docxIdx >= 0
         || updateIdx >= 0
-        || imageIdx >= 0) {
+        || imageIdx >= 0
+        || (smokeIdx >= 0 && smokeIdx + 1 < args.size())) {
         attachConsoleForCli();
     }
 
@@ -1997,6 +2159,23 @@ int main(int argc, char **argv)
 
     if (updateIdx >= 0)
         return runUpdateSelfTest();
+
+    if (smokeIdx >= 0 && smokeIdx + 1 < args.size())
+        return runSmokeSelfTest(args.at(smokeIdx + 1));
+
+    // Deliberately crashes, to prove the crash reporter really produces its files.
+    // Nothing calls this except a human checking the instrument (and the dev loop
+    // that just did): the handler writes a log + a minidump under .../PDFBoard/logs,
+    // then Windows' own error handling takes over and the process dies with 0xC0000005.
+    if (crashIdx >= 0) {
+        attachConsoleForCli();
+        CrashLog::breadcrumb("crash-test", QStringLiteral("故意触发空指针，用于验证崩溃记录"));
+        out(QStringLiteral("[selftest] crash test: 即将故意崩溃，稍后检查 %1")
+                .arg(CrashLog::directory()));
+        volatile int *nullPointer = nullptr;
+        *nullPointer = 1;                 // boom
+        return 0;                         // not reached
+    }
 
     if (imageIdx >= 0)
         return runImageSelfTest();

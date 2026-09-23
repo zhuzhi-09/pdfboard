@@ -30,8 +30,10 @@ qt_add_executable(pdfboard
     src/PageGrid.cpp
     src/AppSettings.h
     src/AppSettings.cpp
-    src/AppLog.h
-    src/AppLog.cpp
+  src/AppLog.h
+  src/AppLog.cpp
+  src/CrashLog.h
+  src/CrashLog.cpp
     src/SettingsPage.h
     src/SettingsPage.cpp
     src/HomePage.h
@@ -55,6 +57,7 @@ target_link_libraries(pdfboard PRIVATE
 psapi
 dwmapi
 version
+dbghelp
 )
 
 # GUI subsystem: double-clicking the installed app must not flash a console.
