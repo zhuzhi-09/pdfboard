@@ -68,10 +68,22 @@ jobs:
 
       # runner 的 PATH 里 MinGW 排在前面，CMake 会误选 g++ 去链接 MSVC 版 Qt。
       # 先进入 MSVC 开发环境，让 cl.exe 优先生效。
-      - name: Set up MSVC
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
+      # Pinned to VS2022 (v143): the app ships the VC++ runtime app-locally, and the
+      # newest toolset's CRT fails to initialise on older Windows (0xC0000142).
+      - name: Set up MSVC (VS2022 / v143) and export its environment
+        shell: pwsh
+        run: |
+          $vcvars = Get-ChildItem "C:\Program Files\Microsoft Visual Studio\2022\*\VC\Auxiliary\Build\vcvars64.bat" -ErrorAction SilentlyContinue |
+                    Select-Object -First 1
+          if (-not $vcvars) { throw "VS2022 vcvars64.bat not found on this runner" }
+          "using $($vcvars.FullName)"
+          $lines = cmd /c "`"$($vcvars.FullName)`" >nul 2>&1 && set"
+          $utf8 = New-Object System.Text.UTF8Encoding($false)
+          foreach ($line in $lines) {
+            if ($line -match '^([^=]+)=(.*)$') {
+              [System.IO.File]::AppendAllText($env:GITHUB_ENV, "$($matches[1])=$($matches[2])`n", $utf8)
+            }
+          }
 
       - name: Configure and build
         shell: pwsh
@@ -212,7 +224,7 @@ jobs:
             dist/PDFBoard-nightly-portable.zip
           body: |
             > 这是**自动构建的夜间版本**，随 `main` 的每次提交更新，可能不稳定。
-            > 稳定版本请看 Releases 里的版本标签（如 `v1.7.9`）。
+            > 稳定版本请看 Releases 里的版本标签（如 `v1.8.0`）。
 
             **提交**：`${{ github.sha }}`
             **版本号**：`${{ steps.ver.outputs.version }}`
