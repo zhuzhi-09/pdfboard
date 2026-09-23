@@ -72,8 +72,12 @@ private:
 
     PdfCanvas *createCanvas();              // builds + wires one document canvas
     void       wireActiveCanvas(PdfCanvas *canvas);
-    void       showHomePage();              // switch the stack to the home page
-    void       showSettingsPage();          // switch the stack to the settings page
+    // Q_INVOKABLE: the deterministic self tests switch pages through
+    // QMetaObject::invokeMethod so they need no access change, and they assert the
+    // invocation actually succeeded - a mistyped name used to fail silently and leave
+    // the following assertion vacuously true (showHomePage() was not a slot).
+    Q_INVOKABLE void       showHomePage();              // switch the stack to the home page
+    Q_INVOKABLE void       showSettingsPage();          // switch the stack to the settings page
     void       showCanvasPage(PdfCanvas *canvas);   // switch back to a document page
     void       refreshStatus();
     // Shows/hides the status-bar zoom control for the current page: it only makes

@@ -257,12 +257,18 @@ static int runSmokeSelfTest(const QString &path)
                 .arg(canvas->testRelayoutRefusals()));
     }
 
-    // Page switches must not leave a dangling or double-wired control.
-    QMetaObject::invokeMethod(&window, "onSettings");
+    // Page switches must not leave a dangling or double-wired control. The invocations
+    // are asserted on their return value: a name that does not resolve fails silently,
+    // and the checks after it would then pass without the page ever having switched
+    // (showHomePage() was not a slot, so "hidden on home" was vacuous).
+    check("smoke: settings page reachable",
+          QMetaObject::invokeMethod(&window, "onSettings") ? 1 : 0, 1);
     check("smoke: hidden on settings", (bar && bar->isVisible()) ? 0 : 1, 1);
-    QMetaObject::invokeMethod(&window, "showHomePage");
+    check("smoke: home page reachable",
+          QMetaObject::invokeMethod(&window, "showHomePage") ? 1 : 0, 1);
     check("smoke: hidden on home", (bar && bar->isVisible()) ? 0 : 1, 1);
-    QMetaObject::invokeMethod(&window, "onTabCurrentChanged", Q_ARG(int, 0));
+    check("smoke: tab switch reachable",
+          QMetaObject::invokeMethod(&window, "onTabCurrentChanged", Q_ARG(int, 0)) ? 1 : 0, 1);
     check("smoke: still alive after switches", 1, 1);
     check("smoke: bar back on a document", (bar && bar->isVisible()) ? 1 : 0, 1);
 
