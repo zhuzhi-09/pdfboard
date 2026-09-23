@@ -2062,6 +2062,29 @@ static int runImageSelfTest()
         PdfExport::exportPngPages(&canvas, leakB, &exportErr);
         const QImage shotB(PdfExport::pngPageName(leakB, 1, 1));
         check("eraser: export ignores the overlay", int(!shotA.isNull() && shotA == shotB), 1);
+
+        // A touch (or stylus) drag must never be hijacked by the global mouse cursor. NOTE:
+        // the real trigger - Windows synthesising button-PRESSED mouse events for touch -
+        // cannot be reproduced headlessly, so this only locks the weaker, still useful fact
+        // that the tracker stays inert through a touch drag. The reported bug itself is
+        // hand-verified (see docs 2.46).
+        if (canvas.pageCount() > 0) {
+            canvas.setTool(PdfCanvas::InkTool::Eraser);
+            canvas.testAddStroke(0, QPointF(0.30, 0.30), QPointF(0.45, 0.45),
+                                 QColor(0x20, 0x20, 0x20), 4.0);
+            const QPointF finger(0.33 * canvas.testViewportSize().width(),
+                                 0.33 * canvas.testViewportSize().height());
+            canvas.testTouchBegin(finger);
+            canvas.testTouchMove(finger + QPointF(6, 0));
+            const QPointF tracked = canvas.testEraserHoverPos();
+            for (int i = 0; i < 3; ++i)
+                canvas.testTrackPointer();
+            check("eraser: touch drag keeps the pointer tracker inert",
+                  int(canvas.testEraserHoverPos() == tracked), 1);
+            canvas.testTouchEnd();
+            canvas.testClearEraserHover();
+            canvas.setTool(PdfCanvas::InkTool::Pen);
+        }
     }
 
     auto samePixel = [&source, &exported](int x, int y) {

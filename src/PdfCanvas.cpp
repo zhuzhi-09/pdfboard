@@ -808,14 +808,23 @@ void PdfCanvas::paintEmptyState(QPainter &p) const
 
 void PdfCanvas::trackPointer()
 {
+    // Gestures and touch/stylus input own the pointer themselves. This is not cosmetic:
+    // Windows also synthesises mouse events for touch WITH the button pressed, so a
+    // mouseButtons() check alone let the global cursor drag an eraser/pen stroke over to
+    // wherever the physical mouse happened to sit (the "dragging sometimes damages the
+    // wrong strokes" report). And during a pinch the poll only steals frames from the
+    // gesture. The touch lock is set the moment a touch or stylus sequence starts, which
+    // makes it the right gate for both.
+    if (m_touchInkBlocked || m_pinchActive || m_moveDragActive)
+        return;
     const bool dragging = m_erasing || m_drawing;
+    if (dragging && QGuiApplication::mouseButtons() == Qt::NoButton)
+        return;
     if (!dragging && m_tool != InkTool::Eraser) {
         if (m_eraserHover)
             clearEraserHover();
         return;
     }
-    if (dragging && QGuiApplication::mouseButtons() == Qt::NoButton)
-        return;             // touch / stylus drag: those paths track their own pointer
 
     const QPointF pos = viewport()->mapFromGlobal(QCursor::pos());
     const bool changed = !m_hasTrackedPos || pos != m_lastTrackedPos;
@@ -953,6 +962,8 @@ void PdfCanvas::clearEraserHover()
 
 void PdfCanvas::testSetEraserHover(const QPointF &viewportPos) { setEraserHover(viewportPos); }
 void PdfCanvas::testClearEraserHover() { clearEraserHover(); }
+void PdfCanvas::testTrackPointer() { trackPointer(); }
+QPointF PdfCanvas::testEraserHoverPos() const { return m_eraserHoverPos; }
 
 QImage PdfCanvas::testRenderEraserIndicator(const QPointF &viewportPos, qreal radiusPx,
                                             const QSize &imageSize)

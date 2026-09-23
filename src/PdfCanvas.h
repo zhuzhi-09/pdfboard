@@ -164,6 +164,10 @@ public:
     // the size is actually readable from the drawing.
     void   testSetEraserHover(const QPointF &viewportPos);
     void   testClearEraserHover();
+    // Pointer tracking: exposed so a test can prove a touch/stylus drag is never hijacked
+    // by the global mouse cursor (the "dragging sometimes damages the wrong strokes" bug).
+    void    testTrackPointer();
+    QPointF testEraserHoverPos() const;
     QImage testRenderEraserIndicator(const QPointF &viewportPos, qreal radiusPx,
                                      const QSize &imageSize);
     int    strokeCount() const;
