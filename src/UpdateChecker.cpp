@@ -23,11 +23,27 @@
 
 namespace {
 
-// The two channels. The fallback mirror is deliberately not the default: it can
-// lag behind the releases published on GitHub.
+// The two channels. GitHub is the source of truth; the accelerated channel fetches
+// the very same URLs through a public gh-proxy, because a classroom network usually
+// cannot reach github.com (api.github.com is more often reachable than the download
+// host - which is exactly why the digest may come from GitHub while the bytes come
+// from a proxy).
 const char *kGitHubApi =
     "https://api.github.com/repos/zhuzhi-09/pdfboard/releases/latest";
-const char *kFallbackRoot = "https://pdz-update-download-latest.zhuzhi.site";
+
+// Public accelerators, tried in order. Measured from a classroom-facing network
+// (docs/03 2.35): every one of these served bytes IDENTICAL to GitHub's, and the
+// first two also proxy the API with the sha256 digest intact. The rest are
+// assets-only (they answer 403 for api.github.com), so they are usable for the
+// package but not for the manifest.
+const char *kAccelBases[] = {
+    "https://gh-proxy.com",
+    "https://gh-proxy.org",
+    "https://ghfast.top",
+    "https://ghproxy.net",
+};
+constexpr int kAccelBaseCount = int(sizeof(kAccelBases) / sizeof(kAccelBases[0]));
+
 const char *kUserAgent = "PDFBoard-Updater/1.0";
 
 // The Inno Setup AppId, used to tell an installed copy from a portable one.
@@ -94,46 +110,29 @@ bool UpdateChecker::shouldPrompt(const UpdateInfo &info, const QString &announce
     return compareVersion(info.version, runningVersion) > 0;
 }
 
-UpdateChecker::UpdateInfo UpdateChecker::parseFallbackJson(const QByteArray &json,
-                                                          const QString &currentVersion)
+// Every public gh-proxy accepts "<base>/<absolute url>" and forwards the rest.
+// Trailing slashes on the base are tolerated so a configured value cannot produce
+// "https://host//https://...".
+QString UpdateChecker::acceleratedUrl(const QString &base, const QString &absoluteUrl)
 {
-    UpdateInfo info;
-    const QJsonDocument doc = QJsonDocument::fromJson(json);
-    if (!doc.isObject())
-        return info;
+    QString trimmed = base.trimmed();
+    while (trimmed.endsWith(QLatin1Char('/')))
+        trimmed.chop(1);
+    if (trimmed.isEmpty() || absoluteUrl.isEmpty())
+        return QString();
+    return trimmed + QLatin1Char('/') + absoluteUrl;
+}
 
-    const QJsonObject root = doc.object();
-    info.valid = true;
-    info.version = root.value(QStringLiteral("version")).toString();
-    info.tag = root.value(QStringLiteral("tag")).toString();
-    info.commit = root.value(QStringLiteral("commit")).toString();
-    info.notes = root.value(QStringLiteral("notes")).toString();
-
-    const QJsonObject downloads = root.value(QStringLiteral("downloads")).toObject();
-    info.portableUrl = downloads.value(QStringLiteral("portable")).toString();
-
-    // Only the VERSIONED asset url may be downloaded automatically: the
-    // "…-latest…" aliases always point at the newest file, so the hash we just
-    // read could stop matching at any moment.
-    const QJsonArray assets = root.value(QStringLiteral("assets")).toArray();
-    for (const QJsonValue &value : assets) {
-        const QJsonObject asset = value.toObject();
-        if (!asset.value(QStringLiteral("name")).toString().contains(
-                QStringLiteral("setup"), Qt::CaseInsensitive)) {
-            continue;
-        }
-        info.setupUrl = asset.value(QStringLiteral("url")).toString();
-        info.setupSha256 = stripShaPrefix(asset.value(QStringLiteral("sha256")).toString());
-        info.setupSize = qint64(asset.value(QStringLiteral("size")).toDouble());
-        break;
-    }
-    if (info.setupUrl.isEmpty())
-        info.setupUrl = downloads.value(QStringLiteral("setup")).toString();
-
-    info.pageUrl = QString::fromLatin1(kFallbackRoot);
-    info.available = !currentVersion.isEmpty()
-                     && compareVersion(info.version, currentVersion) > 0;
-    return info;
+// The gate has to be strict about "no digest": an empty value must never be
+// treated as a match, otherwise a proxy that simply omits the field would turn
+// verification off.
+bool UpdateChecker::digestsAgree(const QString &a, const QString &b)
+{
+    const QString left = stripShaPrefix(a);
+    const QString right = stripShaPrefix(b);
+    if (left.isEmpty() || right.isEmpty())
+        return false;
+    return left == right;
 }
 
 UpdateChecker::UpdateInfo UpdateChecker::parseGitHubJson(const QByteArray &json,
@@ -160,14 +159,22 @@ UpdateChecker::UpdateInfo UpdateChecker::parseGitHubJson(const QByteArray &json,
     for (const QJsonValue &value : assets) {
         const QJsonObject asset = value.toObject();
         const QString name = asset.value(QStringLiteral("name")).toString();
+        if (name.contains(QStringLiteral("portable"), Qt::CaseInsensitive)) {
+            if (info.portableUrl.isEmpty())
+                info.portableUrl = asset.value(QStringLiteral("browser_download_url")).toString();
+            continue;
+        }
         if (!name.contains(QStringLiteral("setup"), Qt::CaseInsensitive))
             continue;
-        info.setupUrl = asset.value(QStringLiteral("browser_download_url")).toString();
-        // GitHub exposes a per-asset digest of the form "sha256:<hex>"; older
-        // payloads have none, and then we simply refuse to run the package.
-        info.setupSha256 = stripShaPrefix(asset.value(QStringLiteral("digest")).toString());
-        info.setupSize = qint64(asset.value(QStringLiteral("size")).toDouble());
-        break;
+        // No `break` here: the portable asset may sit after the setup one, and both
+        // are wanted from the same payload.
+        if (info.setupUrl.isEmpty()) {
+            info.setupUrl = asset.value(QStringLiteral("browser_download_url")).toString();
+            // GitHub exposes a per-asset digest of the form "sha256:<hex>"; older
+            // payloads have none, and then we simply refuse to run the package.
+            info.setupSha256 = stripShaPrefix(asset.value(QStringLiteral("digest")).toString());
+            info.setupSize = qint64(asset.value(QStringLiteral("size")).toDouble());
+        }
     }
     info.available = !currentVersion.isEmpty()
                      && compareVersion(info.version, currentVersion) > 0;
@@ -224,32 +231,112 @@ void UpdateChecker::Client::openInBrowser(const QString &url)
 
 void UpdateChecker::Client::check(Channel channel)
 {
-    const QString url = channel == Channel::GitHub ? QString::fromLatin1(kGitHubApi)
-                                                   : QString::fromLatin1(kFallbackRoot) + QLatin1Char('/');
-    QNetworkRequest request{QUrl(url)};
-    request.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(kUserAgent));
-    request.setTransferTimeout(8000);
+    if (channel == Channel::GitHub) {
+        QNetworkRequest request{QUrl(QString::fromLatin1(kGitHubApi))};
+        request.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(kUserAgent));
+        request.setTransferTimeout(8000);
 
-    QNetworkReply *reply = m_net->get(request);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, channel] {
-        reply->deleteLater();
-        if (reply->error() != QNetworkReply::NoError) {
-            // Offline, blocked or a proxy with a missing root certificate: the
-            // caller treats this as "no update" and stays quiet.
-            emit failed(reply->errorString());
+        QNetworkReply *reply = m_net->get(request);
+        connect(reply, &QNetworkReply::finished, this, [this, reply] {
+            reply->deleteLater();
+            if (reply->error() != QNetworkReply::NoError) {
+                // Offline, blocked or a proxy with a missing root certificate: the
+                // caller treats this as "no update" and stays quiet.
+                emit failed(reply->errorString());
+                return;
+            }
+            const UpdateInfo info = parseGitHubJson(reply->readAll(), currentVersion());
+            if (!info.valid) {
+                emit failed(QStringLiteral("响应无法解析"));
+                return;
+            }
+            emit checked(info);
+        });
+        return;
+    }
+
+    // Accelerated channel, phase 1: walk the proxy list until one returns a parsable
+    // manifest. Whichever answers supplies version + digest AND becomes the proxy
+    // used for the package download later.
+    if (m_accelBase.isEmpty()) {
+        if (m_accelProbe >= kAccelBaseCount) {
+            emit failed(QStringLiteral("所有加速通道都不可用"));
             return;
         }
-        const QByteArray body = reply->readAll();
-        const QString version = UpdateChecker::currentVersion();
-        const UpdateInfo info = channel == Channel::GitHub
-                                    ? parseGitHubJson(body, version)
-                                    : parseFallbackJson(body, version);
-        if (!info.valid) {
-            emit failed(QStringLiteral("响应无法解析"));
-            return;
-        }
-        emit checked(info);
-    });
+        const QString base = QString::fromLatin1(kAccelBases[m_accelProbe]);
+        QNetworkRequest request{QUrl(acceleratedUrl(base, QString::fromLatin1(kGitHubApi)))};
+        request.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(kUserAgent));
+        request.setTransferTimeout(8000);
+
+        QNetworkReply *reply = m_net->get(request);
+        connect(reply, &QNetworkReply::finished, this, [this, reply, base] {
+            reply->deleteLater();
+            if (reply->error() == QNetworkReply::NoError) {
+                UpdateInfo info = parseGitHubJson(reply->readAll(), currentVersion());
+                if (info.valid && !info.setupSha256.isEmpty()) {
+                    m_accelBase = base;
+                    m_accelDigest = info.setupSha256;
+                    // Only the URLs a human opens are rewritten. `setupUrl` stays the
+                    // pristine github.com URL: the download builds its own per-proxy
+                    // candidate list, and keeping one canonical value there makes the
+                    // hash gate easier to reason about.
+                    info.portableUrl = acceleratedUrl(base, info.portableUrl);
+                    // gh-proxy answers 403 for HTML pages, so the "open it in the
+                    // browser" fallback must be the asset itself - the browser then
+                    // downloads through the same accelerator.
+                    info.pageUrl = acceleratedUrl(base, info.setupUrl);
+                    m_accelInfo = info;
+                    m_accelCrossCheck = m_accelProbe + 1;
+                }
+            }
+            ++m_accelProbe;
+            check(Channel::Accelerated);
+        });
+        return;
+    }
+
+    // Phase 2: ask a second proxy for the same manifest. A single proxy could
+    // rewrite the digest and the package together, which would sail straight
+    // through the sha256 gate; two independent endpoints agreeing is the cheap
+    // defence. A disagreement is treated as an attack: nothing is offered.
+    if (m_accelCrossCheck < kAccelBaseCount) {
+        const QString base = QString::fromLatin1(kAccelBases[m_accelCrossCheck]);
+        QNetworkRequest request{QUrl(acceleratedUrl(base, QString::fromLatin1(kGitHubApi)))};
+        request.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(kUserAgent));
+        request.setTransferTimeout(8000);
+
+        QNetworkReply *reply = m_net->get(request);
+        connect(reply, &QNetworkReply::finished, this, [this, reply, base] {
+            reply->deleteLater();
+            ++m_accelCrossCheck;
+            if (reply->error() == QNetworkReply::NoError) {
+                const UpdateInfo other = parseGitHubJson(reply->readAll(), currentVersion());
+                if (other.valid && !other.setupSha256.isEmpty()) {
+                    if (!digestsAgree(other.setupSha256, m_accelDigest)) {
+                        AppLog::write(QStringLiteral("update"),
+                                      QStringLiteral("加速通道摘要不一致：%1 报 %2，%3 报 %4")
+                                          .arg(m_accelBase, m_accelDigest,
+                                               base, other.setupSha256));
+                        emit failed(QStringLiteral("更新信息校验不一致，已中止更新"));
+                        return;
+                    }
+                    AppLog::write(QStringLiteral("update"),
+                                  QStringLiteral("加速通道摘要一致（%1 + %2）：%3")
+                                      .arg(m_accelBase, base, m_accelDigest));
+                    emit checked(m_accelInfo);
+                    return;
+                }
+            }
+            check(Channel::Accelerated);      // ask the next proxy to confirm
+        });
+        return;
+    }
+
+    // Nothing else answered: the single proxy we have is all we can go on. Say so in
+    // the log instead of pretending the digest was corroborated.
+    AppLog::write(QStringLiteral("update"),
+                  QStringLiteral("仅 %1 一家加速通道可达，摘要未经交叉校验").arg(m_accelBase));
+    emit checked(m_accelInfo);
 }
 
 void UpdateChecker::Client::downloadSetup(Channel channel, const UpdateInfo &info)
@@ -259,14 +346,44 @@ void UpdateChecker::Client::downloadSetup(Channel channel, const UpdateInfo &inf
         return;
     }
     if (info.setupSha256.isEmpty()) {
-        // No hash means we cannot prove what we downloaded is what was published.
-        emit stage(QStringLiteral("该渠道未提供校验值，已改为打开下载页"));
+        // No hash means we cannot prove what we downloaded is what was published:
+        // hand the link to the browser instead of running anything.
+        emit stage(QStringLiteral("该渠道未提供校验值，已改为打开下载链接"));
         emit setupUnverified(info.pageUrl);
         return;
     }
 
-    const QString suffix = channel == Channel::GitHub ? QStringLiteral("github")
-                                                      : QStringLiteral("mirror");
+    // Candidate URLs. The accelerated channel walks its proxies - the one that
+    // answered the manifest first, then the rest - so one slow or broken
+    // accelerator cannot block the update. `info.setupUrl` stays the pristine
+    // github.com URL and each candidate is built from it, which keeps the hash gate
+    // easy to reason about.
+    if (m_setupVersion != info.version) {
+        m_setupVersion = info.version;
+        m_setupAttempt = 0;
+    }
+    QStringList candidates;
+    if (channel == Channel::GitHub) {
+        candidates << info.setupUrl;
+    } else {
+        if (!m_accelBase.isEmpty())
+            candidates << acceleratedUrl(m_accelBase, info.setupUrl);
+        for (int i = 0; i < kAccelBaseCount; ++i) {
+            const QString base = QString::fromLatin1(kAccelBases[i]);
+            if (base == m_accelBase)
+                continue;                 // it is already first in the list
+            candidates << acceleratedUrl(base, info.setupUrl);
+        }
+    }
+    if (m_setupAttempt >= candidates.size()) {
+        emit failed(QStringLiteral("所有加速通道都下载失败"));
+        return;
+    }
+    const QString sourceUrl = candidates.at(m_setupAttempt);
+
+    const QString suffix = channel == Channel::GitHub
+                               ? QStringLiteral("github")
+                               : QStringLiteral("accel%1").arg(m_setupAttempt);
     const QString path = QDir(tempDir()).filePath(
         QStringLiteral("PDFBoard-update-%1-%2-setup.exe").arg(info.version, suffix));
 
@@ -278,7 +395,7 @@ void UpdateChecker::Client::downloadSetup(Channel channel, const UpdateInfo &inf
     }
 
     emit stage(QStringLiteral("正在下载 %1 …").arg(info.version));
-    QNetworkRequest request{QUrl(info.setupUrl)};
+    QNetworkRequest request{QUrl(sourceUrl)};
     request.setHeader(QNetworkRequest::UserAgentHeader, QString::fromLatin1(kUserAgent));
     request.setTransferTimeout(120000);
     request.setAttribute(QNetworkRequest::RedirectPolicyAttribute,
@@ -290,13 +407,21 @@ void UpdateChecker::Client::downloadSetup(Channel channel, const UpdateInfo &inf
     connect(reply, &QNetworkReply::readyRead, this,
             [reply, file] { file->write(reply->readAll()); });
     connect(reply, &QNetworkReply::finished, this,
-            [this, reply, file, path, info] {
+            [this, reply, file, path, info, channel] {
                 reply->deleteLater();
                 file->close();
                 if (reply->error() != QNetworkReply::NoError) {
                     file->remove();
                     file->deleteLater();
-                    emit failed(reply->errorString());
+                    if (channel == Channel::GitHub) {
+                        emit failed(reply->errorString());
+                        return;
+                    }
+                    AppLog::write(QStringLiteral("update"),
+                                  QStringLiteral("加速通道下载失败（第 %1 家）：%2")
+                                      .arg(m_setupAttempt + 1).arg(reply->errorString()));
+                    ++m_setupAttempt;                  // move on to the next accelerator
+                    downloadSetup(channel, info);
                     return;
                 }
 
@@ -315,9 +440,18 @@ void UpdateChecker::Client::downloadSetup(Channel channel, const UpdateInfo &inf
                 if (!hashed || actual != info.setupSha256) {
                     QFile::remove(path);
                     AppLog::write(QStringLiteral("update"),
-                                  QStringLiteral("更新包校验失败：期望 %1，实际 %2")
-                                      .arg(info.setupSha256, actual));
-                    emit failed(QStringLiteral("下载文件校验失败，已丢弃"));
+                                  QStringLiteral("更新包校验失败：期望 %1，实际 %2（第 %3 家通道）")
+                                      .arg(info.setupSha256, actual)
+                                      .arg(m_setupAttempt + 1));
+                    if (channel == Channel::GitHub) {
+                        emit failed(QStringLiteral("下载文件校验失败，已丢弃"));
+                        return;
+                    }
+                    // A package that does not hash to what the manifest promised is a
+                    // red flag about that accelerator: try the next one. Nothing is
+                    // ever run unless some source matches, so this can only fail safe.
+                    ++m_setupAttempt;
+                    downloadSetup(channel, info);
                     return;
                 }
 

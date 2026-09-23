@@ -14,6 +14,8 @@ qt_add_executable(pdfboard
     src/MainWindow.cpp
     src/DocumentTabs.h
     src/DocumentTabs.cpp
+    src/ZoomBar.h
+    src/ZoomBar.cpp
     src/PdfCanvas.h
     src/PdfCanvas.cpp
     src/AnnotationBundle.h

@@ -12,6 +12,7 @@
 #include "SettingsPage.h"
 #include "Theme.h"
 #include "WordConvert.h"
+#include "ZoomBar.h"
 
 #include <QAction>
 #include <QAbstractButton>
@@ -311,6 +312,32 @@ MainWindow::MainWindow(QWidget *parent)
     addAction(saveAsAct);
 
     // F11 toggles fullscreen from anywhere; Esc leaves it (see keyPressEvent).
+    // Zoom without a touchscreen, next to the Ctrl+wheel path: Ctrl+= / Ctrl+- /
+    // Ctrl+0（适配宽度）. QKeySequence::ZoomIn/Out map to the platform's own keys.
+    auto *zoomInAct = new QAction(this);
+    zoomInAct->setShortcut(QKeySequence::ZoomIn);
+    connect(zoomInAct, &QAction::triggered, this, [this] {
+        if (m_active)
+            m_active->zoomIn();
+    });
+    addAction(zoomInAct);
+
+    auto *zoomOutAct = new QAction(this);
+    zoomOutAct->setShortcut(QKeySequence::ZoomOut);
+    connect(zoomOutAct, &QAction::triggered, this, [this] {
+        if (m_active)
+            m_active->zoomOut();
+    });
+    addAction(zoomOutAct);
+
+    auto *fitWidthAct = new QAction(this);
+    fitWidthAct->setShortcut(QKeySequence(QStringLiteral("Ctrl+0")));
+    connect(fitWidthAct, &QAction::triggered, this, [this] {
+        if (m_active)
+            m_active->setFitWidth(true);
+    });
+    addAction(fitWidthAct);
+
     auto *fullscreenAct = new QAction(this);
     fullscreenAct->setShortcut(QKeySequence(Qt::Key_F11));
     fullscreenAct->setShortcutContext(Qt::WindowShortcut);
@@ -333,6 +360,22 @@ MainWindow::MainWindow(QWidget *parent)
     statusBar()->addWidget(m_renderLabel);
     statusBar()->addWidget(m_inkLabel);
     statusBar()->addPermanentWidget(m_memLabel);
+
+    // Word-like zoom control at the far right of the status bar. It never invents a
+    // zoom value: the active canvas reports its own zoom (pinch, Ctrl+wheel,
+    // shortcuts) and the control just displays it. Hidden on the home / settings
+    // pages by updateZoomBar().
+    m_zoomBar = new ZoomBar(statusBar());
+    connect(m_zoomBar, &ZoomBar::zoomRequested, this, [this](qreal zoom) {
+        if (m_active)
+            m_active->setZoomLevel(zoom);
+    });
+    connect(m_zoomBar, &ZoomBar::fitWidthRequested, this, [this] {
+        if (m_active)
+            m_active->setFitWidth(true);
+    });
+    m_zoomBar->setVisible(false);
+    statusBar()->addPermanentWidget(m_zoomBar);
 
     // No document is open at startup: show the home page (neutral status bar,
     // app-name title, no active canvas).
@@ -503,6 +546,8 @@ void MainWindow::applyTheme()
         m_homePage->applyTheme();
     if (m_settingsPage)
         m_settingsPage->refreshTheme();
+    if (m_zoomBar)
+        m_zoomBar->refreshTheme();
     if (m_tabs)
         m_tabs->update();
 
@@ -1338,9 +1383,29 @@ void MainWindow::wireActiveCanvas(PdfCanvas *canvas)
             connect(canvas, &PdfCanvas::pageChanged,    this, &MainWindow::onPageChanged);
             connect(canvas, &PdfCanvas::renderMeasured, this, &MainWindow::onRenderMeasured);
             connect(canvas, &PdfCanvas::inkChanged,     this, &MainWindow::onInkChanged);
+            // The zoom control follows whatever the document does (pinch, Ctrl+wheel,
+            // shortcuts). Connected per active canvas - the disconnect above already
+            // cleared the previous one, so there is never a double update.
+            connect(canvas, &PdfCanvas::zoomChanged, this,
+                    [this](qreal zoom) {
+                        if (m_zoomBar)
+                            m_zoomBar->setZoom(zoom);
+                    });
         }
     }
     refreshStatus();     // the labels must show the newly active document
+    updateZoomBar();     // ...and the zoom control must match it (or hide)
+}
+
+void MainWindow::updateZoomBar()
+{
+    if (!m_zoomBar)
+        return;
+    // Only a document has a zoom; the home and settings pages are not zoomable.
+    const bool onDocument = m_statusCanvas && !m_homeVisible && !m_settingsVisible;
+    m_zoomBar->setVisible(onDocument);
+    if (onDocument)
+        m_zoomBar->setZoom(m_statusCanvas->testZoom());
 }
 
 void MainWindow::refreshStatus()

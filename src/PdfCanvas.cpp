@@ -7,6 +7,7 @@
 #include "Theme.h"
 
 #include <QPdfDocument>
+#include <QApplication>
 #include <QPainter>
 #include <QPainterPath>
 #include <QDateTime>
@@ -24,6 +25,7 @@
 #include <QTimer>
 #include <QTouchEvent>
 #include <QTabletEvent>
+#include <QWheelEvent>
 #include <QtMath>
 
 namespace {
@@ -1587,6 +1589,7 @@ void PdfCanvas::applyZoom(qreal targetZoom, const QPointF &anchor, bool immediat
         horizontalScrollBar()->setValue(int(left0 + fracX * g.w - anchor.x()));
     }
     viewport()->update();
+    emit zoomChanged(m_zoom);
     emit pageChanged(currentPage(), pageCount());
 }
 
@@ -1595,6 +1598,16 @@ void PdfCanvas::zoomAt(qreal factor, const QPointF &viewportAnchor)
     if (!m_doc || m_geom.isEmpty())
         return;
     applyZoom(m_zoom * factor, viewportAnchor, /*immediate=*/false);
+}
+
+// Absolute zoom from the status-bar control: keep whatever is in the middle of the
+// viewport in the middle, so the page does not jump sideways while dragging.
+void PdfCanvas::setZoomLevel(qreal zoom)
+{
+    if (!m_doc || m_geom.isEmpty())
+        return;
+    const QPointF centre(viewport()->width() / 2.0, viewport()->height() / 2.0);
+    applyZoom(zoom, centre, /*immediate=*/false);
 }
 
 void PdfCanvas::zoomIn()
@@ -1645,6 +1658,10 @@ bool PdfCanvas::event(QEvent *e)
 bool PdfCanvas::viewportEvent(QEvent *e)
 {
     switch (e->type()) {
+    case QEvent::Wheel:
+        if (handleWheel(static_cast<QWheelEvent *>(e)))
+            return true;
+        break;
     case QEvent::TabletPress:
     case QEvent::TabletMove:
     case QEvent::TabletRelease:
@@ -1662,6 +1679,43 @@ bool PdfCanvas::viewportEvent(QEvent *e)
         break;
     }
     return QAbstractScrollArea::viewportEvent(e);
+}
+
+// Mouse-wheel input.
+//
+// Ctrl+wheel is the ONLY safe zoom trigger. Windows/Qt turn a two-finger PAN - on
+// a classroom touch panel just as on a touchpad - into ordinary scroll messages
+// (MS: pan gestures become WM_VSCROLL/WM_HSCROLL; Qt: "Pan gestures are converted
+// to mouse wheel messages"), and there is no way to tell those apart from a real
+// wheel. Zooming on the plain wheel would therefore fire on every two-finger pan.
+// The plain wheel keeps scrolling the document, as it always did.
+//
+// On top of that, the wheel is ignored while a touch gesture owns the input, and
+// for the 250 ms after it ends - the same window in which synthesized mouse and
+// wheel events trail in. So even a panel that reports a pan as a wheel can never
+// change the zoom. When the diagnostics log is on, an ignored wheel is recorded,
+// because that log line is how we would ever find out a panel does this.
+bool PdfCanvas::handleWheel(QWheelEvent *we)
+{
+    if (m_pinchActive || m_drawing || m_erasing || m_touchInkBlocked
+        || (m_touchRelease && m_touchRelease->isActive())) {
+        if (AppLog::isEnabled())
+            eraseLog(QStringLiteral("wheel 忽略（触摸手势进行中/刚结束）delta=%1,%2 ctrl=%3")
+                         .arg(we->angleDelta().x())
+                         .arg(we->angleDelta().y())
+                         .arg(we->modifiers().testFlag(Qt::ControlModifier) ? 1 : 0));
+        return true;                   // swallow: never zoom or scroll under a finger
+    }
+
+    const int dy = we->angleDelta().y();
+    if (dy == 0 || !we->modifiers().testFlag(Qt::ControlModifier))
+        return false;                  // plain wheel: the scroll area handles it
+
+    // One notch (120 units = 15° wheel step) is a comfortable step. The point under
+    // the cursor stays put, exactly like a pinch; pages re-render crisply through
+    // the settle timer, so spinning the wheel does not rasterise per notch.
+    zoomAt(qPow(1.25, qreal(dy) / 120.0), we->position());
+    return true;
 }
 
 // A pen/stylus reports several times the sample rate of the synthesized mouse
@@ -1863,9 +1917,34 @@ int PdfCanvas::testDensifiedCount(const QVector<QPointF> &raw) const
 // The real touch entry points, headless: lets the self test prove that a stroke
 // started on the page survives being dragged across the floating island (and that
 // a touch landing on the island itself is still left to the island).
-void PdfCanvas::testTouchBegin(const QPointF &viewportPos) { beginInputAt(viewportPos); }
+void PdfCanvas::testWheelAt(const QPointF &viewportPos, int angleDeltaY, bool ctrl)
+{
+    QWheelEvent event(viewportPos, viewport()->mapToGlobal(viewportPos.toPoint()),
+                      QPoint(0, 0), QPoint(0, angleDeltaY), Qt::NoButton,
+                      ctrl ? Qt::ControlModifier : Qt::NoModifier, Qt::NoScrollPhase,
+                      /*inverted=*/false);
+    QApplication::sendEvent(viewport(), &event);
+}
+
+void PdfCanvas::testTouchBegin(const QPointF &viewportPos)
+{
+    // Mirrors handleTouch's TouchBegin: a fresh sequence clears the trailing lock.
+    if (m_touchRelease)
+        m_touchRelease->stop();
+    beginInputAt(viewportPos);
+}
+
 void PdfCanvas::testTouchMove(const QPointF &viewportPos) { moveInputTo(viewportPos); }
-void PdfCanvas::testTouchEnd() { endInput(); }
+
+void PdfCanvas::testTouchEnd()
+{
+    endInput();
+    // ...and TouchEnd keeps the lock briefly, exactly like the real touch path.
+    // That 250 ms window is what stops a synthesized pan-as-wheel from zooming,
+    // so the hook has to reproduce it or the wheel rule would go untested.
+    if (m_touchRelease)
+        m_touchRelease->start();
+}
 
 bool PdfCanvas::testTouchBelongsToOverlay(const QVector<QPointF> &viewportPts) const
 {

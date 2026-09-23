@@ -8,16 +8,19 @@ class QNetworkAccessManager;
 
 // In-app update, two channels.
 //
-// GitHub is the primary source (releases/latest); the maintainer's own server is
-// a fallback and is labelled as such in the UI, because it is a mirror that may
-// lag. Both channels end in the same gate: a setup package is only ever started
-// after its sha256 matched, and a package without a hash is never run
-// automatically - we open the download page instead.
+// GitHub is the authoritative source: its release JSON carries the version and -
+// crucially - the sha256 of every asset. In a Chinese classroom github.com is
+// usually unreachable (the API host is more often reachable than the download
+// host), so the second channel fetches the SAME GitHub JSON and the SAME asset
+// through a public gh-proxy: it is a transport accelerator, not a second source of
+// truth. The gate is unchanged - a package is only ever started after its sha256
+// matched, and without a hash we hand the download link to the browser instead of
+// running anything.
 namespace UpdateChecker {
 
 enum class Channel {
-    GitHub,     // api.github.com/repos/zhuzhi-09/pdfboard/releases/latest
-    Fallback,   // https://pdz-update-download-latest.zhuzhi.site/
+    GitHub,       // api.github.com + github.com, directly
+    Accelerated,  // the same absolute URLs through a public gh-proxy (see kAccelBases)
 };
 
 struct UpdateInfo {
@@ -38,9 +41,18 @@ struct UpdateInfo {
 // Returns <0, 0 or >0 like strcmp.
 int compareVersion(const QString &a, const QString &b);
 
-// Pure parsers so both channels are testable without a network.
-UpdateInfo parseFallbackJson(const QByteArray &json, const QString &currentVersion);
+// Pure parser, so both channels are testable without a network. (Both channels
+// receive GitHub's payload - the accelerated one just receives it via a proxy.)
 UpdateInfo parseGitHubJson(const QByteArray &json, const QString &currentVersion);
+
+// The URL form every public gh-proxy uses: "<base>/<absolute github url>", e.g.
+// acceleratedUrl("https://gh-proxy.com", "https://github.com/x/y.zip")
+//   -> "https://gh-proxy.com/https://github.com/x/y.zip"
+QString acceleratedUrl(const QString &base, const QString &absoluteUrl);
+
+// Do two digests name the same hash? Case and a leading "sha256:" are ignored; an
+// empty digest never agrees with anything - that is what keeps the gate honest.
+bool digestsAgree(const QString &a, const QString &b);
 
 // Should a "new version" dialog be shown? Kept pure so the self test can lock the
 // decision: only for a parsed release that is really newer than the running
@@ -64,10 +76,14 @@ class Client : public QObject
 public:
     explicit Client(QObject *parent = nullptr);
 
-    // Quiet version check, used for the "online latest" line.
+    // Quiet version check. The Accelerated channel walks the proxy list, remembers
+    // the first one that answers and rewrites every URL in the result to go through
+    // it, so the rest of the app needs no proxy knowledge at all.
     void check(Channel channel);
     // Download the setup for `info` and, once the hash matches, start it and
-    // ask the app to quit (the waiting helper relaunches it afterwards).
+    // ask the app to quit (the waiting helper relaunches it afterwards). On the
+    // accelerated channel a failed or mis-hashed download moves on to the next
+    // proxy instead of giving up.
     void downloadSetup(Channel channel, const UpdateInfo &info);
     // Write the tiny waiting helper: run the installer silently, then bring the
     // app back, so the teacher clicks once.
@@ -86,6 +102,19 @@ signals:
 
 private:
     QNetworkAccessManager *m_net = nullptr;
+
+    // Accelerated-channel probing: which proxy is being tried, which proxy answered,
+    // and which second proxy is asked to confirm the digest it reported.
+    int        m_accelProbe = 0;
+    int        m_accelCrossCheck = 0;
+    QString    m_accelBase;         // the proxy that answered - reused for assets
+    QString    m_accelDigest;       // what that proxy said the setup hash is
+    UpdateInfo m_accelInfo;         // the manifest waiting for its cross-check
+
+    // Setup download retries: an attempt counter plus the version it belongs to,
+    // so a new version starts a fresh walk of the proxy list.
+    int     m_setupAttempt = 0;
+    QString m_setupVersion;
 };
 
 }   // namespace UpdateChecker

@@ -809,9 +809,11 @@ void SettingsPage::buildUi()
 
         m_updateGh = new QPushButton(QStringLiteral("GitHub 下载并安装"), buttonsRow);
         m_updateGh->setObjectName(QStringLiteral("settingsPrimary"));
-        m_updateMirror = new QPushButton(QStringLiteral("备用服务器 下载并安装"), buttonsRow);
-        m_updateMirror->setToolTip(QStringLiteral("备选方案，不保证实时可用"));
-        m_updateSite = new QPushButton(QStringLiteral("打开备用下载网站"), buttonsRow);
+    m_updateMirror = new QPushButton(QStringLiteral("加速通道 下载并安装"), buttonsRow);
+    m_updateMirror->setToolTip(QStringLiteral("经公共 GitHub 加速通道下载（教室网络通常打不开 github.com）；"
+                                              "安装包仍会做 sha256 校验"));
+    m_updateSite = new QPushButton(QStringLiteral("用浏览器下载安装包"), buttonsRow);
+    m_updateSite->setToolTip(QStringLiteral("交给浏览器通过加速通道下载，适合软件内下载失败时"));
         for (QPushButton *button : { m_updateGh, m_updateMirror, m_updateSite }) {
             button->setCursor(Qt::PointingHandCursor);
             button->setFont(Theme::chromeFont(buttonsRow->font()));
@@ -828,7 +830,7 @@ void SettingsPage::buildUi()
         h->setContentsMargins(0, 0, 0, 0);
         h->setSpacing(Theme::Space2);
         m_updatePortableGh = new QPushButton(QStringLiteral("GitHub 便携版"), portable);
-        m_updatePortableMirror = new QPushButton(QStringLiteral("备用便携版"), portable);
+        m_updatePortableMirror = new QPushButton(QStringLiteral("加速通道便携版"), portable);
         for (QPushButton *button : { m_updatePortableGh, m_updatePortableMirror }) {
             button->setCursor(Qt::PointingHandCursor);
             button->setFont(Theme::chromeFont(font()));
@@ -885,9 +887,13 @@ void SettingsPage::buildUi()
             &SettingsPage::onUpdateSetupUnverified);
     connect(m_updateGh, &QPushButton::clicked, this, [this] { beginUpdateInstall(0); });
     connect(m_updateMirror, &QPushButton::clicked, this, [this] { beginUpdateInstall(1); });
-    connect(m_updateSite, &QPushButton::clicked, this, [] {
-        UpdateChecker::Client::openInBrowser(
-            QStringLiteral("https://pdz-update-download-latest.zhuzhi.site/"));
+    connect(m_updateSite, &QPushButton::clicked, this, [this] {
+        // A gh-proxy answers 403 for HTML pages, so "open it in the browser" hands
+        // over the ASSET link: the browser then downloads through the accelerator.
+        QString url = m_updatePageUrl[1];
+        if (url.isEmpty())
+            url = QStringLiteral("https://github.com/zhuzhi-09/pdfboard/releases/latest");
+        UpdateChecker::Client::openInBrowser(url);
     });
     connect(m_updatePortableGh, &QPushButton::clicked, this, [this] { openPortablePage(0); });
     connect(m_updatePortableMirror, &QPushButton::clicked, this, [this] { openPortablePage(1); });
@@ -1291,7 +1297,7 @@ void SettingsPage::openPortablePage(int channel)
                   ? (m_updatePageUrl[0].isEmpty()
                          ? QStringLiteral("https://github.com/zhuzhi-09/pdfboard/releases/latest")
                          : m_updatePageUrl[0])
-                  : QStringLiteral("https://pdz-update-download-latest.zhuzhi.site/");
+                  : QStringLiteral("https://github.com/zhuzhi-09/pdfboard/releases/latest");
     }
     UpdateChecker::Client::openInBrowser(url);
 }

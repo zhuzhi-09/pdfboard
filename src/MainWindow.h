@@ -9,6 +9,7 @@ class DocumentTabs;
 class HomePage;
 class PdfCanvas;
 class SettingsPage;
+class ZoomBar;
 class QCloseEvent;
 class QEvent;
 class QKeyEvent;
@@ -75,6 +76,10 @@ private:
     void       showSettingsPage();          // switch the stack to the settings page
     void       showCanvasPage(PdfCanvas *canvas);   // switch back to a document page
     void       refreshStatus();
+    // Shows/hides the status-bar zoom control for the current page: it only makes
+    // sense on a document (not on the home or settings page), and it always shows
+    // the active canvas' own zoom.
+    void       updateZoomBar();
     void       updateTitle();
     int        docIndex(PdfCanvas *canvas) const;
     QString    docTitle(PdfCanvas *canvas) const;
@@ -124,6 +129,7 @@ private:
     QLabel *m_renderLabel = nullptr;
     QLabel *m_inkLabel    = nullptr;
     QLabel *m_memLabel    = nullptr;
+    ZoomBar *m_zoomBar    = nullptr;   // Word-like zoom control, document pages only
 
     UpdateChecker::Client *m_updateClient = nullptr;
     QString                m_updateAnnouncedVersion;  // per session

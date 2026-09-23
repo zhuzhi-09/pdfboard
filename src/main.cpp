@@ -15,6 +15,7 @@
 #include "Theme.h"
 #include "UpdateChecker.h"
 #include "WordConvert.h"
+#include "ZoomBar.h"
 
 #include <QApplication>
 #include <QByteArray>
@@ -23,6 +24,7 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
+#include <QNetworkProxyFactory>
 #include <QHash>
 #include <QJsonDocument>
 #include <QJsonObject>
@@ -284,6 +286,81 @@ static int runInkSelfTest(const QString &path)
         probe.testTouchMove(QPointF(barPt));      // dragged across the island
         probe.testTouchEnd();
         check("overlay: ink survives the island", probe.strokeCount(), 1);
+    }
+
+    // Wheel zoom rules. Ctrl+wheel zooms at the pointer, the plain wheel keeps
+    // scrolling, and while a touch gesture runs (or just ended) the wheel is ignored
+    // - a two-finger PAN reaches the app as a wheel event and must never zoom.
+    // A canvas of its own, so the zoom asserted below cannot disturb the rest.
+    {
+        PdfCanvas probe;
+        probe.setAttribute(Qt::WA_DontShowOnScreen, true);
+        probe.resize(1000, 800);
+        probe.show();
+        QString wheelErr;
+        check("wheel: probe opened", probe.openPdf(path, &wheelErr) ? 1 : 0, 1);
+
+        int zoomSignals = 0;
+        qreal lastZoom = 0.0;
+        QObject::connect(&probe, &PdfCanvas::zoomChanged, &probe,
+                         [&zoomSignals, &lastZoom](qreal z) { ++zoomSignals; lastZoom = z; });
+
+        const QPointF at(400.0, 300.0);
+        const qreal before = probe.testZoom();
+        probe.testWheelAt(at, 120, /*ctrl=*/true);
+        check("wheel: ctrl+wheel zooms in", probe.testZoom() > before ? 1 : 0, 1);
+        check("wheel: zoomChanged fired", zoomSignals > 0 ? 1 : 0, 1);
+        check("wheel: signalled zoom matches",
+              qFuzzyCompare(lastZoom, probe.testZoom()) ? 1 : 0, 1);
+
+        const qreal zoomed = probe.testZoom();
+        probe.testWheelAt(at, 120, /*ctrl=*/false);
+        check("wheel: plain wheel does not zoom",
+              qFuzzyCompare(probe.testZoom(), zoomed) ? 1 : 0, 1);
+        probe.testWheelAt(at, -120, /*ctrl=*/true);
+        check("wheel: ctrl+wheel zooms out", probe.testZoom() < zoomed ? 1 : 0, 1);
+
+        // Land the touch on a real page, then prove the stroke is actually live via
+        // the overlay rule (a point ON the toolbar belongs to the island only when
+        // no gesture is running) - otherwise the next check would pass vacuously.
+        const QSize vp = probe.testViewportSize();
+        QPointF pagePt(20.0, 100.0);
+        for (int i = 0; i < 60 && pagePt.y() < vp.height()
+                        && probe.testPageAtViewportY(pagePt.y()) < 0; ++i)
+            pagePt.setY(pagePt.y() + 10.0);
+        InkToolbar *bar = probe.toolbar();
+        const QPointF barPt = bar ? QPointF(bar->geometry().center())
+                                  : QPointF(vp.width() / 2.0, vp.height() - 40.0);
+        probe.testTouchBegin(pagePt);
+        check("wheel: touch stroke is live",
+              probe.testTouchBelongsToOverlay(QVector<QPointF>{barPt}) ? 0 : 1, 1);
+
+        const qreal during = probe.testZoom();
+        probe.testWheelAt(at, 120, /*ctrl=*/true);
+        check("wheel: ignored while a stroke runs",
+              qFuzzyCompare(probe.testZoom(), during) ? 1 : 0, 1);
+        probe.testTouchEnd();
+        probe.testWheelAt(at, 120, /*ctrl=*/true);
+        check("wheel: still ignored right after touch",
+              qFuzzyCompare(probe.testZoom(), during) ? 1 : 0, 1);
+    }
+
+    // The status-bar zoom control's slider mapping is pure, so it is asserted here
+    // (the widget uses the same functions, never a second copy of the maths).
+    {
+        check("zoombar: 0 -> min", qFuzzyCompare(ZoomBarMath::zoomForSlider(0), 0.25) ? 1 : 0, 1);
+        check("zoombar: max -> 4x", qFuzzyCompare(ZoomBarMath::zoomForSlider(1000), 4.0) ? 1 : 0, 1);
+        check("zoombar: quarter -> 0.5x",
+              qFuzzyCompare(ZoomBarMath::zoomForSlider(250), 0.5) ? 1 : 0, 1);
+        check("zoombar: middle -> 1x",
+              qFuzzyCompare(ZoomBarMath::zoomForSlider(500), 1.0) ? 1 : 0, 1);
+        check("zoombar: three quarters -> 2x",
+              qFuzzyCompare(ZoomBarMath::zoomForSlider(750), 2.0) ? 1 : 0, 1);
+        bool roundTrip = true;
+        for (int value : {0, 250, 500, 750, 1000})
+            roundTrip = roundTrip
+                        && (ZoomBarMath::sliderForZoom(ZoomBarMath::zoomForSlider(value)) == value);
+        check("zoombar: slider round trip", roundTrip ? 1 : 0, 1);
     }
 
     canvas.clearInk();
@@ -1411,48 +1488,36 @@ static int runUpdateSelfTest()
     check("version: padded equal", compareVersion(QStringLiteral("1.4.0"),
                                                   QStringLiteral("1.4")), 0);
 
-    // The fallback server payload (a trimmed copy of the live response shape).
-    const QByteArray fallback = QByteArrayLiteral(R"({
-        "product":"PDFBoard","version":"1.4.2","tag":"v1.4.2","commit":"ec06228",
-        "notes":"n","downloads":{
-        "setup":"https://x/download/PDFBoard-1.4.2-setup.exe",
-        "portable":"https://x/download/PDFBoard-1.4.2-portable.zip"},
-        "assets":[{"name":"PDFBoard-1.4.2-setup.exe","size":17524694,
-        "sha256":"DCDF2C07AA","url":"https://x/download/PDFBoard-1.4.2-setup.exe",
-        "stable_url":"https://x/download/PDFBoard-latest-setup.exe"}]})");
-    const auto mirror =
-        UpdateChecker::parseFallbackJson(fallback, QStringLiteral("1.4.0"));
-    check("mirror: parsed", mirror.valid ? 1 : 0, 1);
-    check("mirror: version", mirror.version == QStringLiteral("1.4.2") ? 1 : 0, 1);
-    check("mirror: newer than local", mirror.available ? 1 : 0, 1);
-    check("mirror: uses versioned url",
-          mirror.setupUrl.endsWith(QStringLiteral("PDFBoard-1.4.2-setup.exe")) ? 1 : 0, 1);
-    check("mirror: sha256 normalised",
-          mirror.setupSha256 == QStringLiteral("dcdf2c07aa") ? 1 : 0, 1);
-    check("mirror: size", int(mirror.setupSize), 17524694);
-    const auto same = UpdateChecker::parseFallbackJson(fallback, QStringLiteral("1.4.2"));
-    check("mirror: same version not newer", same.available ? 1 : 0, 0);
-    check("mirror: garbage rejected",
-          UpdateChecker::parseFallbackJson(QByteArrayLiteral("not json"),
-                                           QStringLiteral("1.0")).valid ? 1 : 0, 0);
-
-    // GitHub: with and without the per-asset digest.
-    // URLs are taken VERBATIM: the app never invents a base for them. That is why
-    // the mirror must hand out ABSOLUTE urls (a relative "/download/x" reaches the
-    // browser as a scheme-less URL and the button silently does nothing).
-    check("mirror: portable url verbatim",
-          mirror.portableUrl == QStringLiteral("https://x/download/PDFBoard-1.4.2-portable.zip")
+    // The accelerator URL form: every public gh-proxy takes "<base>/<absolute url>",
+    // and no base is ever invented for a URL that already carries a host.
+    check("accel: prefixes the absolute url",
+          UpdateChecker::acceleratedUrl(
+              QStringLiteral("https://gh-proxy.com"),
+              QStringLiteral("https://github.com/o/r/releases/download/v1/x.exe"))
+                  == QStringLiteral("https://gh-proxy.com/https://github.com/o/r/releases/download/v1/x.exe")
               ? 1 : 0, 1);
-    {
-        const QByteArray relativePayload = QByteArrayLiteral(R"({
-            "version":"9.9.9","downloads":{"portable":"/download/p.zip"},
-            "assets":[{"name":"PDFBoard-9.9.9-setup.exe","size":1,
-            "sha256":"AA","url":"https://x/setup.exe"}]})");
-        const auto rel = UpdateChecker::parseFallbackJson(relativePayload,
-                                                         QStringLiteral("1.0.0"));
-        check("mirror: no base is invented",
-              rel.portableUrl == QStringLiteral("/download/p.zip") ? 1 : 0, 1);
-    }
+    check("accel: tolerates a trailing slash",
+          UpdateChecker::acceleratedUrl(QStringLiteral("https://gh-proxy.org/"),
+                                        QStringLiteral("https://api.github.com/x"))
+                  == QStringLiteral("https://gh-proxy.org/https://api.github.com/x") ? 1 : 0, 1);
+    check("accel: empty input is empty",
+          (UpdateChecker::acceleratedUrl(QString(), QStringLiteral("https://x/y")).isEmpty()
+           && UpdateChecker::acceleratedUrl(QStringLiteral("https://h"), QString()).isEmpty())
+              ? 1 : 0, 1);
+
+    // The hash gate. Two spellings of one digest agree; a missing digest never agrees
+    // with anything - otherwise a proxy that simply drops the field would switch
+    // verification off.
+    check("digest: prefix and case ignored",
+          UpdateChecker::digestsAgree(QStringLiteral("sha256:AABBCC"),
+                                      QStringLiteral("aabbcc")) ? 1 : 0, 1);
+    check("digest: different hashes disagree",
+          UpdateChecker::digestsAgree(QStringLiteral("aabbcc"),
+                                      QStringLiteral("aabbcd")) ? 0 : 1, 1);
+    check("digest: empty never agrees",
+          UpdateChecker::digestsAgree(QString(), QStringLiteral("aabbcc")) ? 0 : 1, 1);
+    check("digest: two empties never agree",
+          UpdateChecker::digestsAgree(QString(), QString()) ? 0 : 1, 1);
 
     const QByteArray ghWithDigest = QByteArrayLiteral(R"({
         "tag_name":"v1.5.0","body":"notes","html_url":"https://github.com/r/rel",
@@ -1506,12 +1571,18 @@ static int runUpdateSelfTest()
         check("notes: nothing when unparsed",
               UpdateChecker::shouldPrompt(unparsed, QString(), QStringLiteral("1.0.0")) ? 0 : 1, 1);
 
-        const QByteArray mirrorNotes = QByteArrayLiteral(R"({
-            "version":"9.9.9","tag":"v9.9.9","notes":"备用服务器更新日志"})");
-        const auto mirror3 = UpdateChecker::parseFallbackJson(mirrorNotes,
-                                                             QStringLiteral("1.0.0"));
-        check("notes: mirror notes kept",
-              mirror3.notes.contains(QStringLiteral("备用服务器更新日志")) ? 1 : 0, 1);
+        // The portable asset is picked out of the same payload: that is what the
+        // portable buttons hand to the browser.
+        const QByteArray withPortable = QByteArrayLiteral(R"({
+            "tag_name":"v9.9.9","body":"","html_url":"https://github.com/r/rel",
+            "assets":[{"name":"PDFBoard-9.9.9-setup.exe","size":10,
+            "browser_download_url":"https://x/setup.exe"},
+            {"name":"PDFBoard-9.9.9-portable.zip","size":20,
+            "browser_download_url":"https://x/portable.zip"}]})");
+        const auto portable = UpdateChecker::parseGitHubJson(withPortable,
+                                                            QStringLiteral("1.0.0"));
+        check("github: portable asset found",
+              portable.portableUrl == QStringLiteral("https://x/portable.zip") ? 1 : 0, 1);
     }
 
     // The update card is where the changelog stays readable after the dialog is
@@ -1832,6 +1903,10 @@ int main(int argc, char **argv)
     // repeated once the application object exists (the plugin reads it per event,
     // not at init).
     QCoreApplication::setAttribute(Qt::AA_CompressHighFrequencyEvents, false);
+    // School networks often only reach the internet through a proxy the OS is
+    // configured with. Qt does not use it unless asked, which would make every
+    // update check fail on exactly the machines that need the accelerator.
+    QNetworkProxyFactory::setUseSystemConfiguration(true);
     app.setApplicationName(QStringLiteral("PDFBoard"));
 
     // Qt's own dialogs (message boxes) should follow the system language.

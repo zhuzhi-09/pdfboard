@@ -14,7 +14,9 @@
 class QPdfDocument;
 class QPainter;
 class QTouchEvent;
+
 class QTabletEvent;
+class QWheelEvent;
 class QTimer;
 class InkToolbar;
 
@@ -82,6 +84,10 @@ public:
     void setFitWidth(bool on);
     void zoomIn();
     void zoomOut();
+    // Jump to an absolute zoom (1.0 == 适配宽度), keeping the viewport centre
+    // fixed. Used by the status-bar zoom control; pinch / Ctrl+wheel have their
+    // own anchor-at-the-pointer paths.
+    void setZoomLevel(qreal zoom);
     // Zoom by `factor`, keeping the content point under `viewportAnchor` fixed.
     void  zoomAt(qreal factor, const QPointF &viewportAnchor);
     qreal zoomFactor() const { return m_zoom; }
@@ -114,6 +120,9 @@ public:
     void  testTouchMove(const QPointF &viewportPos);
     void  testTouchEnd();
     bool  testTouchBelongsToOverlay(const QVector<QPointF> &viewportPts) const;
+    // Feed a real QWheelEvent to the viewport (headless), so the wheel rules are
+    // asserted on the production path instead of on a reimplementation.
+    void  testWheelAt(const QPointF &viewportPos, int angleDeltaY, bool ctrl);
     // On-screen (device px) thickness of a stored stroke at the current zoom.
     qreal testStrokeDeviceWidth(int page, int index) const;
     void  testZoomAt(const QPointF &viewportAnchor, qreal factor);
@@ -140,6 +149,9 @@ public:
 
 signals:
     void pageChanged(int page, int count);
+    // Emitted whenever the zoom settles at a new value (pinch, Ctrl+wheel,
+    // Ctrl+±, 适配宽度 or the status-bar zoom control). The status bar follows it.
+    void zoomChanged(qreal zoom);
     void renderMeasured(qint64 ms, QSize size);
     void inkChanged(int strokes);
     void toolChanged();
@@ -210,6 +222,11 @@ private:
     // something is redirected; a stroke already running keeps every sample, so
     // writing across the island works and the ink simply goes underneath it.
     bool touchBelongsToOverlay(const QVector<QPointF> &viewportPts) const;
+
+    // Wheel input: Ctrl+wheel zooms at the pointer; the plain wheel scrolls. A
+    // running (or just finished) touch gesture owns the wheel entirely - see the
+    // comment on the implementation for why that matters.
+    bool handleWheel(QWheelEvent *we);
     // Shared input entry points (used by both mouse and touch handlers).
     void beginInputAt(const QPointF &viewportPos);   // pen stroke / erase start
     void moveInputTo(const QPointF &viewportPos);
