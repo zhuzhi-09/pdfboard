@@ -67,7 +67,7 @@
 
 ```powershell
 package.cmd
-# 产物：dist\PDFBoard-1.5.2-setup.exe   （自带 Qt 运行库，约 17 MB）
+# 产物：dist\PDFBoard-1.5.3-setup.exe   （自带 Qt 运行库，约 17 MB）
 ```
 
 安装器做这些事（全部**当前用户**范围，不需要管理员）：
@@ -83,9 +83,9 @@ package.cmd
 **静默部署**（供教室集中管理客户端调用）：
 
 ```bat
-PDFBoard-1.5.2-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+PDFBoard-1.5.3-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 rem 不要桌面快捷方式：
-PDFBoard-1.5.2-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
+PDFBoard-1.5.3-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 ```
 
 > 卸载时若程序正在运行，静默模式下无法提示关闭，会残留被占用的文件（Windows 常见行为）。先退出程序再卸载即可完全清除。
@@ -99,7 +99,7 @@ PDFBoard-1.5.2-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 - 手动触发（Actions → nightly → Run workflow）
 
 产物发布到固定的 **`nightly` 预发布**（每次覆盖同名文件，不会越堆越多）：
-`PDFBoard-nightly-setup.exe` / `PDFBoard-nightly-portable.zip`，版本号形如 `1.5.2-nightly.<提交号>`。
+`PDFBoard-nightly-setup.exe` / `PDFBoard-nightly-portable.zip`，版本号形如 `1.5.3-nightly.<提交号>`。
 
 ### 稳定版发布
 
@@ -114,11 +114,11 @@ PDFBoard-1.5.2-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 ```powershell
 # 1. 改版本号：installer/pdfboard.iss 的 AppVersion + assets/app.rc 的 FILEVERSION/FileVersion
 # 2. 提交推送
-git commit -am "chore: 版本号 1.5.2"
+git commit -am "chore: 版本号 1.5.3"
 git push
 # 3. 打标签并推送，CI 自动出正式 Release
-git tag v1.5.2
-git push origin v1.5.2
+git tag v1.5.3
+git push origin v1.5.3
 ```
 
 ### 代码签名（可选）
@@ -144,7 +144,14 @@ build\pdfboard.exe --bench some.pdf
 ```
 
 记录内容：启动环境（Qt 版本、程序路径、屏幕与 DPI）、文档打开/关闭耗时与页数、**慢页渲染**、缓存淘汰、缩放稳定值、墨迹编辑与保存/导出结果、以及 Qt 的所有警告。
-**不记录**文档内容，也不记录批注坐标。日志默认位置：`%LOCALAPPDATA%\PDFBoard\logs\pdfboard.log`（超过 2 MB 自动轮转为 `.1`）。
+**不记录**文档内容，也不记录批注坐标。开启后还会**每秒写一行输入/帧率探针**：
+
+```
+[probe] 每秒：输入 63 事件（样本 63）| 重绘 58 帧 | 页面栅格化 2 | 缩放 1.00x
+```
+
+用来区分「书写不顺」到底是**采样不足**（输入事件数远低于面板标称刷新率）还是**帧率低**
+（重绘帧数低、页面栅格化次数高），而不是靠感觉猜。日志默认位置：`%LOCALAPPDATA%\PDFBoard\logs\pdfboard.log`（超过 2 MB 自动轮转为 `.1`）。
 
 `PDFBOARD_LOG` 只决定**本次启动默认是否开启**以及日志写到哪个文件，**不会锁住设置里的开关**：
 用它启动后依然可以在「设置 → 调试」里随手关掉（设置页会注明该变量正在生效）；下次再用同一个终端启动时它又会是开启的。

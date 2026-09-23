@@ -2,11 +2,13 @@
 #include "AppLog.h"
 #include "IconPainter.h"
 #include "InkToolbar.h"
+#include "InputProbe.h"
 #include "Theme.h"
 
 #include <QPdfDocument>
 #include <QPainter>
 #include <QPainterPath>
+#include <QDateTime>
 #include <QElapsedTimer>
 #include <QMouseEvent>
 #include <QNativeGestureEvent>
@@ -453,6 +455,7 @@ QImage PdfCanvas::imageFor(int page)
     QElapsedTimer t;
     t.start();
     QImage img = m_doc->render(page, target);
+    InputProbe::instance().addRender();
     img.setDevicePixelRatio(dpr);
     m_lastRenderMs = t.elapsed();
     m_lastRenderSize = img.size();
@@ -675,6 +678,16 @@ void PdfCanvas::paintEmptyState(QPainter &p) const
 
 void PdfCanvas::paintEvent(QPaintEvent *)
 {
+    InputProbe &probe = InputProbe::instance();
+    probe.addPaint();
+    probe.setZoom(m_zoom);
+    if (AppLog::isEnabled()) {
+        // Costs nothing while the opt-in log is off, which is the default.
+        const QString line = probe.take(QDateTime::currentMSecsSinceEpoch());
+        if (!line.isEmpty())
+            AppLog::write(QStringLiteral("probe"), line);
+    }
+
     QPainter p(viewport());
     paintBackdrop(p);
 
@@ -1580,6 +1593,8 @@ bool PdfCanvas::viewportEvent(QEvent *e)
 // the stroke (and briefly after it) - the same trick the touch path uses.
 bool PdfCanvas::handleTablet(QTabletEvent *te)
 {
+    InputProbe::instance().addEvent(1);
+
     if (m_tool == InkTool::Move)
         return false;                      // free move is a finger gesture
     if (!m_doc || m_geom.isEmpty())
@@ -1625,6 +1640,7 @@ bool PdfCanvas::handleTouch(QTouchEvent *te)
         if (p.state() != QEventPoint::Released)
             pts.append(p.position());
     }
+    InputProbe::instance().addEvent(pts.size());
 
     // A touch that lands on one of our floating overlays (toolbar, palette,
     // page grid) belongs to that widget, not to the page: never ink underneath

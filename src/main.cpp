@@ -4,6 +4,7 @@
 #include "AppSettings.h"
 #include "HomePage.h"
 #include "InkToolbar.h"
+#include "InputProbe.h"
 #include "MemProbe.h"
 #include "PdfCanvas.h"
 #include "Theme.h"
@@ -164,6 +165,28 @@ static int runInkSelfTest(const QString &path)
     // integration actually honoured the pre-init attribute.
     check("input: touch not compressed",
           QCoreApplication::testAttribute(Qt::AA_CompressHighFrequencyEvents) ? 1 : 0, 0);
+
+    // The classroom diagnosis rides on the probe's arithmetic, so lock it down:
+    // silent until the interval is up, then exactly one line with the counts,
+    // then the counters must be back to zero.
+    {
+        InputProbe probe;                  // local instance: no shared state
+        check("probe: starts the clock", probe.take(0).isEmpty() ? 1 : 0, 1);
+        probe.addEvent(3);
+        probe.addPaint();
+        probe.addRender();
+        probe.setZoom(2.5);
+        check("probe: quiet mid interval", probe.take(500).isEmpty() ? 1 : 0, 1);
+        const QString line = probe.take(1000);
+        check("probe: line after 1s", line.isEmpty() ? 0 : 1, 1);
+        check("probe: input counted", line.contains(QStringLiteral("输入 1 事件")) ? 1 : 0, 1);
+        check("probe: samples counted", line.contains(QStringLiteral("样本 3")) ? 1 : 0, 1);
+        check("probe: paint counted", line.contains(QStringLiteral("重绘 1 帧")) ? 1 : 0, 1);
+        check("probe: render counted", line.contains(QStringLiteral("栅格化 1")) ? 1 : 0, 1);
+        check("probe: zoom reported", line.contains(QStringLiteral("2.50x")) ? 1 : 0, 1);
+        check("probe: resets counts",
+              probe.take(2000).contains(QStringLiteral("输入 0 事件")) ? 1 : 0, 1);
+    }
 
     canvas.clearInk();
     check("clearInk", canvas.strokeCount(), 0);
