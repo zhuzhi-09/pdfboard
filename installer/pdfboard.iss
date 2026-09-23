@@ -1,15 +1,15 @@
 ; ---------------------------------------------------------------------------
-; 大屏 PDF 批注 (PDFBoard) - Inno Setup script
+; 落墨·大屏批注 (PDFBoard) - Inno Setup script
 ;
 ; 打包：tools\package.cmd（先生成 dist\stage，再调用本脚本）
 ; 产物：dist\PDFBoard-<版本>-setup.exe
 ;
 ; 静默安装（供教室集中管理客户端调用）：
-;   PDFBoard-1.7.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
-;   PDFBoard-1.7.0-setup.exe /VERYSILENT /NORESTART /TASKS=""      ; 不建桌面快捷方式
+;   PDFBoard-1.7.1-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+;   PDFBoard-1.7.1-setup.exe /VERYSILENT /NORESTART /TASKS=""      ; 不建桌面快捷方式
 ; ---------------------------------------------------------------------------
 
-#define AppName      "大屏 PDF 批注"
+#define AppName      "落墨·大屏批注"
 #define AppPublisher "PDFBoard"
 #define AppExe       "pdfboard.exe"
 #define StageDir     "..\dist\stage"
@@ -18,7 +18,7 @@
 ; passes /DAppVersion=... /DOutputBase=... so its artifacts do not collide with
 ; the tagged releases. Local builds keep the plain version below.
 #ifndef AppVersion
-  #define AppVersion "1.7.0"
+  #define AppVersion "1.7.1"
 #endif
 #ifndef OutputBase
   #define OutputBase "PDFBoard-" + AppVersion + "-setup"
@@ -72,7 +72,7 @@ Root: HKCU; Subkey: "Software\Classes\PDFBoard.Pdf\DefaultIcon"; ValueType: stri
 Root: HKCU; Subkey: "Software\Classes\PDFBoard.Pdf\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
 Root: HKCU; Subkey: "Software\Classes\.pdf\OpenWithProgids"; ValueType: none; ValueName: "PDFBoard.Pdf"; Flags: uninsdeletevalue
 ; --- .dpz 批注包关联 ---
-Root: HKCU; Subkey: "Software\Classes\PDFBoard.Dpz"; ValueType: string; ValueName: ""; ValueData: "PDF 批注包"; Flags: uninsdeletekey
+Root: HKCU; Subkey: "Software\Classes\PDFBoard.Dpz"; ValueType: string; ValueName: ""; ValueData: "落墨批注包"; Flags: uninsdeletekey
 Root: HKCU; Subkey: "Software\Classes\PDFBoard.Dpz\DefaultIcon"; ValueType: string; ValueName: ""; ValueData: "{app}\{#AppExe},0"
 Root: HKCU; Subkey: "Software\Classes\PDFBoard.Dpz\shell\open\command"; ValueType: string; ValueName: ""; ValueData: """{app}\{#AppExe}"" ""%1"""
 Root: HKCU; Subkey: "Software\Classes\.dpz\OpenWithProgids"; ValueType: none; ValueName: "PDFBoard.Dpz"; Flags: uninsdeletevalue

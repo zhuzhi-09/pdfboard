@@ -705,7 +705,7 @@ void PdfCanvas::paintEmptyState(QPainter &p) const
     p.setFont(titleFont);
     p.setPen(pal.text);
     p.drawText(QRectF(area.left(), y, area.width(), titleFm.height()),
-               Qt::AlignHCenter | Qt::AlignVCenter, QStringLiteral("大屏 PDF 批注"));
+               Qt::AlignHCenter | Qt::AlignVCenter, QStringLiteral("落墨·大屏批注"));
 
     y += titleFm.height() + Theme::Space2;
     p.setFont(bodyFont);

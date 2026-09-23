@@ -628,7 +628,7 @@ void SettingsPage::buildUi()
 
     col->addWidget(makeSectionBody(m_column, QStringLiteral(
         "把本程序注册为 PDF 的打开方式。Windows 不允许程序直接抢占默认应用，"
-        "注册后需要在「默认应用」中选择「大屏 PDF 批注」。")));
+        "注册后需要在「默认应用」中选择「落墨·大屏批注」。")));
 
     const Card assoc = makeCard(m_column);
     m_register = new QPushButton(QStringLiteral("设为 PDF 默认打开方式"), assoc.frame);
@@ -715,7 +715,7 @@ void SettingsPage::buildUi()
         titleCol->setContentsMargins(Theme::Space4, Theme::Space3, Theme::Space4, Theme::Space3);
         titleCol->setSpacing(Theme::Space1);
 
-        auto *appLabel = new QLabel(QStringLiteral("大屏 PDF 批注"), titleRow);
+        auto *appLabel = new QLabel(QStringLiteral("落墨·大屏批注"), titleRow);
         appLabel->setFont(Theme::chromeFont(titleRow->font()));
         titleCol->addWidget(appLabel);
 
@@ -1492,7 +1492,7 @@ void SettingsPage::onRegisterPdf()
         "已把本程序注册为 PDF、批注包 (.dpz) 以及 Word 文档 (.docx/.doc) 的打开方式。"));
     box.setInformativeText(QStringLiteral(
         "Windows 不允许程序直接抢占默认应用，需要你手动确认：\n"
-        "接下来打开「默认应用」设置，在 .pdf（以及 .dpz）里选择「大屏 PDF 批注」。\n\n"
+        "接下来打开「默认应用」设置，在 .pdf（以及 .dpz）里选择「落墨·大屏批注」。\n\n"
         "Word 文档只注册为「打开方式」候选，默认仍由 Word 打开；\n"
         "需要时可右键 .docx / .doc →「打开方式」选择本程序。\n\n"
         "确认后，双击任意 PDF 或 .dpz 批注包都会用本程序打开。"));

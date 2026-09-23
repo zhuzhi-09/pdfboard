@@ -5,8 +5,8 @@
 IDI_ICON1 ICON "pdfboard.ico"
 
 VS_VERSION_INFO VERSIONINFO
-FILEVERSION     1,7,0,0
-PRODUCTVERSION  1,7,0,0
+FILEVERSION     1,7,1,0
+PRODUCTVERSION  1,7,1,0
 FILEFLAGSMASK   VS_FFI_FILEFLAGSMASK
 FILEFLAGS       0
 FILEOS          VOS_NT_WINDOWS32
@@ -18,13 +18,13 @@ BEGIN
         BLOCK "080404B0"
         BEGIN
             VALUE "CompanyName",      "PDFBoard"
-            VALUE "FileDescription",  "大屏 PDF 批注"
-            VALUE "FileVersion",      "1.7.0.0"
+            VALUE "FileDescription",  "落墨·大屏批注"
+            VALUE "FileVersion",      "1.7.1.0"
             VALUE "InternalName",     "pdfboard"
             VALUE "LegalCopyright",   "MIT License"
             VALUE "OriginalFilename", "pdfboard.exe"
-            VALUE "ProductName",      "大屏 PDF 批注"
-            VALUE "ProductVersion",   "1.7.0.0"
+            VALUE "ProductName",      "落墨·大屏批注"
+            VALUE "ProductVersion",   "1.7.1.0"
         END
     END
     BLOCK "VarFileInfo"

@@ -213,7 +213,7 @@ MainWindow::MainWindow(QWidget *parent)
     // the light modes can put everything back exactly as Windows had it.
     baseAppPalette();
 
-    setWindowTitle(QStringLiteral("大屏 PDF 批注"));
+    setWindowTitle(QStringLiteral("落墨·大屏批注"));
     setAcceptDrops(true);           // a PDF dropped on the window opens a tab
 
     // The page area is a stack of canvases (one document each) and the tab
@@ -1357,18 +1357,18 @@ void MainWindow::refreshStatus()
 void MainWindow::updateTitle()
 {
     if (m_settingsVisible) {
-        setWindowTitle(QStringLiteral("设置 — 大屏 PDF 批注"));
+        setWindowTitle(QStringLiteral("设置 — 落墨·大屏批注"));
         return;
     }
     if (m_homeVisible) {
-        setWindowTitle(QStringLiteral("大屏 PDF 批注"));
+        setWindowTitle(QStringLiteral("落墨·大屏批注"));
         return;
     }
 
     const QString name = docTitle(m_active);
     setWindowTitle(name.isEmpty()
-        ? QStringLiteral("大屏 PDF 批注")
-        : QStringLiteral("%1 — 大屏 PDF 批注").arg(name));
+        ? QStringLiteral("落墨·大屏批注")
+        : QStringLiteral("%1 — 落墨·大屏批注").arg(name));
 }
 
 // The island's 「设置」 button and the tab strip's Settings chip both land here.

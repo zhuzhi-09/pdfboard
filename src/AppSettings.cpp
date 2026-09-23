@@ -111,7 +111,7 @@ bool AppSettings::registerPdfHandler(QString *errorOut)
 
     // The .dpz annotation bundle is ours alone: register it the same way so a
     // double-clicked bundle opens here too (same command line parsing).
-    cls.setValue(dpzProgId + QStringLiteral("/."), QStringLiteral("PDF 批注包"));
+    cls.setValue(dpzProgId + QStringLiteral("/."), QStringLiteral("落墨批注包"));
     cls.setValue(dpzProgId + QStringLiteral("/DefaultIcon/."), exeQuoted + QStringLiteral(",0"));
     cls.setValue(dpzProgId + QStringLiteral("/shell/open/command/."),
                  exeQuoted + QStringLiteral(" \"%1\""));
@@ -131,7 +131,7 @@ bool AppSettings::registerPdfHandler(QString *errorOut)
 
     QSettings caps(QStringLiteral("HKEY_CURRENT_USER\\Software\\PDFBoard\\Capabilities"),
                    QSettings::NativeFormat);
-    caps.setValue(QStringLiteral("ApplicationName"), QStringLiteral("大屏 PDF 批注"));
+    caps.setValue(QStringLiteral("ApplicationName"), QStringLiteral("落墨·大屏批注"));
     caps.setValue(QStringLiteral("ApplicationDescription"),
                   QStringLiteral("大屏 PDF 查看与批注工具"));
     caps.setValue(QStringLiteral("FileAssociations/.pdf"), progId);
