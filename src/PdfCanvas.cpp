@@ -494,7 +494,17 @@ QImage PdfCanvas::imageFor(int page)
 
     QElapsedTimer t;
     t.start();
+    // The crash we are chasing is a stack overflow while zooming, so measure the depth
+    // of the render path: if a page ever renders *inside* another page's render, that
+    // nesting is what eats the stack and the breadcrumb will say so in the crash log.
+    static int renderDepth = 0;
+    ++renderDepth;
+    if (renderDepth > 1)
+        CrashLog::breadcrumb("render-nested",
+                             QStringLiteral("渲染嵌套第 %1 层（第 %2 页）")
+                                 .arg(renderDepth).arg(page + 1));
     QImage img = m_doc->render(page, target);
+    --renderDepth;
     InputProbe::instance().addRender();
     // A coarse (busy-time) raster is drawn scaled up: tagging it with dpr/div keeps
     // its LOGICAL size identical to the page rect, so nothing shifts on screen.

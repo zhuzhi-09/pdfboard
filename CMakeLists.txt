@@ -67,5 +67,10 @@ set_target_properties(pdfboard PROPERTIES WIN32_EXECUTABLE TRUE)
 if (MSVC)
     # Chinese UI strings in sources need /utf-8
     target_compile_options(pdfboard PRIVATE /utf-8 /W4)
+    # PDFium's rasteriser recurses deeply while rendering a 4K page at 250 % DPI, and a
+    # stack overflow (0xC00000FD) is what a classroom VM was crashing with when the
+    # zoom was dragged. The default 1 MB main-thread stack can be exhausted inside one
+    # such render; 8 MB is only reserved address space, committed on demand.
+    target_link_options(pdfboard PRIVATE "/STACK:8388608")
 endif()
 
