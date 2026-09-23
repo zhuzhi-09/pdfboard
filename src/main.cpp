@@ -194,6 +194,15 @@ static int runSmokeSelfTest(const QString &path)
                                      Qt::LeftButton, Qt::NoModifier);
                     QApplication::sendEvent(slider, &move);
                     QCoreApplication::processEvents();
+                    // Mid-drag: the canvas reporting a far-away zoom must NOT move the
+                    // handle. That write-back is the feedback loop that overflowed the
+                    // stack (0xC00000FD); with the fix the slider stays the master.
+                    if (step == 30) {
+                        const int held = slider->value();
+                        bar->setZoom(ZoomBarMath::kMinZoom);
+                        check("smoke: drag not overridden by canvas",
+                              slider->value() == held ? 1 : 0, 1);
+                    }
                 }
                 const int endX = (sweep % 2 == 0) ? slider->width() - hw / 2 : hw / 2;
                 QMouseEvent release(QEvent::MouseButtonRelease, QPointF(endX, y),
@@ -225,6 +234,29 @@ static int runSmokeSelfTest(const QString &path)
                     : QStringLiteral("[selftest] %1 CHECK(S) FAILED").arg(failed));
     return failed == 0 ? 0 : 3;
 }
+
+// Deliberately recurses until the stack overflows, so the crash reporter's
+// stack-overflow path (reporting from a fresh thread) can actually be verified.
+// C4717 is suppressed because overflowing the stack is the entire point here.
+#pragma warning(suppress : 4717)
+static volatile int g_crashSink = 0;
+#pragma warning(push)
+#pragma warning(disable : 4717)   // intentional: the point IS to overflow the stack
+#pragma optimize("", off)         // ...and it only overflows if the code is naive:
+__declspec(noinline) static void crashTestRecursion(int depth)
+{
+    // Every byte of the frame is written and consumed, and no optimisation is allowed
+    // here: otherwise the compiler collapses the recursion into a loop with a tiny
+    // frame (it did exactly that, which made this test spin forever instead of
+    // overflowing the stack).
+    volatile char padding[8192];
+    for (int i = 0; i < 8192; ++i)
+        padding[i] = char(depth + i);
+    g_crashSink += padding[depth & 8191];
+    crashTestRecursion(depth + 1);
+}
+#pragma optimize("", on)
+#pragma warning(pop)
 
 static int runBench(const QString &path)
 {
@@ -2169,11 +2201,18 @@ int main(int argc, char **argv)
     // then Windows' own error handling takes over and the process dies with 0xC0000005.
     if (crashIdx >= 0) {
         attachConsoleForCli();
-        CrashLog::breadcrumb("crash-test", QStringLiteral("故意触发空指针，用于验证崩溃记录"));
-        out(QStringLiteral("[selftest] crash test: 即将故意崩溃，稍后检查 %1")
-                .arg(CrashLog::directory()));
-        volatile int *nullPointer = nullptr;
-        *nullPointer = 1;                 // boom
+        const QString what = (crashIdx + 1 < args.size()) ? args.at(crashIdx + 1)
+                                                          : QStringLiteral("stack");
+        CrashLog::breadcrumb("crash-test", QStringLiteral("故意触发：%1").arg(what));
+        CrashLog::setExitAfterReport(true);
+        out(QStringLiteral("[selftest] crash test（%1）：即将故意崩溃，稍后检查 %2")
+                .arg(what, CrashLog::directory()));
+        if (what == QStringLiteral("av")) {
+            volatile int *nullPointer = nullptr;
+            *nullPointer = 1;             // access violation: 0xC0000005
+        } else {
+            crashTestRecursion(0);        // stack overflow: 0xC00000FD
+        }
         return 0;                         // not reached
     }
 

@@ -130,6 +130,10 @@ private:
     QLabel *m_inkLabel    = nullptr;
     QLabel *m_memLabel    = nullptr;
     ZoomBar *m_zoomBar    = nullptr;   // Word-like zoom control, document pages only
+    // Depth of the zoom signal chain (bar -> canvas -> bar). A value above one means
+    // something is feeding back; the cap turns that into a logged no-op instead of a
+    // stack overflow, and writes a breadcrumb so a crash report names the culprit.
+    int      m_zoomWiring = 0;
 
     UpdateChecker::Client *m_updateClient = nullptr;
     QString                m_updateAnnouncedVersion;  // per session

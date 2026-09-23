@@ -11,6 +11,7 @@
 #include <cstdio>
 #include <cstring>
 #include <exception>
+#include <malloc.h>            // _resetstkoflw
 
 namespace {
 
@@ -28,6 +29,7 @@ struct Breadcrumb {
 Breadcrumb g_crumbs[kBreadcrumbSlots];
 volatile LONG g_slot = 0;          // monotonically increasing, slot = g_slot % slots
 volatile LONG g_used = 0;          // how many were ever written (capped for reporting)
+bool g_exitAfterReport = false;    // test mode: terminate instead of showing a dialog
 wchar_t g_dir[MAX_PATH] = {0};     // resolved at install() time: the handler may not
 bool    g_installed = false;       // touch QStandardPaths
 
@@ -142,8 +144,25 @@ LONG WINAPI unhandledFilter(EXCEPTION_POINTERS *info)
     const void *address = (info && info->ExceptionRecord)
                               ? info->ExceptionRecord->ExceptionAddress
                               : nullptr;
+
+    if (code == EXCEPTION_STACK_OVERFLOW) {
+        // The filter runs on the stack that just overflowed. _resetstkoflw() restores
+        // the guard page so the handler has usable stack again - without it the first
+        // call that needs a little stack (GetModuleHandleExW, MiniDumpWriteDump) fails
+        // and the report stops after two lines, which is exactly how a stack-overflow
+        // report arrives truncated. A fresh thread did NOT work here (the process is
+        // too broken by then), so the guard page is what it has to be.
+        ::_resetstkoflw();
+    }
+
     writeReport(code, address, info);
-    // Let Windows show its own dialog (and its WER entry) afterwards: we only add
+
+    if (g_exitAfterReport) {
+        // Only the deliberate crash test sets this, so verifying the reporter does not
+        // sit in front of a Windows error dialog.
+        ::TerminateProcess(::GetCurrentProcess(), 4);
+    }
+    // Otherwise let Windows show its own dialog (and its WER entry): we only add
     // evidence, we do not take over.
     return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -188,6 +207,10 @@ void install()
     ::SetUnhandledExceptionFilter(unhandledFilter);
     std::set_terminate(terminateHandler);
     g_previousHandler = qInstallMessageHandler(messageHandler);
+    // Windows keeps a small reserve for the exception handler; ask for more so the
+    // filter can run at all after a stack overflow.
+    ULONG guarantee = 64 * 1024;
+    ::SetThreadStackGuarantee(&guarantee);
     // Crash reports must survive a crash even when the diagnostics log is off.
     breadcrumb("crashlog", QStringLiteral("崩溃记录已启用：%1").arg(native));
 }
@@ -210,6 +233,13 @@ QString directory()
     if (g_dir[0])
         return QString::fromWCharArray(g_dir);
     return QString();
+}
+
+// Test mode: the deliberate crash test terminates right after the report is written,
+// so verifying the reporter does not block on a Windows error dialog.
+void setExitAfterReport(bool on)
+{
+    g_exitAfterReport = on;
 }
 
 int testBreadcrumbCount()

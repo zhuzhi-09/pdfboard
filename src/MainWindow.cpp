@@ -358,13 +358,20 @@ MainWindow::MainWindow(QWidget *parent)
     m_memLabel->setFont(statusFont);
     statusBar()->setStyleSheet(statusSheet());
     statusBar()->setSizeGripEnabled(false);
+    // Every left-hand status element is pinned to its widest possible text. Those
+    // values change all the time (页码 3/4, 渲染 71 ms, 笔画 12345, 内存 177.7 MB) and
+    // any label growing used to shove everything to its right - including the zoom
+    // slider - sideways. Fixed widths also stop the group from jittering internally.
+    const auto pinWidth = [&statusFont](QLabel *label, const QString &widest) {
+        label->setFixedWidth(QFontMetrics(statusFont).horizontalAdvance(widest));
+    };
+    pinWidth(m_pageLabel,   QStringLiteral("页码 9999/9999"));
+    pinWidth(m_renderLabel, QStringLiteral("渲染 9999 ms (99999×99999)"));
+    pinWidth(m_inkLabel,    QStringLiteral("笔画 99999"));
+    pinWidth(m_memLabel,    QStringLiteral("内存 WS 9999.9 MB / Private 9999.9 MB"));
     statusBar()->addWidget(m_pageLabel);
     statusBar()->addWidget(m_renderLabel);
     statusBar()->addWidget(m_inkLabel);
-    // 内存信息归到左侧：它右边的滑动条必须钉住不动，而这个标签的文本宽度每秒
-    // 都在变（177.7 MB → 106.9 MB）。固定宽度也让左侧那一组不再互相推动。
-    m_memLabel->setFixedWidth(QFontMetrics(statusFont)
-                                  .horizontalAdvance(QStringLiteral("内存 WS 9999.9 MB / Private 9999.9 MB")));
     statusBar()->addWidget(m_memLabel);
 
     // Word-like zoom control at the far right of the status bar. It never invents a
@@ -373,8 +380,20 @@ MainWindow::MainWindow(QWidget *parent)
     // pages by updateZoomBar().
     m_zoomBar = new ZoomBar(statusBar());
     connect(m_zoomBar, &ZoomBar::zoomRequested, this, [this](qreal zoom) {
-        if (m_active)
-            m_active->setZoomLevel(zoom);
+        // A feedback loop through this connection is what overflowed the stack
+        // (0xC00000FD) when the slider was dragged quickly. ZoomBar no longer writes
+        // back while the handle is held, and this cap makes any remaining loop a
+        // logged no-op instead of a crash.
+        if (!m_active)
+            return;
+        if (m_zoomWiring >= 4) {
+            CrashLog::breadcrumb("zoom-reentry",
+                                 QStringLiteral("缩放信号已嵌套 %1 层，本次忽略").arg(m_zoomWiring));
+            return;
+        }
+        ++m_zoomWiring;
+        m_active->setZoomLevel(zoom);
+        --m_zoomWiring;
     });
     connect(m_zoomBar, &ZoomBar::fitWidthRequested, this, [this] {
         if (m_active)

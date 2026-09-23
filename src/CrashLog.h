@@ -35,4 +35,8 @@ QString directory();
 // Test hook: how many breadcrumbs are currently stored (never more than the ring).
 int testBreadcrumbCount();
 
+// Test mode: terminate right after the report is written. Set only by the deliberate
+// crash test - a real crash should still show Windows' own dialog.
+void setExitAfterReport(bool on = true);
+
 }   // namespace CrashLog

@@ -176,13 +176,20 @@ ZoomBar::ZoomBar(QWidget *parent)
 void ZoomBar::setZoom(qreal zoom)
 {
     m_zoom = qBound(ZoomBarMath::kMinZoom, zoom, ZoomBarMath::kMaxZoom);
-
-    // Silent write - emitting here would bounce back from canvas zoomChanged.
     const int value = ZoomBarMath::sliderForZoom(m_zoom);
-    m_syncing = true;
-    m_slider->setValue(value);
-    m_syncing = false;
-    m_reported = value;   // the canvas already knows this zoom
+
+    // While the handle is HELD, the slider is the source of truth. Writing back to it
+    // here fights the drag in two ways: the handle gets yanked out from under the
+    // finger, and - because a programmatic setValue during a drag re-emits
+    // sliderMoved - the canvas -> bar -> slider -> canvas loop can nest one level
+    // deeper on every mouse move. That is a stack overflow (0xC00000FD), and it only
+    // shows up on a slow machine where more moves arrive mid-flight.
+    if (!m_slider->isSliderDown()) {
+        m_syncing = true;                  // silent write: emitting here would bounce
+        m_slider->setValue(value);
+        m_syncing = false;
+        m_reported = value;                // the canvas already knows this zoom
+    }
     syncLabel();
 }
 
