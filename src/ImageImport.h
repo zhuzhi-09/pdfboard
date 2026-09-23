@@ -3,6 +3,7 @@
 #include <QSize>
 #include <QSizeF>
 #include <QString>
+#include <QStringList>
 
 // Import an image file as a document.
 //
@@ -16,6 +17,10 @@ namespace ImageImport {
 
 // True for formats we can decode and offer in the open dialog.
 bool isImage(const QString &path);
+
+// The accepted extensions, in the order they are offered. Single source of truth for
+// `isImage`, the open dialog and the self test's "can Qt really decode this?" check.
+QStringList extensions();
 
 // Name-filter fragment for the open dialog, e.g.
 // "图片 (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff)".

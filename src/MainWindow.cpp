@@ -580,9 +580,14 @@ void MainWindow::applyTheme()
     // fullscreen there is no caption, so the call would be a no-op.
     if (!isFullScreen()) {
         const BOOL dark = (Theme::resolvedMode() == Theme::Mode::Dark) ? TRUE : FALSE;
-        DwmSetWindowAttribute(reinterpret_cast<HWND>(winId()),
-                              static_cast<DWORD>(DWMWA_USE_IMMERSIVE_DARK_MODE),
-                              &dark, sizeof(dark));
+        const HWND handle = reinterpret_cast<HWND>(winId());
+        // The attribute number changed across Win10 builds (19 on 1809-1909, 20 on
+        // 20H1+) and an unknown attribute just fails: try the modern one first and
+        // fall back, so the title bar follows the theme on every supported Windows.
+        if (FAILED(DwmSetWindowAttribute(handle,
+                                         static_cast<DWORD>(DWMWA_USE_IMMERSIVE_DARK_MODE),
+                                         &dark, sizeof(dark))))
+            DwmSetWindowAttribute(handle, 19, &dark, sizeof(dark));
     }
 
     update();

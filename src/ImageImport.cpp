@@ -40,19 +40,33 @@ QByteArray pdfNumber(qreal v)
 
 namespace ImageImport {
 
+// The formats we accept. This is the single source of truth: the open dialog and the
+// self test both read it, and the test additionally proves that Qt can DECODE every
+// one of them in this build - otherwise we would advertise formats we cannot open.
+// (webp and tiff are deliberately absent: Qt's binary package does not ship those
+// image plugins, so a .webp would have failed to open on a classroom machine even
+// though the file dialog offered it.)
+static const QStringList kExtensions{
+    QStringLiteral("png"), QStringLiteral("jpg"), QStringLiteral("jpeg"),
+    QStringLiteral("bmp"), QStringLiteral("gif"), QStringLiteral("ico"),
+};
+
 bool isImage(const QString &path)
 {
-    static const QSet<QString> kExtensions{
-        QStringLiteral("png"),  QStringLiteral("jpg"),  QStringLiteral("jpeg"),
-        QStringLiteral("bmp"),  QStringLiteral("gif"),  QStringLiteral("webp"),
-        QStringLiteral("tif"),  QStringLiteral("tiff"),
-    };
     return kExtensions.contains(QFileInfo(path).suffix().toLower());
+}
+
+QStringList extensions()
+{
+    return kExtensions;
 }
 
 QString dialogFilter()
 {
-    return QStringLiteral("图片 (*.png *.jpg *.jpeg *.bmp *.gif *.webp *.tif *.tiff)");
+    QStringList patterns;
+    for (const QString &ext : kExtensions)
+        patterns << QStringLiteral("*.") + ext;
+    return QStringLiteral("图片 (%1)").arg(patterns.join(QLatin1Char(' ')));
 }
 
 QSizeF pageSizePtFor(const QSize &pixels)

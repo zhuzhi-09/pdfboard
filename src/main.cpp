@@ -28,6 +28,8 @@
 #include <QNetworkProxyFactory>
 #include <QSlider>
 #include <QMouseEvent>
+#include <QImageReader>
+#include <QSslSocket>
 #include <QStyle>
 #include <QThread>
 #include <QHash>
@@ -1834,15 +1836,39 @@ static int runImageSelfTest()
     };
 
     // --- extension filter ---------------------------------------------------
+    // Every extension we advertise must be decodable by THIS build: the import feature
+    // claims to open whatever the dialog offers, so the claim and the capability are
+    // checked against each other instead of being trusted side by side. webp/tiff are
+    // rejected on purpose - Qt's binary package ships no such image plugin, and
+    // advertising them meant offering files the app then failed to open.
+    {
+        const QStringList claimed = ImageImport::extensions();
+        check("image: claims png", claimed.contains(QStringLiteral("png")) ? 1 : 0, 1);
+        const QList<QByteArray> decodable = QImageReader::supportedImageFormats();
+        bool allDecodable = true;
+        for (const QString &ext : claimed)
+            allDecodable = allDecodable && decodable.contains(ext.toUtf8());
+        check("image: every claimed format decodable", allDecodable ? 1 : 0, 1);
+        const QString filter = ImageImport::dialogFilter();
+        bool filterComplete = true;
+        for (const QString &ext : claimed)
+            filterComplete = filterComplete && filter.contains(QStringLiteral("*.") + ext);
+        check("image: dialog filter matches the list", filterComplete ? 1 : 0, 1);
+        check("image: webp not advertised",
+              ImageImport::isImage(QStringLiteral("C:/a/b.webp")) ? 0 : 1, 1);
+        check("image: tiff not advertised",
+              ImageImport::isImage(QStringLiteral("C:/a/b.tiff")) ? 0 : 1, 1);
+        // The updater needs an HTTPS stack; a missing TLS backend would only show up as
+        // "update check failed" on a classroom machine.
+        check("env: TLS backend available", QSslSocket::supportsSsl() ? 1 : 0, 1);
+    }
     check("isImage: .png", int(ImageImport::isImage(QStringLiteral("C:/a/b.png"))), 1);
     check("isImage: .PNG", int(ImageImport::isImage(QStringLiteral("C:/a/b.PNG"))), 1);
     check("isImage: .jpg", int(ImageImport::isImage(QStringLiteral("C:/a/b.jpg"))), 1);
     check("isImage: .jpeg", int(ImageImport::isImage(QStringLiteral("C:/a/b.jpeg"))), 1);
     check("isImage: .bmp", int(ImageImport::isImage(QStringLiteral("C:/a/b.bmp"))), 1);
     check("isImage: .gif", int(ImageImport::isImage(QStringLiteral("C:/a/b.gif"))), 1);
-    check("isImage: .webp", int(ImageImport::isImage(QStringLiteral("C:/a/b.webp"))), 1);
-    check("isImage: .tif", int(ImageImport::isImage(QStringLiteral("C:/a/b.tif"))), 1);
-    check("isImage: .tiff", int(ImageImport::isImage(QStringLiteral("C:/a/b.tiff"))), 1);
+    check("isImage: .ico", int(ImageImport::isImage(QStringLiteral("C:/a/b.ico"))), 1);
     check("isImage: .pdf rejected", int(ImageImport::isImage(QStringLiteral("C:/a/b.pdf"))), 0);
     check("isImage: .dpz rejected", int(ImageImport::isImage(QStringLiteral("C:/a/b.dpz"))), 0);
     check("isImage: .docx rejected", int(ImageImport::isImage(QStringLiteral("C:/a/b.docx"))), 0);
