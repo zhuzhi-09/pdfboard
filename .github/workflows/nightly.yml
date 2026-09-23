@@ -166,7 +166,7 @@ jobs:
           New-Item -ItemType Directory -Force dist/portable | Out-Null
           Copy-Item dist/stage/* dist/portable -Recurse -Force
           $note = @"
-          大屏 PDF 批注 — 便携版（nightly $ver）
+          落墨·大屏批注 — 便携版（nightly $ver）
 
           1) 解压到任意文件夹，直接运行 pdfboard.exe，无需安装。
           2) 需要 Windows 10/11 64 位；Qt 运行库已随包附带。
