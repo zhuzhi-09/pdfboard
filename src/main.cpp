@@ -158,6 +158,13 @@ static int runInkSelfTest(const QString &path)
                 .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
     };
 
+    // The touch pipeline must stay uncompressed (see the note in main()): Qt's
+    // default merges several panel samples into one event per frame, which turns
+    // a fast stroke into long straight chords. This also proves the platform
+    // integration actually honoured the pre-init attribute.
+    check("input: touch not compressed",
+          QCoreApplication::testAttribute(Qt::AA_CompressHighFrequencyEvents) ? 1 : 0, 0);
+
     canvas.clearInk();
     check("clearInk", canvas.strokeCount(), 0);
 
@@ -1435,7 +1442,22 @@ static void serveLaterLaunches(MainWindow &w)
 
 int main(int argc, char **argv)
 {
+    // Ink quality lever (must be set BEFORE QApplication is built): on Windows Qt
+    // compresses touch updates into one event per frame by default, silently
+    // dropping most of the panel's samples. With them dropped, a fast stroke
+    // between two frames becomes a long straight chord - exactly the "sampling is
+    // too sparse" complaint. Qt 6.8 has no way to recover the discarded samples
+    // (QEventPoint::rawScreenPositions() does not exist yet), so the compression
+    // itself has to go. The per-event work here is cheap (append + densify).
+    QCoreApplication::setAttribute(Qt::AA_CompressHighFrequencyEvents, false);
+
     QApplication app(argc, argv);
+
+    // Qt's Windows integration turns this attribute back on while the platform
+    // integration initialises, overriding the request made above, so it has to be
+    // repeated once the application object exists (the plugin reads it per event,
+    // not at init).
+    QCoreApplication::setAttribute(Qt::AA_CompressHighFrequencyEvents, false);
     app.setApplicationName(QStringLiteral("PDFBoard"));
 
     // Qt's own dialogs (message boxes) should follow the system language.
