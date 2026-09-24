@@ -1969,8 +1969,9 @@ static int runUpdateSelfTest()
 // network and no external file. Locks the extension filter, the points-per-pixel
 // rule, the PNG naming rule, the lossless image -> PDF -> PNG 1:1 round trip and
 // the oversize downscale, then deletes everything it wrote.
-// Defined next to main(); the image self test sweeps the cache too (see kTempKeepDays).
+// Defined next to main(); the image self test probes an image's imports too.
 static void sweepTempCache();
+static QString probeMissingImport(const QString &dllPath);
 
 static int runImageSelfTest()
 {
@@ -2112,6 +2113,13 @@ static int runImageSelfTest()
             head = QString::fromUtf8(sf.read(400));
         check("startup diagnostics name the OS build",
               int(head.contains(QStringLiteral("build"))) , 1);
+        // The import probe must be able to parse a real PE image and resolve real system
+        // imports: run it on our own exe, where a miss would mean either a parsing bug or a
+        // genuinely missing dependency on this machine.
+        const QString selfProbe =
+            probeMissingImport(QCoreApplication::applicationDirPath()
+                               + QStringLiteral("/pdfboard.exe"));
+        check("import probe: nothing missing in our own exe", int(selfProbe.isEmpty()), 1);
     }
 
     // Temp-cache housekeeping: stale working copies go, fresh ones stay. This is what keeps a
@@ -2560,6 +2568,110 @@ static void serveLaterLaunches(MainWindow &w)
     });
 }
 
+// --- import probe --------------------------------------------------------------------
+// "Cannot load library …qwindows.dll: 找不到指定的程序" says a *procedure* is missing but never
+// which one - and on a machine nobody can debug that is the only question that matters. So the
+// plugin is read straight off disk, its import table walked, and every function it wants from
+// the system asked for with GetProcAddress. Our own Qt/CRT/UCRT imports are skipped: the app
+// already loads those, so they cannot be what is missing. The first miss is written to
+// startup.log. (LoadLibraryA / GetProcAddress / GetModuleFileNameW come in through the Qt
+// headers already, so nothing is declared by hand here.)
+static QString executableDirectory()
+{
+    wchar_t path[1024] = {0};
+    const unsigned long n = GetModuleFileNameW(nullptr, path, 1024);
+    if (n == 0 || n >= 1024)
+        return QString();
+    QString s = QString::fromWCharArray(path, int(n));
+    const int slash = s.lastIndexOf(QLatin1Char('\\'));
+    return slash > 0 ? s.left(slash) : QString();
+}
+
+static QString probeMissingImport(const QString &dllPath)
+{
+    QFile file(dllPath);
+    if (!file.open(QIODevice::ReadOnly))
+        return QStringLiteral("读不到 %1").arg(dllPath);
+    const QByteArray d = file.readAll();
+    if (d.size() < 0x200)
+        return QStringLiteral("%1 太小，不像 PE 映像").arg(dllPath);
+    const quint8 *p = reinterpret_cast<const quint8 *>(d.constData());
+    const quint32 peOff = *reinterpret_cast<const quint32 *>(p + 0x3C);
+    if (peOff + 0x120 > quint32(d.size()) || ::memcmp(p + peOff, "PE\0\0", 4) != 0)
+        return QStringLiteral("%1 不是 PE 映像").arg(dllPath);
+    const quint32 optOff = peOff + 24;
+    if (*reinterpret_cast<const quint16 *>(p + optOff) != 0x20B)   // PE32+ only
+        return QStringLiteral("%1 不是 PE32+（64 位）映像").arg(dllPath);
+    const quint16 nsec = *reinterpret_cast<const quint16 *>(p + peOff + 6);
+    const quint16 optSize = *reinterpret_cast<const quint16 *>(p + peOff + 20);
+    const quint8 *sec = p + optOff + optSize;
+
+    const auto rvaToPtr = [&](quint32 rva) -> const quint8 * {
+        const quint8 *s = sec;
+        for (int i = 0; i < nsec; ++i, s += 40) {
+            const quint32 vsize = *reinterpret_cast<const quint32 *>(s + 8);
+            const quint32 vaddr = *reinterpret_cast<const quint32 *>(s + 12);
+            const quint32 rawsize = *reinterpret_cast<const quint32 *>(s + 16);
+            const quint32 rawptr = *reinterpret_cast<const quint32 *>(s + 20);
+            const quint32 span = qMin(vsize, rawsize);
+            if (rva >= vaddr && rva < vaddr + span)
+                return p + rawptr + (rva - vaddr);
+        }
+        return nullptr;
+    };
+
+    const quint32 ddOff = optOff + 112;
+    const quint32 impRva = *reinterpret_cast<const quint32 *>(p + ddOff + 8);  // [1]
+    if (!impRva)
+        return QStringLiteral("%1 没有导入表（这不是一个正常链接出来的映像？）").arg(dllPath);
+    const quint8 *desc = rvaToPtr(impRva);
+    for (int n = 0; desc && n < 128; ++n, desc += 20) {
+        const quint32 oft = *reinterpret_cast<const quint32 *>(desc + 0);
+        const quint32 nameRva = *reinterpret_cast<const quint32 *>(desc + 12);
+        const quint32 ft = *reinterpret_cast<const quint32 *>(desc + 16);
+        if (!oft && !nameRva && !ft)
+            break;
+        const quint8 *namePtr = nameRva ? rvaToPtr(nameRva) : nullptr;
+        if (!namePtr)
+            continue;
+        const QString module = QString::fromLatin1(reinterpret_cast<const char *>(namePtr));
+        const QString lower = module.toLower();
+        // Ours and known to load: the app itself pulls these in before any plugin.
+        if (lower.startsWith(QStringLiteral("qt6"))
+            || lower.startsWith(QStringLiteral("msvcp"))
+            || lower.startsWith(QStringLiteral("vcruntime"))
+            || lower.startsWith(QStringLiteral("api-ms-win-crt")))
+            continue;
+        const HMODULE mod = LoadLibraryA(module.toLatin1().constData());
+        if (!mod) {
+            return QStringLiteral("缺模块 %1（LoadLibrary 失败，错误码 %2）")
+                .arg(module).arg(GetLastError());
+        }
+        const quint8 *thunk = rvaToPtr(oft ? oft : ft);
+        for (int i = 0; thunk && i < 8192; ++i) {
+            const quint64 entry = *reinterpret_cast<const quint64 *>(thunk + i * 8);
+            if (!entry)
+                break;
+            if (entry & (quint64(1) << 63))
+                continue;                              // imported by ordinal
+            const quint8 *hint = rvaToPtr(quint32(entry) + 2);
+            if (!hint)
+                continue;
+            const char *fn = reinterpret_cast<const char *>(hint);
+            if (!GetProcAddress(mod, fn)) {
+                return QStringLiteral("%1 里缺导出函数 %2（本机没有它）")
+                    .arg(module, QString::fromLatin1(fn));
+            }
+        }
+    }
+    return QString();
+}
+
+// Windows 10 1809 (build 17763) is the floor Qt 6.8 supports, and an older build fails with a
+// message no teacher can act on ("no Qt platform plugin could be initialized"). MessageBoxW
+// comes in through the Qt headers already, so nothing is declared by hand here.
+static bool g_windowsTooOld = false;
+
 // Deployment diagnostics. If Qt cannot even initialise its platform plugin the process aborts
 // before any of our logging exists: on a teacher's PC that shows up as one modal error and
 // leaves us with nothing to look at (real report: "no Qt platform plugin could be
@@ -2588,6 +2700,36 @@ static void installStartupDiagnostics()
                        .arg(os.minorVersion())
                        .arg(os.microVersion())
                        .toUtf8());
+        // The probe runs here, BEFORE QApplication: the platform plugin is initialised inside its
+        // constructor and a failure aborts the process, so this is the last moment at which we
+        // can say which entry point the plugin wants and this machine does not have. Empty on a
+        // healthy machine, so nothing is written then.
+        // Only meaningful in the shipped layout, where the plugin sits next to the exe. A dev
+        // build (or any layout without platforms/) would otherwise log a scary "读不到".
+        const QString pluginPath =
+            executableDirectory() + QStringLiteral("/platforms/qwindows.dll");
+        const QString missing =
+            QFile::exists(pluginPath) ? probeMissingImport(pluginPath) : QString();
+        if (!missing.isEmpty()) {
+            file.write(QStringLiteral("缺的到底是什么：%1\n").arg(missing).toUtf8());
+            file.flush();
+        }
+        // Qt 6.8 needs Windows 10 1809; say so in Chinese, on screen and in the log, instead of
+        // letting the English plugin error be the only thing the teacher sees.
+        // Anything below Windows 10 1809 - including Windows 7/8.1, which report major < 10.
+        const bool tooOld = os.type() == QOperatingSystemVersion::Windows
+                            && (os.majorVersion() < 10
+                                || (os.majorVersion() == 10 && os.microVersion() < 17763));
+        if (tooOld) {
+            g_windowsTooOld = true;
+            file.write(QStringLiteral("结果：系统版本过低（Windows %1.%2，内部版本 %3），"
+                                      "本程序需要 1809（内部版本 17763）或更高。\n")
+                           .arg(os.majorVersion())
+                           .arg(os.minorVersion())
+                           .arg(os.microVersion())
+                           .toUtf8());
+            file.flush();
+        }
         file.flush();
     }
 
@@ -2641,6 +2783,20 @@ int main(int argc, char **argv)
     // Must be first: the platform plugin is initialised inside the QApplication constructor
     // below, and a failure there aborts the process before anything else can log.
     installStartupDiagnostics();
+
+    // Too old to run at all: say it in Chinese, with what to ask the administrator for, rather
+    // than letting Qt's English plugin error be the last word (see docs 2.61).
+    if (g_windowsTooOld) {
+        const QString text =
+            QStringLiteral("这台电脑的 Windows 版本较旧，本程序无法运行。\n\n"
+                           "「落墨·大屏批注」需要 Windows 10 1809（内部版本 17763）"
+                           "或更高版本。\n"
+                           "请让管理员升级系统后再打开本程序。\n\n"
+                           "（诊断信息已写入 %LOCALAPPDATA%\\PDFBoard\\logs\\startup.log）");
+        MessageBoxW(nullptr, reinterpret_cast<const wchar_t *>(text.utf16()),
+                    L"落墨·大屏批注", 0x00000010u /* MB_ICONERROR */);
+        return 2;
+    }
     // Ink quality lever (must be set BEFORE QApplication is built): on Windows Qt
     // compresses touch updates into one event per frame by default, silently
     // dropping most of the panel's samples. With them dropped, a fast stroke
