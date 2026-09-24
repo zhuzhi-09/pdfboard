@@ -2102,6 +2102,16 @@ bool PdfCanvas::handleTablet(QTabletEvent *te)
     m_strokeFromTouch = false;       // a stylus: taps are dots (see endInput)
     InputProbe::instance().addEvent(1);
 
+    // Probe: pointerType() == Eraser means the pen is being used with its ERASER end - we
+    // never looked at it, so today that end simply draws ink. The log also carries pressure,
+    // which is the other candidate for an "adaptive" eraser size.
+    eraseLog(QStringLiteral("tablet type=%1 pointer=%2 pressure=%3 pos=%4,%5")
+                 .arg(int(te->type()))
+                 .arg(int(te->pointerType()))
+                 .arg(te->pressure(), 0, 'f', 2)
+                 .arg(int(te->position().x()))
+                 .arg(int(te->position().y())));
+
     if (m_tool == InkTool::Move)
         return false;                      // free move is a finger gesture
     if (!m_doc || m_geom.isEmpty())
@@ -2292,12 +2302,22 @@ bool PdfCanvas::handleTouch(QTouchEvent *te)
 
     const bool ended = (te->type() == QEvent::TouchEnd);
 
-    eraseLog(QStringLiteral("touch type=%1 total=%2 active=%3 pinch=%4 blocked=%5")
+    // Probe: the panel's contact ELLIPSE is what an adaptive-size eraser would follow, and it
+    // is the one thing we never looked at (we only ever used position()). Log it, so a run on
+    // the real panel can say whether the hardware reports it at all - guessing here would be
+    // pointless, exactly like the touch-compression discovery in 1.5.2.
+    const QList<QEventPoint> &eps = te->points();
+    const QSizeF e0 = eps.isEmpty() ? QSizeF() : eps.at(0).ellipseDiameters();
+    const QSizeF e1 = eps.size() < 2 ? QSizeF() : eps.at(1).ellipseDiameters();
+    eraseLog(QStringLiteral("touch type=%1 total=%2 active=%3 pinch=%4 blocked=%5 "
+                            "contact0=%6x%7 contact1=%8x%9")
                  .arg(int(te->type()))
                  .arg(te->points().size())
                  .arg(pts.size())
                  .arg(m_pinchActive ? 1 : 0)
-                 .arg(m_touchInkBlocked ? 1 : 0));
+                 .arg(m_touchInkBlocked ? 1 : 0)
+                 .arg(e0.width(), 0, 'f', 1).arg(e0.height(), 0, 'f', 1)
+                 .arg(e1.width(), 0, 'f', 1).arg(e1.height(), 0, 'f', 1));
 
     // A cancelled touch stream must NOT commit the pending stroke - that is a
     // classic source of stray ink when the system takes over a gesture.
