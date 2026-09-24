@@ -18,7 +18,7 @@
 ; passes /DAppVersion=... /DOutputBase=... so its artifacts do not collide with
 ; the tagged releases. Local builds keep the plain version below.
 #ifndef AppVersion
-  #define AppVersion "1.9.9"
+  #define AppVersion "1.10.0"
 #endif
 #ifndef OutputBase
   #define OutputBase "PDFBoard-" + AppVersion + "-setup"
@@ -47,6 +47,9 @@ PrivilegesRequired=lowest
 PrivilegesRequiredOverridesAllowed=dialog
 ArchitecturesAllowed=x64compatible
 ArchitecturesInstallIn64BitMode=x64compatible
+; Windows 10 any build. Qt 6.8's *tested* baseline is 1809, but the binaries usually run on
+; older builds too - refusing to install there would lock out schools we already support, so
+; the gate stays at "Windows 10" and older builds get a clear message at runtime instead.
 MinVersion=10.0
 CloseApplications=yes
 RestartApplications=no

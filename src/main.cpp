@@ -27,6 +27,7 @@
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QNetworkProxyFactory>
+#include <QOperatingSystemVersion>
 #include <QPushButton>
 #include <QSlider>
 #include <QMouseEvent>
@@ -2064,6 +2065,14 @@ static int runImageSelfTest()
         const QString startupLog = QString::fromLocal8Bit(qgetenv("LOCALAPPDATA"))
                                    + QStringLiteral("/PDFBoard/logs/startup.log");
         check("startup diagnostics written", int(QFileInfo(startupLog).size() > 0), 1);
+        // ...and it must name the OS build: that is the first thing to check when a teacher's
+        // PC refuses to start (see docs 2.55/2.56).
+        QFile sf(startupLog);
+        QString head;
+        if (sf.open(QIODevice::ReadOnly))
+            head = QString::fromUtf8(sf.read(400));
+        check("startup diagnostics name the OS build",
+              int(head.contains(QStringLiteral("build"))) , 1);
     }
 
     // Eraser indicator: a screen-only ring whose diameter IS the wipe diameter, with the
@@ -2508,8 +2517,16 @@ static void installStartupDiagnostics()
     // Static: it has to survive the abort, so it is never closed on purpose.
     static QFile file(dir + QStringLiteral("/startup.log"));
     if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
-        file.write(QStringLiteral("PDFBoard 启动诊断：Qt 消息 + 插件加载轨迹"
-                                  "（每次启动重写；程序起不来时把这个文件发给我们）\n")
+        // The OS build belongs in here: "which machines fail" is otherwise guesswork, and a
+        // teacher's PC is often an old build nobody can quote from memory.
+        const QOperatingSystemVersion os = QOperatingSystemVersion::current();
+        file.write(QStringLiteral(
+                       "PDFBoard 启动诊断：Qt 消息 + 插件加载轨迹"
+                       "（每次启动重写；程序起不来时把这个文件发给我们）\n"
+                       "系统：Windows %1.%2 build %3\n")
+                       .arg(os.majorVersion())
+                       .arg(os.minorVersion())
+                       .arg(os.microVersion())
                        .toUtf8());
         file.flush();
     }

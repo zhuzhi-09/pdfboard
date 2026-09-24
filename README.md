@@ -80,7 +80,7 @@
 
 ```powershell
 package.cmd
-# 产物：dist\PDFBoard-1.9.9-setup.exe   （自带 Qt 运行库，约 17 MB）
+# 产物：dist\PDFBoard-1.10.0-setup.exe   （自带 Qt 运行库，约 17 MB）
 ```
 
 安装器做这些事（全部**当前用户**范围，不需要管理员）：
@@ -96,9 +96,9 @@ package.cmd
 **静默部署**（供教室集中管理客户端调用）：
 
 ```bat
-PDFBoard-1.9.9-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+PDFBoard-1.10.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 rem 不要桌面快捷方式：
-PDFBoard-1.9.9-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
+PDFBoard-1.10.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 ```
 
 > 卸载时若程序正在运行，静默模式下无法提示关闭，会残留被占用的文件（Windows 常见行为）。先退出程序再卸载即可完全清除。
@@ -111,11 +111,11 @@ PDFBoard-1.9.9-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 1. 安装一次 **Microsoft Visual C++ 2015-2022 Redistributable (x64)**，再打开程序；
 2. 若装了火绒 / 360 等安全软件，把程序目录加入白名单（或临时退出后重试）；
 3. 仍然不行时，把 **`%LOCALAPPDATA%\PDFBoard\logs\startup.log`** 发给我们：
-   它从程序启动的第一行就开始记录 Qt 的消息与**插件加载轨迹**（每次启动重写），
-   能直接看出是缺哪个 DLL、还是搜索路径被别的软件改坏了。
+   它从程序启动的第一行就开始记录 Qt 的消息、**本机的 Windows 版本（build 号）**与
+   **插件加载轨迹**（每次启动重写），能直接看出是缺哪个 DLL、还是搜索路径被别的软件改坏了。
 
-> 安装器会在 **Windows 10 以下**直接拒绝安装（提示系统版本不符）——所以只要装得上，
-> 就不必怀疑系统太老。
+> 安装器会在 **Windows 10 以下**拒绝安装（提示系统版本不符）。**Windows 10 各版本都能装**；
+> Qt 官方只保证 1809 及以上，更老的 Win10 通常也能运行，遇到问题就把上面那个日志发我们。
 
 ## 自动构建（Nightly）
 
@@ -126,7 +126,7 @@ PDFBoard-1.9.9-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 - 手动触发（Actions → nightly → Run workflow）
 
 产物发布到固定的 **`nightly` 预发布**（每次覆盖同名文件，不会越堆越多）：
-`PDFBoard-nightly-setup.exe` / `PDFBoard-nightly-portable.zip`，版本号形如 `1.9.9-nightly.<提交号>`。
+`PDFBoard-nightly-setup.exe` / `PDFBoard-nightly-portable.zip`，版本号形如 `1.10.0-nightly.<提交号>`。
 
 ### 稳定版发布
 
@@ -144,26 +144,26 @@ PDFBoard-1.9.9-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 ```powershell
 # 1. 改版本号：installer/pdfboard.iss 的 AppVersion + assets/app.rc 的 FILEVERSION/FileVersion
 # 2. 提交推送
-git commit -am "chore: 版本号 1.9.9"
+git commit -am "chore: 版本号 1.10.0"
 git push
 
 # 3. 写更新日志到文件（推荐；UTF-8 保存）。
 #    别用 PowerShell 的 `-m "多行…"`——它会把字符串里的换行弄坏，标签注解就残缺了。
 @'
-v1.9.9
+v1.10.0
 - 修复：缩略图在深色模式下没有白底
 - 新增：打开文件时提示更新日志
 '@ | Set-Content -Encoding utf8 notes.txt
 
 # 4. 打「注解」标签（-a）把更新日志写进 tag message，再推送；CI 自动出正式 Release
-git tag -a v1.9.9 -F notes.txt
-git push origin v1.9.9
+git tag -a v1.10.0 -F notes.txt
+git push origin v1.10.0
 ```
 
 > 不想用文件？也可以重复 `-m`，每次一行（Git 会把它们连成多段）：
-> `git tag -a v1.9.9 -m "v1.9.9" -m "- 修复：…" -m "- 新增：…"`
+> `git tag -a v1.10.0 -m "v1.10.0" -m "- 修复：…" -m "- 新增：…"`
 >
-> 忘记写注解（`git tag v1.9.9` 的轻量标签）不会失败，但 Release 只会是自动生成的提交列表——老师点开更新提示几乎看不到有用内容。
+> 忘记写注解（`git tag v1.10.0` 的轻量标签）不会失败，但 Release 只会是自动生成的提交列表——老师点开更新提示几乎看不到有用内容。
 
 ### 代码签名（可选）
 
@@ -205,7 +205,7 @@ build\pdfboard.exe --bench some.pdf
 
 | 依赖 | 版本 |
 |---|---|
-| Windows | 10 / 11 64-bit |
+| Windows | 10 / 11 64-bit（官方**测试基线**是 10 1809+；更老的 Win10 通常也能运行，但不受官方保证） |
 | 编译器 | Visual Studio 2022（MSVC v143） |
 | Qt | **6.8.x**，需 `Widgets` + `Pdf` 模块 |
 | CMake | ≥ 3.21 |
