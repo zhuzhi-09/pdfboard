@@ -101,10 +101,27 @@ void appendDensified(QVector<QPointF> &pts, const QPointF &p, qreal maxStep)
         pts.append(a + d * (qreal(i) / qreal(n)));
 }
 
-// Eraser radius in device px (screen space), added to half the stroke width.
-// The eraser removes only what it touches: a stroke is cut where it crosses
-// this circle and the parts outside survive as separate strokes.
-constexpr qreal kEraserRadiusPx = 14.0;
+// 橡皮的可选档位（逻辑像素半径），三档：细 / 中 / 粗。列表只此一处，
+// 工具栏面板、擦除命中、指示环、命中测试都从这里取数。第一档 14 就是旧版本
+// 唯一的固定值（kEraserRadiusPx），所以没动过设置的安装擦除行为完全不变。
+constexpr qreal kEraserRadiusSteps[3] = { 14.0, 26.0, 44.0 };
+
+// --- 掌擦（手掌接触面橡皮）分类器的全部参数 --------------------------------
+// 一台没有笔的教室大屏：手掌按上去时面板把它报成好几个接触点，而且点数逐帧
+// 抖动（3、4、5、2……）；真正的双指缩放同样是多点。分类器靠这些阈值和迟滞把
+// "手掌 / 手指 / 双指"分开，半径的防抖也在这一块：数字都只在这里，调参只动这。
+constexpr qreal kPalmClusterDistPx = 72.0;  // 聚簇距离：手掌接触面宽度量级
+constexpr int   kPalmEnterPoints  = 4;      // 一簇里至少这么多点才可能是手掌
+constexpr int   kPalmEnterFrames  = 2;      // ...且连续这么多帧才真的进入（幽灵帧不开擦）
+constexpr int   kPalmStayPoints   = 2;      // 已在掌擦：剩余点数 >= 2 就继续
+constexpr qreal kPalmRadiusPadPx  = 18.0;   // 手指接触面本身的余量（加在圆周半径上）
+constexpr qreal kPalmRadiusMinPx  = kEraserRadiusSteps[0];        // 不低于最小静态档
+constexpr qreal kPalmRadiusMaxPx  = kEraserRadiusSteps[2] * 3.0;  // 不高于最大档的 3 倍
+constexpr qreal kPalmRadiusAlpha  = 0.28;   // 半径 EMA（把点数抖动平均掉）
+constexpr qreal kPalmRadiusDeadPx = 2.5;    // 半径死区：小于它不动（按住时圆环不呼吸）
+constexpr qreal kPalmRadiusRateCap = 14.0;  // 单帧最大半径变化（幽灵点不能一次撑大）
+constexpr qreal kPalmRestMovePx   = 5.0;    // 簇心与慢平均的距离小于它 = 静止（冻结半径）
+constexpr qreal kPalmRestAlpha    = 0.10;   // 静止检测的慢平均系数（约 10 帧）
 
 // Largest travel between two pointer samples still treated as one continuous
 // eraser stroke. Anything bigger is an input discontinuity (dropped/coalesced
@@ -325,6 +342,9 @@ bool PdfCanvas::openPdf(const QString &path, QString *errorOut)
         m_maxPageWpt = 595.0;
 
     cancelGesture();
+    // 橡皮大小跟着"这份文档"走：新文档 = 默认档（用户没动过就是 14 px）。
+    m_eraserRadius = eraserRadiusSteps()[0];
+    m_touchClass = TouchClassState{};      // 触摸记忆不跨文档
     m_ink.clear();
     m_undoStack.clear();
     m_redoStack.clear();
@@ -353,6 +373,7 @@ void PdfCanvas::closePdf()
     m_contentH = 0;
     m_maxPageWpt = 595.0;
     cancelGesture();
+    m_touchClass = TouchClassState{};
     m_ink.clear();
     m_undoStack.clear();
     m_redoStack.clear();
@@ -863,6 +884,9 @@ void PdfCanvas::trackPointer()
 
 bool PdfCanvas::eraserIndicatorVisible() const
 {
+    // 掌擦时圆环就是动态大小的读数，触摸锁（挡住合成鼠标事件）不该把它藏起来。
+    if (m_palmEraseActive)
+        return true;
     // Any erase shows the ring - including a stylus used with its eraser end, where the toolbar
     // still says "pen". The ring is the size readout, and it is needed most in that case.
     return (m_tool == InkTool::Eraser || m_erasing) && !m_pinchActive && !m_touchInkBlocked
@@ -881,9 +905,9 @@ void PdfCanvas::updateEraserIndicator(const QPointF &from, bool hadFrom,
 {
     QRect dirty;
     if (hadFrom)
-        dirty = eraserIndicatorBounds(from, kEraserRadiusPx);
+        dirty = eraserIndicatorBounds(from, activeEraseRadius());
     if (hasTo) {
-        const QRect now = eraserIndicatorBounds(to, kEraserRadiusPx);
+        const QRect now = eraserIndicatorBounds(to, activeEraseRadius());
         dirty = dirty.isNull() ? now : dirty.united(now);
     }
     if (!dirty.isNull())
@@ -917,7 +941,9 @@ void PdfCanvas::drawEraserIndicator(QPainter &p, const QPointF &viewportPos, qre
     p.setPen(QPen(ringLine, 2.0));
     p.drawEllipse(ring);
 
-    if (m_erasing) {
+    // 按下反馈：静态橡皮拖动、或手掌按在屏上时，圆环内淡淡着色、图标下压。
+    const bool pressed = m_erasing || m_palmEraseActive;
+    if (pressed) {
         // Accent wash over the disc being removed: the page stays readable while cutting.
         p.setPen(Qt::NoPen);
         p.setBrush(Theme::light().accentSoft);
@@ -930,7 +956,7 @@ void PdfCanvas::drawEraserIndicator(QPainter &p, const QPointF &viewportPos, qre
     // small recognisable icon instead of growing into a huge eraser; while cutting it
     // presses down by one pixel.
     const qreal side = qBound<qreal>(10.0, radiusPx * 1.05, 20.0);
-    const qreal press = m_erasing ? 1.0 : 0.0;
+    const qreal press = pressed ? 1.0 : 0.0;
     const QRectF box(viewportPos.x() - side / 2.0,
                      viewportPos.y() - side / 2.0 + press, side, side);
     IconPainter::paintGlyph(p, IconPainter::Glyph::Eraser, box, glyphColor, 2.0);
@@ -1115,7 +1141,7 @@ void PdfCanvas::paintEvent(QPaintEvent *)
     // Screen-only eraser indicator, drawn last so it floats above every page and edge -
     // and drawn only here, which is why it can never reach an exported PDF or PNG.
     if (eraserIndicatorVisible())
-        drawEraserIndicator(p, m_eraserHoverPos, kEraserRadiusPx);
+        drawEraserIndicator(p, m_eraserHoverPos, activeEraseRadius());
 }
 
 QPointF PdfCanvas::toNormalized(int page, const QPointF &viewportPos) const
@@ -1174,6 +1200,13 @@ void PdfCanvas::cancelGesture()
     m_moveDragActive  = false;
     m_drawPage    = -1;
     m_current     = Stroke{};
+    // 掌擦手势与它的动态半径一并不留。分类器状态 m_touchClass 故意不动：
+    // 那是"这只手还在屏上"的记忆，清掉它会让掌擦每隔一帧重新进入一次
+    // （点数迟滞被反复重置），手势就闪了。真正需要重置的地方只有
+    // openPdf/closePdf 和 TouchCancel，那里显式清。
+    m_palmEraseActive = false;
+    m_hasPalmLastPos  = false;
+    m_palmRadius      = 0.0;
 }
 
 // --- Test hooks (only used by `--selftest-ink`) ---------------------------
@@ -1226,7 +1259,7 @@ bool PdfCanvas::testEraseAtNormalized(int page, const QPointF &norm)
         return false;
     const QPointF vp(r.left() + norm.x() * r.width(),
                      r.top()  + norm.y() * r.height());
-    return eraseAtPointer(page, vp);
+    return eraseAtPointer(page, vp, m_eraserRadius);
 }
 
 bool PdfCanvas::testEraseSweepNormalized(int page, const QPointF &aNorm, const QPointF &bNorm)
@@ -1237,7 +1270,7 @@ bool PdfCanvas::testEraseSweepNormalized(int page, const QPointF &aNorm, const Q
     auto vp = [&r](const QPointF &n) {
         return QPointF(r.left() + n.x() * r.width(), r.top() + n.y() * r.height());
     };
-    return eraseSweep(page, vp(aNorm), vp(bNorm));
+    return eraseSweep(page, vp(aNorm), vp(bNorm), m_eraserRadius);
 }
 
 QString PdfCanvas::testStrokeSummary(int page) const
@@ -1310,6 +1343,50 @@ void PdfCanvas::setPenWidth(qreal width)
     emit penChanged();
 }
 
+// --- 橡皮大小（静态三档）---------------------------------------------------
+
+const qreal *PdfCanvas::eraserRadiusSteps()
+{
+    return kEraserRadiusSteps;
+}
+
+int PdfCanvas::eraserRadiusStepCount()
+{
+    return int(sizeof(kEraserRadiusSteps) / sizeof(kEraserRadiusSteps[0]));
+}
+
+void PdfCanvas::setEraserRadius(qreal radiusPx)
+{
+    // 面板只提供三档，所以任何值都吸附到最近的一档：越界的落到首/末档，
+    // 不会出现"当前值不对应任何按钮"的状态。
+    const qreal *steps = eraserRadiusSteps();
+    qreal best = steps[0];
+    qreal bestDist = qAbs(radiusPx - best);
+    for (int i = 1; i < eraserRadiusStepCount(); ++i) {
+        const qreal d = qAbs(radiusPx - steps[i]);
+        if (d < bestDist) {
+            best = steps[i];
+            bestDist = d;
+        }
+    }
+    if (qFuzzyCompare(m_eraserRadius, best))
+        return;
+
+    // 指针处的圆环正在显示：新旧两个尺寸的脏区都要重画，否则换档后旧环留一圈残影。
+    const QRect oldRing = m_eraserHover
+                              ? eraserIndicatorBounds(m_eraserHoverPos, m_eraserRadius)
+                              : QRect();
+    m_eraserRadius = best;
+    if (!oldRing.isNull())
+        viewport()->update(oldRing.united(eraserIndicatorBounds(m_eraserHoverPos, m_eraserRadius)));
+    emit eraserChanged();
+}
+
+qreal PdfCanvas::activeEraseRadius() const
+{
+    return (m_palmEraseActive && m_palmRadius > 0.0) ? m_palmRadius : m_eraserRadius;
+}
+
 void PdfCanvas::pushUndoSnapshot()
 {
     m_undoStack.append(m_ink);
@@ -1346,7 +1423,7 @@ void PdfCanvas::redo()
 // Sweeps the eraser from `from` to `to`. Pointer samples arrive at discrete
 // positions, so a fast drag can jump right over a stroke; interpolating the
 // path guarantees the whole trajectory is erased (no dashed/ missed gaps).
-bool PdfCanvas::eraseSweep(int pageHint, const QPointF &from, const QPointF &to)
+bool PdfCanvas::eraseSweep(int pageHint, const QPointF &from, const QPointF &to, qreal radiusPx)
 {
     const QPointF d = to - from;
     const qreal dist = qSqrt(QPointF::dotProduct(d, d));
@@ -1360,34 +1437,38 @@ bool PdfCanvas::eraseSweep(int pageHint, const QPointF &from, const QPointF &to)
         const QPointF dir = d / dist;
         a = to - dir * kEraserMaxJumpPx;
     }
-    eraseLog(QStringLiteral("sweep (%1,%2)->(%3,%4) dist=%5 %6")
+    eraseLog(QStringLiteral("sweep (%1,%2)->(%3,%4) dist=%5 r=%6 %7")
                  .arg(from.x(), 0, 'f', 1).arg(from.y(), 0, 'f', 1)
                  .arg(to.x(), 0, 'f', 1).arg(to.y(), 0, 'f', 1)
                  .arg(dist, 0, 'f', 1)
+                 .arg(radiusPx, 0, 'f', 1)
                  .arg(dist > kEraserMaxJumpPx ? QStringLiteral("JUMP")
                                               : QStringLiteral("ok")));
 
     bool any = false;
     const QPointF dd = to - a;
     const qreal len = qSqrt(QPointF::dotProduct(dd, dd));
-    const qreal step = qMax<qreal>(2.0, kEraserRadiusPx * 0.5);
+    // 步长跟着擦除半径走：半径越大，相邻擦除圆之间越不能留缝。
+    const qreal step = qMax<qreal>(2.0, radiusPx * 0.5);
     const int steps = qMax(1, int(qCeil(len / step)));
     for (int i = 0; i <= steps; ++i) {
         const QPointF p = a + dd * (qreal(i) / qreal(steps));
         int page = pageAtViewportPos(p);
         if (page < 0)
             page = pageHint;                 // keep erasing the gesture's page
-        if (page >= 0 && eraseAtPointer(page, p))
+        if (page >= 0 && eraseAtPointer(page, p, radiusPx))
             any = true;
     }
     return any;
 }
 
 // Partial ("erase exactly where you point") eraser, evaluated in page device
-// pixels. Each stroke is cut where it crosses the eraser circle: the part
+// pixels. Each stroke is cut where it crosses the eraser circle (radius
+// `radiusPx`, the caller's selected / live size, plus half the stroke width so
+// a fat stroke is only cut when the circle really touches its body): the part
 // inside is removed and the outer parts survive as separate strokes, so one
 // stroke can end up split in two.
-bool PdfCanvas::eraseAtPointer(int page, const QPointF &viewportPos)
+bool PdfCanvas::eraseAtPointer(int page, const QPointF &viewportPos, qreal radiusPx)
 {
     const auto it = m_ink.constFind(page);
     if (it == m_ink.constEnd())
@@ -1416,7 +1497,7 @@ bool PdfCanvas::eraseAtPointer(int page, const QPointF &viewportPos)
     bool changed = false;
 
     for (const Stroke &s : strokes) {
-        const qreal R = kEraserRadiusPx + s.width * rect.width() / 2.0;
+        const qreal R = radiusPx + s.width * rect.width() / 2.0;
         const qreal R2 = R * R;
         auto inside = [&center, R2](const QPointF &p) {
             const QPointF d = p - center;
@@ -1522,9 +1603,59 @@ bool PdfCanvas::eraseAtPointer(int page, const QPointF &viewportPos)
     // Keeping the hover position in sync here also makes a touch-driven erase show the
     // ring at the right place.
     m_eraserHoverPos = viewportPos;
-    viewport()->update(eraserIndicatorBounds(viewportPos, kEraserRadiusPx));
+    viewport()->update(eraserIndicatorBounds(viewportPos, radiusPx));
     emit inkChanged(strokeCount());
     return true;
+}
+
+// --- 掌擦（手掌接触面橡皮）的手势执行 --------------------------------------
+// 分类器（classifyTouch）已经把"这一帧是不是手掌"和"该用多大半径"算好了，
+// 这里只执行：取消在跑的笔迹/缩放/平移，把指示环跟到簇心，并沿路径擦过来。
+void PdfCanvas::palmEraseTo(const QPointF &centroid, qreal radiusPx)
+{
+    if (!m_palmEraseActive) {
+        // 手掌的命令只有"擦"：笔迹、双指缩放、自由移动全部让位。
+        cancelGesture();
+        m_pinchActive = false;
+        m_pinchPts.clear();
+        m_palmEraseActive = true;
+        m_hasPalmLastPos = false;
+        m_erasePushed = false;
+        // 触摸锁：Windows 会为触摸合成鼠标事件，没有它一次合成按下就会画出
+        // 笔迹；滚轮也靠这个锁在掌擦期间不缩放（见 handleWheel）。
+        m_touchInkBlocked = true;
+        if (m_touchRelease)
+            m_touchRelease->stop();
+    }
+
+    // 半径可能变小：先按旧半径补一块脏区，否则上一帧的圆环会留一圈残影。
+    const qreal prevRadius = m_palmRadius > 0.0 ? m_palmRadius : m_eraserRadius;
+    m_palmRadius = radiusPx;
+    if (m_eraserHover)
+        viewport()->update(eraserIndicatorBounds(m_eraserHoverPos, qMax(prevRadius, radiusPx)));
+
+    setEraserHover(centroid);      // 环跟手，activeEraseRadius() 已经是新半径
+
+    const QPointF from = m_hasPalmLastPos ? m_palmLastPos : centroid;
+    eraseSweep(pageAtViewportPos(centroid), from, centroid, radiusPx);
+    m_palmLastPos = centroid;
+    m_hasPalmLastPos = true;
+}
+
+void PdfCanvas::endPalmErase()
+{
+    if (!m_palmEraseActive)
+        return;
+    m_palmEraseActive = false;
+    m_hasPalmLastPos = false;
+    m_palmRadius = 0.0;
+    if (m_erasePushed) {
+        // 一次掌擦手势 = 一步撤销（和普通擦除拖动一致）。
+        m_erasePushed = false;
+        emit inkChanged(strokeCount());
+        emit undoStateChanged();
+    }
+    viewport()->update();
 }
 
 // --- shared input entry points --------------------------------------------
@@ -1554,7 +1685,7 @@ void PdfCanvas::beginInputAt(const QPointF &viewportPos, bool asEraser)
         m_erasePushed = false;
         m_lastErasePos = viewportPos;
         m_hasLastErasePos = true;
-        eraseAtPointer(page, viewportPos);     // never starts an ink stroke
+        eraseAtPointer(page, viewportPos, m_eraserRadius);     // never starts an ink stroke
         return;
     }
 
@@ -1590,7 +1721,7 @@ void PdfCanvas::moveInputTo(const QPointF &viewportPos)
         }
         // Erase along the whole travelled path, not just at this sample.
         setEraserHover(viewportPos);
-        eraseSweep(pageAtViewportPos(viewportPos), m_lastErasePos, viewportPos);
+        eraseSweep(pageAtViewportPos(viewportPos), m_lastErasePos, viewportPos, m_eraserRadius);
         m_lastErasePos = viewportPos;
         return;
     }
@@ -2262,6 +2393,190 @@ void PdfCanvas::endPinch()
     m_pinchPts.clear();
 }
 
+// --- 掌擦分类器（纯函数，逐帧驱动）-----------------------------------------
+// 所有参数都在文件顶部的"掌擦分类器参数"块里；这里只有逻辑。
+namespace {
+
+// 按距离把接触点聚簇（单链并查集）：两点距离不超过 kPalmClusterDistPx 就算
+// 同一簇。面板最多十来个点，O(n²) 足够，不需要 k-d 树。
+QVector<QVector<QPointF>> clusterTouchPoints(const QVector<QPointF> &pts)
+{
+    const int n = int(pts.size());
+    QVector<int> parent(n);
+    for (int i = 0; i < n; ++i)
+        parent[i] = i;
+    auto root = [&parent](int i) {
+        while (parent[i] != i) {
+            parent[i] = parent[parent[i]];      // 路径压缩
+            i = parent[i];
+        }
+        return i;
+    };
+    for (int i = 0; i < n; ++i) {
+        for (int j = i + 1; j < n; ++j) {
+            if (QLineF(pts.at(i), pts.at(j)).length() <= kPalmClusterDistPx) {
+                const int a = root(i);
+                const int b = root(j);
+                if (a != b)
+                    parent[a] = b;
+            }
+        }
+    }
+
+    QVector<QVector<QPointF>> clusters;
+    QHash<int, int> index;                      // 根 -> clusters 下标
+    for (int i = 0; i < n; ++i) {
+        const int r = root(i);
+        const auto it = index.constFind(r);
+        if (it == index.constEnd()) {
+            index.insert(r, int(clusters.size()));
+            clusters.append(QVector<QPointF>{ pts.at(i) });
+        } else {
+            clusters[it.value()].append(pts.at(i));
+        }
+    }
+    return clusters;
+}
+
+QPointF pointsCentroid(const QVector<QPointF> &pts)
+{
+    if (pts.isEmpty())
+        return {};
+    QPointF c;
+    for (const QPointF &p : pts)
+        c += p;
+    return c / qreal(pts.size());
+}
+
+void resetPalmClass(PdfCanvas::TouchClassState &state)
+{
+    state.palmFrames = 0;
+    state.palmActive = false;
+    state.hasRadius = false;
+    state.hasRest = false;
+}
+
+// 手掌半径 = 簇心到最远点的距离（圆周半径）+ 手指接触面的余量，钳在静态
+// 最小档与 3 倍最大档之间。防抖三件套：单帧限幅、EMA、死区；手掌按住不动
+// 时（簇心与慢平均重合）直接冻结，圆环不会呼吸。
+qreal updatePalmRadius(PdfCanvas::TouchClassState &state, const QVector<QPointF> &cluster,
+                       const QPointF &centroid)
+{
+    qreal spread = 0.0;
+    for (const QPointF &p : cluster)
+        spread = qMax(spread, QLineF(centroid, p).length());
+    const qreal raw = qBound(kPalmRadiusMinPx, spread + kPalmRadiusPadPx, kPalmRadiusMaxPx);
+
+    if (!state.hasRest) {
+        state.restCentroid = centroid;
+        state.hasRest = true;
+    }
+    state.restCentroid += (centroid - state.restCentroid) * kPalmRestAlpha;
+    const bool atRest = QLineF(centroid, state.restCentroid).length() < kPalmRestMovePx;
+
+    if (!state.hasRadius) {
+        state.radius = raw;          // 进入的那一刻就用真实大小，不做 EMA 爬升
+        state.hasRadius = true;
+    } else if (!atRest) {
+        const qreal step = qBound(-kPalmRadiusRateCap, raw - state.radius, kPalmRadiusRateCap);
+        const qreal next = state.radius + step * kPalmRadiusAlpha;
+        if (qAbs(next - state.radius) >= kPalmRadiusDeadPx)
+            state.radius = next;
+    }
+    return qBound(kPalmRadiusMinPx, state.radius, kPalmRadiusMaxPx);
+}
+
+}   // namespace
+
+// 一帧接触点的四选一分类。规则（参数见文件顶部）：
+//   * 空点集                                   -> Idle
+//   * 多簇：恰好一个"手掌簇"（>= kPalmEnterPoints 点）且其余都是单点
+//                                              -> Writing（手掌 + 书写手指）
+//     其它多簇                                  -> Pinch（原有双指路径）
+//   * 单簇：1 点                                -> Writing
+//     已进入掌擦且 >= kPalmStayPoints 点          -> PalmEraser（点数抖动不打断）
+//     未进入、一簇 >= kPalmEnterPoints 点且连续
+//       kPalmEnterFrames 帧                      -> PalmEraser（进入）
+//     其余（2-3 点、未进入）                     -> Writing，但无可落笔点
+//        （这一帧什么都不做，等下一帧看清）
+PdfCanvas::TouchClassResult PdfCanvas::classifyTouch(const QVector<QPointF> &pts,
+                                                     TouchClassState &state)
+{
+    TouchClassResult r;
+    if (pts.isEmpty()) {
+        resetPalmClass(state);
+        return r;                              // Idle
+    }
+
+    const QVector<QVector<QPointF>> clusters = clusterTouchPoints(pts);
+
+    if (clusters.size() >= 2) {
+        int palmClusters = 0;
+        bool othersSingle = true;
+        for (const QVector<QPointF> &c : clusters) {
+            if (c.size() >= kPalmEnterPoints)
+                ++palmClusters;
+            else if (c.size() > 1)
+                othersSingle = false;
+        }
+        if (palmClusters == 1 && othersSingle) {
+            // 手掌搁在屏上、手指在旁边写字：这一帧不是掌擦，把书写点交给落笔路径。
+            QVector<QPointF> writing;
+            for (const QVector<QPointF> &c : clusters) {
+                if (c.size() < kPalmEnterPoints)
+                    writing += c;
+            }
+            r.mode = TouchClass::Writing;
+            r.writePos = pointsCentroid(writing);
+            r.hasWritePos = !writing.isEmpty();
+        } else {
+            r.mode = TouchClass::Pinch;
+        }
+        resetPalmClass(state);
+        return r;
+    }
+
+    const QVector<QPointF> &cluster = clusters.first();
+    const QPointF centroid = pointsCentroid(cluster);
+
+    if (cluster.size() < kPalmStayPoints) {
+        // 单点 = 书写/点击；<= 1 点也意味着掌擦该结束了。
+        resetPalmClass(state);
+        r.mode = TouchClass::Writing;
+        r.writePos = centroid;
+        r.hasWritePos = true;
+        return r;
+    }
+
+    if (state.palmActive) {
+        // 迟滞：点数在 4、5、3、2 之间抖动时一直是掌擦，不来回翻。
+        r.mode = TouchClass::PalmEraser;
+        r.radiusPx = updatePalmRadius(state, cluster, centroid);
+        return r;
+    }
+
+    if (cluster.size() >= kPalmEnterPoints) {
+        if (++state.palmFrames >= kPalmEnterFrames) {
+            state.palmActive = true;
+            state.hasRadius = false;           // 进入时按真实大小初始化
+            state.hasRest = false;
+            r.mode = TouchClass::PalmEraser;
+            r.radiusPx = updatePalmRadius(state, cluster, centroid);
+            return r;
+        }
+        // 第一帧只记账：幽灵帧不能开擦。
+        r.mode = TouchClass::Writing;
+        r.hasWritePos = false;
+        return r;
+    }
+
+    // 单簇 2-3 点、还没进入掌擦：既不够点开擦，也不是单点书写。
+    state.palmFrames = 0;
+    r.mode = TouchClass::Writing;
+    r.hasWritePos = false;
+    return r;
+}
+
 bool PdfCanvas::touchBelongsToOverlay(const QVector<QPointF> &viewportPts) const
 {
     // A gesture that is already running owns the touch. The island, palette and
@@ -2270,7 +2585,7 @@ bool PdfCanvas::touchBelongsToOverlay(const QVector<QPointF> &viewportPts) const
     // "keep writing" means. Refusing these samples mid-stroke used to set the ink
     // lock, and endInput() then cancelled the WHOLE stroke: one line dragged over
     // the island made the part before it disappear too.
-    if (m_drawing || m_erasing || m_pinchActive || m_moveDragActive)
+    if (m_drawing || m_erasing || m_palmEraseActive || m_pinchActive || m_moveDragActive)
         return false;
 
     for (const QPointF &p : viewportPts) {
@@ -2333,6 +2648,7 @@ bool PdfCanvas::handleTouch(QTouchEvent *te)
     // classic source of stray ink when the system takes over a gesture.
     if (te->type() == QEvent::TouchCancel) {
         cancelGesture();
+        m_touchClass = TouchClassState{};  // 被系统打断：触摸记忆作废
         m_pinchActive = false;
         m_pinchPts.clear();
         if (m_touchRelease)
@@ -2340,7 +2656,23 @@ bool PdfCanvas::handleTouch(QTouchEvent *te)
         return true;
     }
 
-    if (pts.size() >= 2) {
+    // --- 先分类这一帧：掌擦 / 双指 / 书写三条路互斥 -------------------------
+    // 分类器只看点集和它自己的跨帧状态（见 classifyTouch），既有双指语义
+    // 一分不动；点数抖动的单簇不再被误当成双指。
+    TouchClassResult cls = classifyTouch(pts, m_touchClass);
+    // 自由移动模式完全不做掌擦（那是"拖动画面"模式）：手掌帧沿用原来的
+    // 双指路径，该模式的行为不变。
+    if (m_tool == InkTool::Move && cls.mode == TouchClass::PalmEraser)
+        cls.mode = TouchClass::Pinch;
+
+    if (cls.mode == TouchClass::PalmEraser) {
+        palmEraseTo(pointsCentroid(pts), cls.radiusPx);
+        return true;
+    }
+    if (m_palmEraseActive)
+        endPalmErase();                    // 手掌抬起 / 簇散开 / 点数不够
+
+    if (cls.mode == TouchClass::Pinch) {
         // The two-finger gesture wins: a running free-move drag must stop here
         // and must not resume until a fresh single-finger sequence begins.
         m_moveDragActive = false;
@@ -2375,7 +2707,10 @@ bool PdfCanvas::handleTouch(QTouchEvent *te)
         return true;
     }
 
-    if (pts.size() == 1) {
+    // 书写 / 单点：writePos 是"该落笔的那一个点"（手掌 + 手指时是手指，
+    // 不是手掌簇）。
+    if (cls.hasWritePos) {
+        const QPointF inkPos = cls.writePos;
         if (te->type() == QEvent::TouchBegin) {
             // A fresh single-finger sequence starts here (extra fingers arrive as
             // TouchUpdate, never as TouchBegin), so it is safe to unlock at once
@@ -2386,21 +2721,25 @@ bool PdfCanvas::handleTouch(QTouchEvent *te)
             if (m_tool == InkTool::Move) {
                 // One finger in free-move mode pans the view, not the page.
                 m_moveDragActive = true;
-                m_moveLastPos = pts.first();
+                m_moveLastPos = inkPos;
                 return true;
             }
-            beginInputAt(pts.first());
+            beginInputAt(inkPos);
             return true;
         }
         if (m_touchInkBlocked)
             return true;                   // residual finger of a pinch gesture
         if (m_tool == InkTool::Move) {
-            freePanTo(pts.first());
+            freePanTo(inkPos);
             return true;
         }
-        moveInputTo(pts.first());
+        moveInputTo(inkPos);
         return true;
     }
+
+    // 没有可落笔的点（手掌预判帧、点数不够的簇）：这一帧什么都不做 ——
+    // 不落笔、不缩放、也不擦除，等下一帧分类清楚。误判的代价因此只有
+    // 一帧的延迟，不会留下笔迹或跳动画面。
     return true;
 }
 
@@ -2449,6 +2788,19 @@ void PdfCanvas::testTouchEnd()
 bool PdfCanvas::testTouchBelongsToOverlay(const QVector<QPointF> &viewportPts) const
 {
     return touchBelongsToOverlay(viewportPts);
+}
+
+void PdfCanvas::testPalmFrame(const QVector<QPointF> &viewportPts)
+{
+    // Same classify -> execute route as handleTouch's palm branch, minus the
+    // QTouchEvent plumbing (see the header comment).
+    TouchClassResult cls = classifyTouch(viewportPts, m_touchClass);
+    if (cls.mode == TouchClass::PalmEraser && m_tool != InkTool::Move) {
+        palmEraseTo(pointsCentroid(viewportPts), cls.radiusPx);
+        return;
+    }
+    if (m_palmEraseActive)
+        endPalmErase();
 }
 
 void PdfCanvas::testZoomAt(const QPointF &viewportAnchor, qreal factor)

@@ -21,6 +21,9 @@
 - 手写笔：6 色 + 3 档粗细；若设备**上报橡皮尾**（`pointerType() == Eraser`），翻过来按即擦且不改动工具栏 ——
   注意：部分大屏**不区分笔尾与手指**，这类设备请用工具栏的「橡皮」按钮（见下方"已知限制"）
 - **局部橡皮**：指哪擦哪（把笔迹在该处切开，两侧保留），不是整条删除
+- **橡皮有两档玩法**：① 单击「橡皮」按钮可**选大 / 中 / 小三档粗细**（弹出的面板与笔的颜色面板同样式）；
+  ② **手掌按上去就自动变成橡皮**，且**擦除范围跟着接触面自动变大**（手掌压得越开、擦得越大）——
+  此时不会缩放、不会平移。**一边掌托一边用另一根手指写字也照常书写，不会被误擦**
 - **橡皮指示器**：选中橡皮后，指针处跟着一个**与擦除直径等大的圆环**（一眼看出会擦掉多大范围），
   圆心是橡皮图标；按下时圆环内淡淡着色、图标微微下压。它**只在屏幕上显示，绝不会出现在导出的
   PDF / PNG 里**（导出走的是页面栅格化路径，不经过界面绘制）
@@ -83,7 +86,7 @@
 
 ```powershell
 package.cmd
-# 产物：dist\PDFBoard-1.11.4-setup.exe   （自带 Qt 运行库，约 17 MB）
+# 产物：dist\PDFBoard-1.12.0-setup.exe   （自带 Qt 运行库，约 17 MB）
 ```
 
 安装器做这些事（全部**当前用户**范围，不需要管理员）：
@@ -99,9 +102,9 @@ package.cmd
 **静默部署**（供教室集中管理客户端调用）：
 
 ```bat
-PDFBoard-1.11.4-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+PDFBoard-1.12.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 rem 不要桌面快捷方式：
-PDFBoard-1.11.4-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
+PDFBoard-1.12.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 ```
 
 > 卸载时若程序正在运行，静默模式下无法提示关闭，会残留被占用的文件（Windows 常见行为）。先退出程序再卸载即可完全清除。
@@ -138,7 +141,7 @@ PDFBoard-1.11.4-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 - 手动触发（Actions → nightly → Run workflow）
 
 产物发布到固定的 **`nightly` 预发布**（每次覆盖同名文件，不会越堆越多）：
-`PDFBoard-nightly-setup.exe` / `PDFBoard-nightly-portable.zip`，版本号形如 `1.11.4-nightly.<提交号>`。
+`PDFBoard-nightly-setup.exe` / `PDFBoard-nightly-portable.zip`，版本号形如 `1.12.0-nightly.<提交号>`。
 
 ### 稳定版发布
 
@@ -156,26 +159,26 @@ PDFBoard-1.11.4-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 ```powershell
 # 1. 改版本号：installer/pdfboard.iss 的 AppVersion + assets/app.rc 的 FILEVERSION/FileVersion
 # 2. 提交推送
-git commit -am "chore: 版本号 1.11.4"
+git commit -am "chore: 版本号 1.12.0"
 git push
 
 # 3. 写更新日志到文件（推荐；UTF-8 保存）。
 #    别用 PowerShell 的 `-m "多行…"`——它会把字符串里的换行弄坏，标签注解就残缺了。
 @'
-v1.11.4
+v1.12.0
 - 修复：缩略图在深色模式下没有白底
 - 新增：打开文件时提示更新日志
 '@ | Set-Content -Encoding utf8 notes.txt
 
 # 4. 打「注解」标签（-a）把更新日志写进 tag message，再推送；CI 自动出正式 Release
-git tag -a v1.11.4 -F notes.txt
-git push origin v1.11.4
+git tag -a v1.12.0 -F notes.txt
+git push origin v1.12.0
 ```
 
 > 不想用文件？也可以重复 `-m`，每次一行（Git 会把它们连成多段）：
-> `git tag -a v1.11.4 -m "v1.11.4" -m "- 修复：…" -m "- 新增：…"`
+> `git tag -a v1.12.0 -m "v1.12.0" -m "- 修复：…" -m "- 新增：…"`
 >
-> 忘记写注解（`git tag v1.11.4` 的轻量标签）不会失败，但 Release 只会是自动生成的提交列表——老师点开更新提示几乎看不到有用内容。
+> 忘记写注解（`git tag v1.12.0` 的轻量标签）不会失败，但 Release 只会是自动生成的提交列表——老师点开更新提示几乎看不到有用内容。
 
 ### 代码签名（可选）
 

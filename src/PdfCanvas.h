@@ -100,6 +100,44 @@ public:
     qreal   penWidth() const { return m_penWidth; }
     void    setPenWidth(qreal width);
 
+    // --- 橡皮大小（静态三档）------------------------------------------------
+    // 每份画布记住自己的橡皮大小，默认就是第一档 = 旧版本唯一的固定值 14 px，
+    // 所以没动过设置的安装擦除行为完全不变。档位表只此一处定义：工具栏面板、
+    // 擦除命中、指示环、命中测试全都从这里取数。
+    static const qreal *eraserRadiusSteps();
+    static int eraserRadiusStepCount();
+    qreal   eraserRadius() const { return m_eraserRadius; }
+    void    setEraserRadius(qreal radiusPx);   // 吸附到最近的一档
+
+    // --- 掌擦（手掌接触面橡皮）的纯分类器 ------------------------------------
+    // 没有笔的教室大屏：手掌按上去时面板把它报成好几个接触点，而且点数逐帧
+    // 抖动（3、4、5、2……）；真正的双指缩放同样是多点。这个函数把一帧接触点
+    // 分到四类里，并给出掌擦半径与"该落笔的那一个点"。它只读入参和 state
+    // （它唯一的记忆），不碰 QTouchEvent、不碰界面 —— 自测可以用合成点集
+    // 逐帧驱动它，不需要一台触摸屏。
+    enum class TouchClass {
+        Idle,        // 空：没有接触点
+        Writing,     // 单点，或"一个手掌簇 + 一个分离的书写点"
+        Pinch,       // 两个及以上明确分离的簇（原有双指路径）
+        PalmEraser,  // 恰好一簇、簇外没有别的点 -> 手掌擦除
+    };
+    struct TouchClassState {
+        int     palmFrames = 0;     // 连续满足"一簇里 >= kPalmEnterPoints 点"的帧数
+        bool    palmActive = false; // 迟滞：已进入掌擦，点数抖动不再退出
+        qreal   radius = 0.0;       // 平滑后的掌擦半径
+        bool    hasRadius = false;
+        QPointF restCentroid;       // 静止检测用的慢平均簇心
+        bool    hasRest = false;
+    };
+    struct TouchClassResult {
+        TouchClass mode = TouchClass::Idle;
+        qreal      radiusPx = 0.0;   // 仅 PalmEraser 有意义
+        QPointF    writePos;         // 仅 Writing 且 hasWritePos 时有效
+        bool       hasWritePos = false;
+    };
+    static TouchClassResult classifyTouch(const QVector<QPointF> &pts,
+                                          TouchClassState &state);
+
     // Ink undo / redo: snapshot stack of the whole per-page ink model.
     void undo();
     void redo();
@@ -120,6 +158,11 @@ public:
     void  testTouchMove(const QPointF &viewportPos);
     void  testTouchEnd();
     bool  testTouchBelongsToOverlay(const QVector<QPointF> &viewportPts) const;
+    // 掌擦的整帧驱动（自测用）：走和 handleTouch 掌擦分支同一段"分类 -> 执行"
+    // 路径，只是不经过 QTouchEvent，所以没有触摸屏也能断言"多帧手掌真的擦掉了
+    // 墨、而且不缩放不平移"。
+    void  testPalmFrame(const QVector<QPointF> &viewportPts);
+    bool  testPalmEraseActive() const { return m_palmEraseActive; }
     // Feed a real QWheelEvent to the viewport (headless), so the wheel rules are
     // asserted on the production path instead of on a reimplementation.
     void  testWheelAt(const QPointF &viewportPos, int angleDeltaY, bool ctrl);
@@ -131,6 +174,10 @@ public:
     qreal testFracAtViewportY(qreal y) const;
     qreal testFracX(int page, qreal x) const;
     QSize testViewportSize() const { return viewport()->size(); }
+    // 静态橡皮大小：设置/读取，供自测断言"更大的档真的擦掉更多墨"以及
+    // "大小随文档走、切工具/缩放不重置"。
+    qreal testEraserRadius() const { return m_eraserRadius; }
+    void  testSetEraserRadius(qreal radiusPx) { setEraserRadius(radiusPx); }
     bool testEraseAtNormalized(int page, const QPointF &norm);
     bool testEraseSweepNormalized(int page, const QPointF &aNorm, const QPointF &bNorm);
     QString testStrokeSummary(int page) const;
@@ -190,6 +237,7 @@ signals:
     void inkChanged(int strokes);
     void toolChanged();
     void penChanged();
+    void eraserChanged();      // 橡皮大小变了：工具栏刷新提示与面板选中档
     void undoStateChanged();
 
 protected:
@@ -260,11 +308,17 @@ private:
     void         cancelGesture();
     // Partial (segment-level) erase: cuts out only the touched part of a
     // stroke; the remaining pieces stay as separate strokes. Returns true if
-    // anything changed.
-    bool eraseAtPointer(int page, const QPointF &viewportPos);
+    // anything changed. `radiusPx` is the wipe radius in logical px (the
+    // selected static step, or the live palm radius).
+    bool eraseAtPointer(int page, const QPointF &viewportPos, qreal radiusPx);
     // Sweeps the eraser from `from` to `to` so fast drags do not skip ink
     // between successive pointer samples.
-    bool eraseSweep(int pageHint, const QPointF &from, const QPointF &to);
+    bool eraseSweep(int pageHint, const QPointF &from, const QPointF &to, qreal radiusPx);
+    // 当前该用的擦除半径：掌擦手势中用动态半径，否则用静态选中档。
+    qreal activeEraseRadius() const;
+    // 掌擦（手掌接触面橡皮）的一帧：把指示环跟到簇心，并按动态半径沿路径擦过来。
+    void  palmEraseTo(const QPointF &centroid, qreal radiusPx);
+    void  endPalmErase();
 
     // True when a touch frame must be handed to a floating overlay (toolbar,
     // palette, page grid) instead of the page. Only a touch that would START
@@ -338,11 +392,19 @@ private:
     InkTool m_tool     = InkTool::Pen;
     QColor  m_penColor{0xD3, 0x2F, 0x2F};
     qreal   m_penWidth = 4.0;           // device px
+    // 橡皮大小：静态三档里选中的那一档（逻辑像素半径），默认第一档 14。
+    qreal   m_eraserRadius = eraserRadiusSteps()[0];
 
     bool m_erasing     = false;         // point-eraser drag in progress
     bool m_erasePushed = false;         // this drag already took a snapshot
     QPointF m_lastErasePos;             // previous eraser sample (for sweeping)
     bool    m_hasLastErasePos = false;
+    // 掌擦：分类器（classifyTouch）负责防抖，这里只跟着它的结论走。
+    qreal   m_palmRadius = 0.0;         // 当前动态半径（掌擦期间显示与命中都用它）
+    bool    m_palmEraseActive = false;  // 掌擦手势进行中
+    QPointF m_palmLastPos;              // 掌擦的上一帧簇心（沿路径扫擦）
+    bool    m_hasPalmLastPos = false;
+    TouchClassState m_touchClass;       // 分类器的跨帧记忆（点数迟滞 / 半径 EMA）
     // Eraser indicator: where the pointer is and whether it is on the canvas. The ring
     // follows this, so a pointer move only repaints two small circles (old + new).
     QPointF m_eraserHoverPos;

@@ -139,24 +139,28 @@ QString chipSheet(const Theme::Palette &c, const Theme::Metrics &m)
     return sheet;
 }
 
-QString paletteSheet(const Theme::Palette &c, const Theme::Metrics &m)
+QString paletteSheet(const Theme::Palette &c, const Theme::Metrics &m, const QString &cardName)
 {
+    // `cardName` is the object name of the card frame (penPalette / eraserPalette):
+    // both floating panels share this one sheet, so the eraser size popup looks
+    // exactly like the pen palette it mirrors.
     return QStringLiteral(
-               "QFrame#penPalette {"
-               " background: %1;"
-               " border: %2 solid %3;"
-               " border-radius: %4; }"
-               "QLabel#paletteCaption { color: %5; background: transparent; }"
-               "QFrame#penPalette QToolButton {"
-               " color: %6;"
+               "QFrame#%1 {"
+               " background: %2;"
+               " border: %3 solid %4;"
+               " border-radius: %5; }"
+               "QLabel#paletteCaption { color: %6; background: transparent; }"
+               "QFrame#%1 QToolButton {"
+               " color: %7;"
                " background: transparent;"
                " border: none;"
-               " border-radius: %7;"
-               " padding: %8 %9 %10 %9; }"
-               "QFrame#penPalette QToolButton:hover { background: %11; }"
-               "QFrame#penPalette QToolButton:pressed { background: %12; }"
-               "QFrame#penPalette QToolButton:checked {"
-               " background: %13; color: %14; }")
+               " border-radius: %8;"
+               " padding: %9 %10 %11 %10; }"
+               "QFrame#%1 QToolButton:hover { background: %12; }"
+               "QFrame#%1 QToolButton:pressed { background: %13; }"
+               "QFrame#%1 QToolButton:checked {"
+               " background: %14; color: %15; }")
+        .arg(cardName)
         .arg(Theme::rgba(c.surface))
         .arg(Theme::px(m.divider))
         .arg(Theme::rgba(c.surfaceEdge))
@@ -193,6 +197,42 @@ QIcon widthIcon(qreal width, const QColor &color, const QColor &casing,
     p.drawLine(a, b);
     p.setPen(QPen(color, width, Qt::SolidLine, Qt::RoundCap));
     p.drawLine(a, b);
+    return QIcon(pm);
+}
+
+// 橡皮档位的文字标签（面板与按钮提示共用，所以只有一个定义处）。
+QString eraserSizeLabel(qreal radiusPx)
+{
+    const qreal *steps = PdfCanvas::eraserRadiusSteps();
+    if (qFuzzyCompare(radiusPx, steps[0]))
+        return QStringLiteral("小");
+    if (qFuzzyCompare(radiusPx, steps[1]))
+        return QStringLiteral("中");
+    return QStringLiteral("大");
+}
+
+// 橡皮档位的图标：一个空心圆环，直径按该档在最大档里的占比画出来，三档一眼
+// 能分出大小；浅色包边保证深色卡片上也有边界（和 widthIcon 同一个做法）。
+QIcon eraserSizeIcon(qreal radiusPx, const QColor &line, const QColor &casing,
+                     const QSize &logical, qreal dpr)
+{
+    QPixmap pm(qMax(1, int(logical.width() * dpr)), qMax(1, int(logical.height() * dpr)));
+    pm.setDevicePixelRatio(dpr);
+    pm.fill(Qt::transparent);
+
+    const int count = PdfCanvas::eraserRadiusStepCount();
+    const qreal maxRadius = PdfCanvas::eraserRadiusSteps()[qMax(0, count - 1)];
+    const QPointF centre(logical.width() / 2.0, logical.height() / 2.0);
+    const qreal room = qMax<qreal>(4.0, qMin(logical.width(), logical.height()) / 2.0 - 2.0);
+    const qreal r = qBound<qreal>(2.5, room * (radiusPx / maxRadius), room);
+
+    QPainter p(&pm);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setBrush(Qt::NoBrush);
+    p.setPen(QPen(casing, 3.0, Qt::SolidLine, Qt::RoundCap));
+    p.drawEllipse(centre, r, r);
+    p.setPen(QPen(line, 2.0, Qt::SolidLine, Qt::RoundCap));
+    p.drawEllipse(centre, r, r);
     return QIcon(pm);
 }
 
@@ -271,93 +311,194 @@ private:
     QColor m_color;
 };
 
-// Pen colour + width palette: a child overlay above the toolbar (never a
-// top-level popup, see the class comment below).
-class PenPalette : public QWidget
+// 浮层卡片的公共骨架：圆角卡片 + 柔和投影 + 跟随主题 + "点外部 / Esc 关闭"。
+// 笔调色板和橡皮大小面板都建在它上面，所以两块卡片看起来、用起来是同一个
+// 东西（同一张 paletteSheet、同一套关闭规则、同一个 DPI 处理）。
+//
+// 卡片是普通子浮层，不是顶层弹窗：Windows 给无边框窗口加的是方形原生
+// （DWM）投影，贴在圆角卡片旁边很难看；作为子部件由 Qt 合成，只剩卡片和
+// 它自己的柔和投影。
+class PaletteCard : public QWidget
+{
+public:
+    PaletteCard(QWidget *toolbar, const QFont &font, const Theme::Metrics &metrics,
+                const QString &cardName)
+        : QWidget(toolbar ? toolbar->parentWidget() : nullptr)
+        , m_toolbar(toolbar)
+        , m_font(font)
+        , m_metrics(metrics)
+        , m_cardName(cardName)
+    {
+        setFocusPolicy(Qt::NoFocus);
+        setAttribute(Qt::WA_ShowWithoutActivating, true);
+        setFont(m_font);
+        if (qApp)
+            qApp->installEventFilter(this);   // dismiss on a click outside
+    }
+
+    // Re-applies the card sheet, its shadow and the DPI/themed artwork.
+    virtual void applyTheme()
+    {
+        if (m_chip)
+            m_chip->setStyleSheet(paletteSheet(Theme::light(), m_metrics, m_cardName));
+        refreshGlow();
+        refreshArtwork();
+        update();
+    }
+
+protected:
+    // Builds the rounded card + shadow and returns the layout the content goes
+    // into. Called once by each subclass constructor.
+    QVBoxLayout *buildCard()
+    {
+        auto *outer = new QVBoxLayout(this);
+        outer->setContentsMargins(m_metrics.shadowRoom, m_metrics.shadowRoom,
+                                  m_metrics.shadowRoom, m_metrics.shadowRoom);
+        outer->setSpacing(0);
+
+        m_chip = new QFrame(this);
+        m_chip->setObjectName(m_cardName);
+        m_chip->setAttribute(Qt::WA_StyledBackground, true);
+        m_chip->setStyleSheet(paletteSheet(Theme::light(), m_metrics, m_cardName));
+        m_glow = new QGraphicsDropShadowEffect(m_chip);
+        m_glow->setBlurRadius(m_metrics.shadowBlur);
+        m_glow->setOffset(0.0, m_metrics.shadowOffsetY);
+        refreshGlow();
+        m_chip->setGraphicsEffect(m_glow);
+        outer->addWidget(m_chip);
+
+        auto *content = new QVBoxLayout(m_chip);
+        content->setContentsMargins(m_metrics.chipPad + Theme::Space1,
+                                    m_metrics.chipPad + Theme::Space1,
+                                    m_metrics.chipPad + Theme::Space1,
+                                    m_metrics.chipPad + Theme::Space1);
+        content->setSpacing(m_metrics.gap);
+        return content;
+    }
+
+    void showEvent(QShowEvent *e) override
+    {
+        QWidget::showEvent(e);
+        refreshArtwork();   // pick up the current screen's device pixel ratio
+    }
+
+    bool eventFilter(QObject *watched, QEvent *e) override
+    {
+        if (!isVisible())
+            return QWidget::eventFilter(watched, e);
+
+        switch (e->type()) {
+        case QEvent::MouseButtonPress:
+        case QEvent::TouchBegin:
+            // Decide by POSITION: the canvas accepts touch events, so a tap on the
+            // palette still reaches this filter with the viewport as `watched`.
+            if (!Overlay::pressInside(e, this, m_toolbar))
+                hide();
+            break;
+        case QEvent::KeyPress:
+            if (static_cast<QKeyEvent *>(e)->key() == Qt::Key_Escape) {
+                hide();
+                return true;
+            }
+            break;
+        default:
+            break;
+        }
+        return QWidget::eventFilter(watched, e);
+    }
+
+    // Subclass hook: rebuild the icons/labels whose colours or DPI changed.
+    virtual void refreshArtwork() {}
+
+    QFrame *chip() const { return m_chip; }
+    const Theme::Metrics &metrics() const { return m_metrics; }
+
+private:
+    void refreshGlow()
+    {
+        if (!m_glow)
+            return;
+        QColor shadow = Theme::light().shadow;
+        shadow.setAlpha(0x46);
+        m_glow->setColor(shadow);
+    }
+
+    QWidget                *m_toolbar = nullptr;   // clicking here must not auto-hide
+    QFont                   m_font;
+    Theme::Metrics          m_metrics{};
+    QString                 m_cardName;
+    QFrame                 *m_chip = nullptr;
+    QGraphicsDropShadowEffect *m_glow = nullptr;
+};
+
+// Pen colour + width palette: a child overlay above the toolbar.
+class PenPalette : public PaletteCard
 {
     Q_OBJECT
 public:
     // The island hands down its scaled font and metrics: the palette is part of
     // the same piece of chrome, so it shrinks with it.
-    PenPalette(QWidget *toolbar, const QFont &font, const Theme::Metrics &metrics);
+    PenPalette(QWidget *toolbar, const QFont &font, const Theme::Metrics &metrics)
+        : PaletteCard(toolbar, font, metrics, QStringLiteral("penPalette"))
+    {
+        buildUi();
+    }
 
     void syncSelection(const QColor &color, qreal width);
-
-    // Re-applies the card sheet and shadow after the application theme changed.
-    void applyTheme();
 
 signals:
     void colorPicked(const QColor &color);
     void widthPicked(qreal width);
 
 protected:
-    void showEvent(QShowEvent *e) override;
-    bool eventFilter(QObject *watched, QEvent *e) override;   // close on outside click
+    void refreshArtwork() override { refreshWidthIcons(); }
 
 private:
     void buildUi();
     void refreshWidthIcons();
 
-    QWidget                *m_toolbar = nullptr;   // clicking here must not auto-hide
-    QFont                   m_font;
-    Theme::Metrics          m_metrics{};
-    QFrame                 *m_chip = nullptr;
-    QGraphicsDropShadowEffect *m_glow = nullptr;
     QColor                  m_color{ 0xD3, 0x2F, 0x2F };
     QVector<ColorSwatch *> m_swatches;
     QVector<QToolButton *> m_widthButtons;
 };
 
-// The palette is a plain CHILD overlay, not a top-level popup: on Windows a
-// frameless window gets a square native (DWM) shadow around its bounds, which
-// looked broken next to the rounded card. As a child it is composited by Qt, so
-// only the card and its own soft shadow are visible.
-PenPalette::PenPalette(QWidget *toolbar, const QFont &font, const Theme::Metrics &metrics)
-    : QWidget(toolbar ? toolbar->parentWidget() : nullptr)
-    , m_toolbar(toolbar)
-    , m_font(font)
-    , m_metrics(metrics)
+// 橡皮大小面板：三档（小 / 中 / 大）。和笔调色板是同一张卡片 —— 同一个
+// paletteSheet、同一个关闭规则、同一个定位方式，内容换成三个圆环图标。
+class EraserPalette : public PaletteCard
 {
-    setFocusPolicy(Qt::NoFocus);
-    setAttribute(Qt::WA_ShowWithoutActivating, true);
-    if (qApp)
-        qApp->installEventFilter(this);   // dismiss on a click outside
-    buildUi();
-}
+    Q_OBJECT
+public:
+    EraserPalette(QWidget *toolbar, const QFont &font, const Theme::Metrics &metrics)
+        : PaletteCard(toolbar, font, metrics, QStringLiteral("eraserPalette"))
+    {
+        buildUi();
+    }
+
+    // 高亮当前档（值一定吸附到某一档，所以总能对上）。
+    void syncSelection(qreal radius);
+
+signals:
+    void sizePicked(qreal radiusPx);
+
+protected:
+    void refreshArtwork() override { refreshIcons(); }
+
+private:
+    void buildUi();
+    void refreshIcons();
+
+    QVector<QToolButton *> m_sizeButtons;
+};
 
 void PenPalette::buildUi()
 {
-    const Theme::Palette &pal = Theme::light();
-
-    setFont(m_font);
-    const Theme::Metrics m = m_metrics;
-
-    auto *outer = new QVBoxLayout(this);
-    outer->setContentsMargins(m.shadowRoom, m.shadowRoom, m.shadowRoom, m.shadowRoom);
-    outer->setSpacing(0);
-
-    auto *chip = new QFrame(this);
-    m_chip = chip;
-    chip->setObjectName(QStringLiteral("penPalette"));
-    chip->setAttribute(Qt::WA_StyledBackground, true);
-    chip->setStyleSheet(paletteSheet(pal, m));
-    m_glow = new QGraphicsDropShadowEffect(chip);
-    m_glow->setBlurRadius(m.shadowBlur);
-    m_glow->setOffset(0.0, m.shadowOffsetY);
-    QColor shadow = pal.shadow;
-    shadow.setAlpha(0x46);
-    m_glow->setColor(shadow);
-    chip->setGraphicsEffect(m_glow);
-    outer->addWidget(chip);
-
-    auto *content = new QVBoxLayout(chip);
-    content->setContentsMargins(m.chipPad + Theme::Space1, m.chipPad + Theme::Space1,
-                                m.chipPad + Theme::Space1, m.chipPad + Theme::Space1);
-    content->setSpacing(m.gap);
+    const Theme::Metrics m = metrics();
+    QVBoxLayout *content = buildCard();
+    QFrame *card = chip();
 
     const QFont captionFont = Theme::captionFont(font());
     auto addCaption = [&](const QString &text) {
-        auto *caption = new QLabel(text, chip);
+        auto *caption = new QLabel(text, card);
         caption->setObjectName(QStringLiteral("paletteCaption"));
         caption->setFont(captionFont);
         content->addWidget(caption);
@@ -370,7 +511,7 @@ void PenPalette::buildUi()
     auto *colorGroup = new QButtonGroup(this);
     colorGroup->setExclusive(true);
     for (int i = 0; i < 6; ++i) {
-        auto *swatch = new ColorSwatch(colors[i], chip);
+        auto *swatch = new ColorSwatch(colors[i], card);
         swatch->setToolTip(QStringLiteral("%1  %2").arg(penColorLabel(i), colors[i].name()));
         colorGroup->addButton(swatch);
         connect(swatch, &QAbstractButton::clicked, this, [this, swatch] {
@@ -389,7 +530,7 @@ void PenPalette::buildUi()
     widthGroup->setExclusive(true);
     const qreal *widths = penWidths();
     for (int i = 0; i < 3; ++i) {
-        auto *button = new QToolButton(chip);
+        auto *button = new QToolButton(card);
         button->setCheckable(true);
         button->setFocusPolicy(Qt::NoFocus);
         button->setCursor(Qt::PointingHandCursor);
@@ -409,24 +550,10 @@ void PenPalette::buildUi()
     refreshWidthIcons();
 }
 
-void PenPalette::applyTheme()
-{
-    const Theme::Palette &pal = Theme::light();
-    if (m_chip)
-        m_chip->setStyleSheet(paletteSheet(pal, m_metrics));
-    if (m_glow) {
-        QColor shadow = pal.shadow;
-        shadow.setAlpha(0x46);
-        m_glow->setColor(shadow);
-    }
-    refreshWidthIcons();   // the width samples' casing follows the theme
-    update();
-}
-
 void PenPalette::refreshWidthIcons()
 {
     const Theme::Palette &pal = Theme::light();
-    const Theme::Metrics m = m_metrics;
+    const Theme::Metrics m = metrics();
     const QSize box(qMax(30, m.icon + 12), qMax(14, int(m.icon * 0.62)));
     const qreal dpr = devicePixelRatioF();
     const qreal *widths = penWidths();
@@ -463,35 +590,77 @@ void PenPalette::syncSelection(const QColor &color, qreal width)
     refreshWidthIcons();
 }
 
-void PenPalette::showEvent(QShowEvent *e)
+// --- 橡皮大小面板 -----------------------------------------------------------
+
+void EraserPalette::buildUi()
 {
-    QWidget::showEvent(e);
-    refreshWidthIcons();   // pick up the current screen's device pixel ratio
+    const Theme::Metrics m = metrics();
+    QVBoxLayout *content = buildCard();
+    QFrame *card = chip();
+
+    const QFont captionFont = Theme::captionFont(font());
+    auto *caption = new QLabel(QStringLiteral("大小"), card);
+    caption->setObjectName(QStringLiteral("paletteCaption"));
+    caption->setFont(captionFont);
+    content->addWidget(caption);
+
+    auto *sizeRow = new QHBoxLayout;
+    sizeRow->setSpacing(m.gap);
+    auto *sizeGroup = new QButtonGroup(this);
+    sizeGroup->setExclusive(true);
+    const qreal *steps = PdfCanvas::eraserRadiusSteps();
+    const int count = PdfCanvas::eraserRadiusStepCount();
+    for (int i = 0; i < count; ++i) {
+        auto *button = new QToolButton(card);
+        button->setCheckable(true);
+        button->setFocusPolicy(Qt::NoFocus);
+        button->setCursor(Qt::PointingHandCursor);
+        button->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+        button->setText(eraserSizeLabel(steps[i]));
+        // 提示给出实际擦除直径（圆环直径 = 两倍半径），和按钮上的圆环图标对得上。
+        button->setToolTip(QStringLiteral("%1 · 直径 %2 px")
+                               .arg(eraserSizeLabel(steps[i]),
+                                    QString::number(qRound(steps[i] * 2.0))));
+        button->setMinimumHeight(m.touch);
+        connect(button, &QToolButton::clicked, this, [this, i] {
+            emit sizePicked(PdfCanvas::eraserRadiusSteps()[i]);
+        });
+        sizeGroup->addButton(button);
+        m_sizeButtons.append(button);
+        sizeRow->addWidget(button, 1);
+    }
+    content->addLayout(sizeRow);
+
+    refreshIcons();
 }
 
-bool PenPalette::eventFilter(QObject *watched, QEvent *e)
+void EraserPalette::refreshIcons()
 {
-    if (!isVisible())
-        return QWidget::eventFilter(watched, e);
-
-    switch (e->type()) {
-    case QEvent::MouseButtonPress:
-    case QEvent::TouchBegin:
-        // Decide by POSITION: the canvas accepts touch events, so a tap on the
-        // palette still reaches this filter with the viewport as `watched`.
-        if (!Overlay::pressInside(e, this, m_toolbar))
-            hide();
-        break;
-    case QEvent::KeyPress:
-        if (static_cast<QKeyEvent *>(e)->key() == Qt::Key_Escape) {
-            hide();
-            return true;
-        }
-        break;
-    default:
-        break;
+    const Theme::Palette &pal = Theme::light();
+    const Theme::Metrics m = metrics();
+    // 方形略宽的音符盒：三个圆环按档位占比排开，高度一致才好比较。
+    const QSize box(qMax(30, m.icon + 12), qMax(20, m.icon));
+    const qreal dpr = devicePixelRatioF();
+    const qreal *steps = PdfCanvas::eraserRadiusSteps();
+    const int count = int(m_sizeButtons.size());
+    for (int i = 0; i < count; ++i) {
+        QToolButton *button = m_sizeButtons.at(i);
+        button->setIconSize(box);
+        button->setIcon(eraserSizeIcon(steps[i], pal.text, pal.pageEdge, box, dpr));
     }
-    return QWidget::eventFilter(watched, e);
+}
+
+void EraserPalette::syncSelection(qreal radius)
+{
+    const qreal *steps = PdfCanvas::eraserRadiusSteps();
+    const int count = int(m_sizeButtons.size());
+    for (int i = 0; i < count; ++i) {
+        if (qFuzzyCompare(steps[i], radius)) {
+            m_sizeButtons.at(i)->setChecked(true);   // the group unchecks the rest
+            break;
+        }
+    }
+    refreshIcons();
 }
 
 InkToolbar::InkToolbar(PdfCanvas *canvas)
@@ -503,6 +672,7 @@ InkToolbar::InkToolbar(PdfCanvas *canvas)
     if (m_canvas) {
         connect(m_canvas, &PdfCanvas::toolChanged,      this, &InkToolbar::syncFromCanvas);
         connect(m_canvas, &PdfCanvas::penChanged,       this, &InkToolbar::syncFromCanvas);
+        connect(m_canvas, &PdfCanvas::eraserChanged,    this, &InkToolbar::syncFromCanvas);
         connect(m_canvas, &PdfCanvas::undoStateChanged, this, &InkToolbar::syncFromCanvas);
         connect(m_canvas, &PdfCanvas::inkChanged,       this, &InkToolbar::syncFromCanvas);
         connect(m_canvas, &PdfCanvas::pageChanged,      this, &InkToolbar::syncFromCanvas);
@@ -662,15 +832,12 @@ void InkToolbar::buildUi()
         showPenPalette();
     });
     connect(m_eraserButton, &QToolButton::clicked, this, [this] {
-        if (m_palette)
-            m_palette->hide();
-        dismissPageGrid();
         if (m_canvas)
             m_canvas->setTool(PdfCanvas::InkTool::Eraser);
+        showEraserPalette();
     });
     connect(m_moveButton, &QToolButton::clicked, this, [this] {
-        if (m_palette)
-            m_palette->hide();
+        hidePalettes();
         dismissPageGrid();
         if (m_canvas)
             m_canvas->setTool(PdfCanvas::InkTool::Move);
@@ -694,26 +861,22 @@ void InkToolbar::buildUi()
     connect(m_pageButton, &QToolButton::clicked, this, &InkToolbar::togglePageGrid);
     connect(m_saveButton, &QToolButton::clicked, this, [this] {
         dismissPageGrid();
-        if (m_palette)
-            m_palette->hide();
+        hidePalettes();
         emit saveRequested();
     });
     connect(m_saveAsButton, &QToolButton::clicked, this, [this] {
         dismissPageGrid();
-        if (m_palette)
-            m_palette->hide();
+        hidePalettes();
         emit saveAsRequested();
     });
     connect(m_settingsButton, &QToolButton::clicked, this, [this] {
         dismissPageGrid();
-        if (m_palette)
-            m_palette->hide();
+        hidePalettes();
         emit settingsRequested();
     });
     connect(m_fullscreenButton, &QToolButton::clicked, this, [this] {
         dismissPageGrid();
-        if (m_palette)
-            m_palette->hide();
+        hidePalettes();
         emit fullscreenRequested();
     });
     // The chevron IS the collapse / expand affordance: a direct click toggles
@@ -727,6 +890,12 @@ void InkToolbar::buildUi()
     // explicitly hidden once, so hide them here or they pop up on startup.
     m_palette->hide();
 
+    // 橡皮按钮的大小面板：和笔调色板同一张卡片、同一套关闭/定位规则，
+    // 只是一次点开（不是长按 —— 长按在这里没人会用）。
+    m_eraserPalette = new EraserPalette(this, font(), m_metrics);
+    connect(m_eraserPalette, &EraserPalette::sizePicked, this, &InkToolbar::onEraserSizePicked);
+    m_eraserPalette->hide();
+
     // The page-thumbnail picker is another viewport child overlay, owned by the
     // canvas like the palette: the "n / N" chip toggles it.
     m_pageGrid = new PageGrid(m_canvas, this);
@@ -739,6 +908,11 @@ void InkToolbar::buildUi()
         child->installEventFilter(this);
 
     refreshIcons();
+}
+
+QWidget *InkToolbar::testEraserPalette() const
+{
+    return m_eraserPalette;
 }
 
 void InkToolbar::refreshIcons()
@@ -775,6 +949,8 @@ void InkToolbar::applyTheme()
     }
     if (m_palette)
         m_palette->applyTheme();
+    if (m_eraserPalette)
+        m_eraserPalette->applyTheme();
     if (m_pageGrid)
         m_pageGrid->applyTheme();   // owned by the island, drawn on the canvas
     refreshIcons();
@@ -816,6 +992,18 @@ void InkToolbar::syncFromCanvas()
 
     if (m_palette)
         m_palette->syncSelection(pen, m_canvas->penWidth());
+
+    // 橡皮按钮的提示带上当前大小（圆环直径 = 2 倍半径），面板高亮同一档。
+    if (m_eraserButton) {
+        const qreal radius = m_canvas->eraserRadius();
+        const QString tip = QStringLiteral("点擦：擦除碰到的整条笔迹 · 当前大小：%1（直径 %2 px）")
+                                .arg(eraserSizeLabel(radius),
+                                     QString::number(qRound(radius * 2.0)));
+        if (m_eraserButton->toolTip() != tip)
+            m_eraserButton->setToolTip(tip);
+    }
+    if (m_eraserPalette)
+        m_eraserPalette->syncSelection(m_canvas->eraserRadius());
 }
 
 void InkToolbar::showPenPalette()
@@ -826,34 +1014,66 @@ void InkToolbar::showPenPalette()
         setCollapsed(false);
     // Only one card floats at a time.
     dismissPageGrid();
+    if (m_eraserPalette)
+        m_eraserPalette->hide();
     if (m_palette->isVisible()) {
         m_palette->hide();
         return;
     }
     if (m_canvas)
         m_palette->syncSelection(m_canvas->penColor(), m_canvas->penWidth());
-    positionPalette();
+    positionPaletteAbove(m_penButton, m_palette);
     m_palette->show();
     m_palette->raise();
 }
 
-void InkToolbar::positionPalette()
+// 橡皮按钮的点击路径：和笔按钮完全对称 —— 普通一点开面板，再点收起；
+// 选中一档后关掉面板。没有任何"按住"行为。
+void InkToolbar::showEraserPalette()
 {
-    if (!m_palette)
+    if (!m_eraserPalette)
+        return;
+    if (m_collapsed)
+        setCollapsed(false);
+    dismissPageGrid();
+    if (m_palette)
+        m_palette->hide();
+    if (m_eraserPalette->isVisible()) {
+        m_eraserPalette->hide();
+        return;
+    }
+    if (m_canvas)
+        m_eraserPalette->syncSelection(m_canvas->eraserRadius());
+    positionPaletteAbove(m_eraserButton, m_eraserPalette);
+    m_eraserPalette->show();
+    m_eraserPalette->raise();
+}
+
+void InkToolbar::hidePalettes()
+{
+    if (m_palette)
+        m_palette->hide();
+    if (m_eraserPalette)
+        m_eraserPalette->hide();
+}
+
+// 把卡片锚在某个按钮上方，并钳在它所属的页面区域内。
+void InkToolbar::positionPaletteAbove(QWidget *anchorButton, QWidget *card)
+{
+    if (!anchorButton || !card)
         return;
 
     const Theme::Metrics m = m_metrics;
-    m_palette->adjustSize();
-    const QSize size = m_palette->size();
+    card->adjustSize();
+    const QSize size = card->size();
 
-    // Anchored above the pen button, kept inside the screen it is shown on.
-    const QPoint anchor = m_penButton->mapToGlobal(QPoint(m_penButton->width() / 2, 0));
+    const QPoint anchor = anchorButton->mapToGlobal(QPoint(anchorButton->width() / 2, 0));
     int x = anchor.x() - size.width() / 2;
     int y = anchor.y() - size.height() - m.gap;
 
     // Keep it inside the page area it belongs to (the palette is a child of
     // that widget, so its position is parent-relative).
-    QWidget *host = m_palette->parentWidget();
+    QWidget *host = card->parentWidget();
     QRect bounds;
     if (host)
         bounds = QRect(host->mapToGlobal(QPoint(0, 0)), host->size());
@@ -870,9 +1090,9 @@ void InkToolbar::positionPalette()
     }
 
     if (host)
-        m_palette->move(host->mapFromGlobal(QPoint(x, y)));
+        card->move(host->mapFromGlobal(QPoint(x, y)));
     else
-        m_palette->move(x, y);
+        card->move(x, y);
 }
 
 void InkToolbar::onPenColorPicked(const QColor &color)
@@ -891,6 +1111,14 @@ void InkToolbar::onPenWidthPicked(qreal width)
         m_palette->hide();
 }
 
+void InkToolbar::onEraserSizePicked(qreal radiusPx)
+{
+    if (m_canvas)
+        m_canvas->setEraserRadius(radiusPx);
+    if (m_eraserPalette)
+        m_eraserPalette->hide();
+}
+
 // The page chip is a toggle: it opens the thumbnail picker, and clicking it
 // again (or picking a page) closes it. The picker is the only way to jump to a
 // page now that the modal number dialog is gone.
@@ -904,8 +1132,7 @@ void InkToolbar::togglePageGrid()
         m_pageGrid->close();
         return;
     }
-    if (m_palette)
-        m_palette->hide();
+    hidePalettes();
     m_pageGrid->open();
 }
 
@@ -921,8 +1148,8 @@ void InkToolbar::setCollapsed(bool on)
         return;
 
     m_collapsed = on;
-    if (on && m_palette)
-        m_palette->hide();
+    if (on)
+        hidePalettes();
     if (on)
         dismissPageGrid();
     if (m_body)
@@ -976,8 +1203,11 @@ void InkToolbar::moveBy(const QPoint &delta)
     m_userPos = clampToolbarPos(pos() + delta, host->size(), size());
     m_dragged = true;
     move(m_userPos);
+    // 开着的面板跟着自己的按钮走
     if (m_palette && m_palette->isVisible())
-        positionPalette();   // the popup follows its anchor
+        positionPaletteAbove(m_penButton, m_palette);
+    if (m_eraserPalette && m_eraserPalette->isVisible())
+        positionPaletteAbove(m_eraserButton, m_eraserPalette);
     raise();
 }
 
@@ -1143,7 +1373,9 @@ void InkToolbar::reposition()
     raise();
 
     if (m_palette && m_palette->isVisible())
-        positionPalette();   // keep the popup glued above the bar
+        positionPaletteAbove(m_penButton, m_palette);   // keep the popup glued above the bar
+    if (m_eraserPalette && m_eraserPalette->isVisible())
+        positionPaletteAbove(m_eraserButton, m_eraserPalette);
 }
 
 void InkToolbar::resizeEvent(QResizeEvent *e)

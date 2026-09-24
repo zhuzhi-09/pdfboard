@@ -16,6 +16,7 @@ class QMouseEvent;
 class QToolButton;
 class PageGrid;
 class PenPalette;
+class EraserPalette;
 
 // Classroom-whiteboard style floating toolbar that hovers over the page area.
 //
@@ -61,6 +62,9 @@ public:
     // island) through QApplication::sendEvent, so the island's event filter and
     // drag handlers run exactly as they do for a real press / move / release.
     QToolButton *testEraserButton() const { return m_eraserButton; }
+    // 橡皮大小面板（自测用）：验证"普通一点开 / 再点收起 / 选中后关闭"这条
+    // 交互链路，以及选中档确实写回画布。
+    QWidget *testEraserPalette() const;
     void testPressOn(QWidget *watched, const QPoint &localPos);
     void testMoveOn(QWidget *watched, const QPoint &localPos);
     void testReleaseOn(QWidget *watched, const QPoint &localPos);
@@ -69,6 +73,7 @@ public slots:
     void setCollapsed(bool on);
     void toggleCollapsed();
     void showPenPalette();
+    void showEraserPalette();
     void setFullscreenActive(bool on);
 
 signals:
@@ -97,9 +102,12 @@ private:
     void resetPress();             // drops the drag candidate / pressed child
     void refreshIcons();           // (re)build the button glyphs, incl. the pen badge
     void syncFromCanvas();
-    void positionPalette();
+    // 面板定位：锚在 `anchorButton` 上方并钳进页面区域；笔和橡皮共用同一条路径。
+    void positionPaletteAbove(QWidget *anchorButton, QWidget *card);
+    void hidePalettes();           // 收起两块面板（笔调色板 / 橡皮大小）
     void onPenColorPicked(const QColor &color);
     void onPenWidthPicked(qreal width);
+    void onEraserSizePicked(qreal radiusPx);
     void togglePageGrid();         // the "n / N" chip: page-thumbnail picker
     void dismissPageGrid();        // any command hides the picker it covers
 
@@ -124,6 +132,7 @@ private:
     QToolButton *m_fullscreenButton = nullptr;
     QToolButton *m_moreButton  = nullptr;   // the collapse / expand chevron
     PenPalette  *m_palette     = nullptr;
+    EraserPalette *m_eraserPalette = nullptr;   // 橡皮按钮上的大小面板
     PageGrid    *m_pageGrid    = nullptr;
 
     // Glyph of every icon button, so the icons can be rebuilt (DPI change or a

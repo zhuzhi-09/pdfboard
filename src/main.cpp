@@ -38,6 +38,7 @@
 #include <QHash>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLineF>
 #include <QList>
 #include <QLocalServer>
 #include <QLocalSocket>
@@ -2295,6 +2296,289 @@ static int runImageSelfTest()
                   int(ptsBefore > 0 && ptsAfter < ptsBefore), 1);
             check("pen tail: the toolbar tool is left alone",
                   int(canvas.tool() == PdfCanvas::InkTool::Pen), 1);
+        }
+
+        // --- 橡皮三档大小（静态大小）---------------------------------------
+        // 每份画布记住自己的橡皮大小；默认档 = 旧固定值 14 px，所以没动过设置
+        // 的安装擦除行为不变。更大的档必须真的擦掉更多笔迹 —— 这条断言穿过
+        // 命中测试与擦除路径，证明大小进了擦除，而不是只画了个更大的圆。
+        {
+            PdfCanvas er;
+            er.setAttribute(Qt::WA_DontShowOnScreen, true);
+            er.resize(900, 700);
+            er.show();
+            QString erErr;
+            check("eraser size: canvas opens the page", int(er.openPdf(pdfPath, &erErr)), 1);
+
+            const qreal *steps = PdfCanvas::eraserRadiusSteps();
+            check("eraser size: three steps", PdfCanvas::eraserRadiusStepCount(), 3);
+            check("eraser size: default is the old 14 px",
+                  int(qFuzzyCompare(er.testEraserRadius(), 14.0)), 1);
+            check("eraser size: the first step is the default",
+                  int(qFuzzyCompare(steps[0], er.testEraserRadius())), 1);
+
+            auto inkPoints = [&er]() {
+                int n = 0;
+                for (int i = 0; i < er.strokeCount(); ++i)
+                    n += er.testStrokePoints(0, i);
+                return n;
+            };
+
+            // 最小档：一条长线，从正中擦一次。
+            er.testSetEraserRadius(steps[0]);
+            er.testAddStroke(0, QPointF(0.2, 0.5), QPointF(0.8, 0.5),
+                             QColor(0x10, 0x10, 0x10), 6.0);
+            const int pointsFull = inkPoints();
+            er.testEraseAtNormalized(0, QPointF(0.5, 0.5));
+            const int leftSmall = inkPoints();
+            check("eraser size: the small step erases something",
+                  int(leftSmall > 0 && leftSmall < pointsFull), 1);
+
+            // 重开一份文档：大小回到默认档（大小随文档走，不是全局设置），
+            // 再选最大档，用同样的笔迹、同样的擦除点做第二次。
+            check("eraser size: canvas reopens", int(er.openPdf(pdfPath, &erErr)), 1);
+            check("eraser size: a new document starts at the default",
+                  int(qFuzzyCompare(er.testEraserRadius(), steps[0])), 1);
+
+            er.testSetEraserRadius(steps[2]);
+            er.testAddStroke(0, QPointF(0.2, 0.5), QPointF(0.8, 0.5),
+                             QColor(0x10, 0x10, 0x10), 6.0);
+            er.testEraseAtNormalized(0, QPointF(0.5, 0.5));
+            const int leftBig = inkPoints();
+            out(QStringLiteral("[selftest] eraser size: ink left small=%1 big=%2")
+                    .arg(leftSmall).arg(leftBig));
+            check("eraser size: the big step removes strictly more ink",
+                  int(leftBig < leftSmall), 1);
+
+            // 选中的档位不能被切工具 / 缩放重置（它随这份文档）。
+            er.testSetEraserRadius(steps[2]);
+            er.setTool(PdfCanvas::InkTool::Move);
+            er.setTool(PdfCanvas::InkTool::Eraser);
+            er.testZoomAt(QPointF(400, 300), 1.5);
+            check("eraser size: survives tool / zoom changes",
+                  int(qFuzzyCompare(er.testEraserRadius(), steps[2])), 1);
+
+            // 面板交互链路：普通一点开（没有任何"长按"），再点收起；选中一档后
+            // 关闭面板并把大小写回画布。用的是真实的按钮 clicked() 路径。
+            if (InkToolbar *bar = er.toolbar()) {
+                QWidget *card = bar->testEraserPalette();
+                check("eraser palette: the card exists", card ? 1 : 0, 1);
+                if (card) {
+                    bar->showEraserPalette();
+                    check("eraser palette: a plain click opens it",
+                          card->isVisible() ? 1 : 0, 1);
+                    // 视觉验收（仅当临时目录存在；CI 上没有该目录就跳过）：
+                    // 把弹出面板与工具岛各拍一张，供人眼核对配色/间距/有没有压住别的元素。
+                    if (QDir(QStringLiteral("D:/dev/tmp")).exists()) {
+                        const bool shotCard =
+                            card->grab().save(QStringLiteral("D:/dev/tmp/eraser-palette.png"),
+                                              "PNG");
+                        const bool shotBar =
+                            bar->grab().save(QStringLiteral("D:/dev/tmp/island.png"), "PNG");
+                        out(QStringLiteral("[selftest] 橡皮面板截图：面板=%1 工具岛=%2")
+                                .arg(shotCard ? QStringLiteral("已写") : QStringLiteral("失败"),
+                                     shotBar ? QStringLiteral("已写") : QStringLiteral("失败")));
+                    }
+                    const QList<QToolButton *> sizeButtons =
+                        card->findChildren<QToolButton *>();
+                    check("eraser palette: three size buttons",
+                          int(sizeButtons.size()), PdfCanvas::eraserRadiusStepCount());
+                    er.testSetEraserRadius(steps[0]);
+                    if (sizeButtons.size() == PdfCanvas::eraserRadiusStepCount()) {
+                        sizeButtons.at(sizeButtons.size() - 1)->click();
+                        check("eraser palette: picking a size applies it",
+                              int(qFuzzyCompare(er.testEraserRadius(), steps[2])), 1);
+                        check("eraser palette: picking closes the card",
+                              card->isVisible() ? 0 : 1, 1);
+                    }
+                    bar->showEraserPalette();   // 再点开
+                    bar->showEraserPalette();   // 再点收起
+                    check("eraser palette: clicking again closes it",
+                          card->isVisible() ? 0 : 1, 1);
+                }
+            }
+        }
+
+        // --- 掌擦分类器（手掌接触面橡皮）-----------------------------------
+        // 没有笔的教室大屏：手掌被面板报成好几个接触点，点数还逐帧抖动；真正的
+        // 双指缩放也是多点。分类器是纯函数，这里用合成点集逐帧驱动它 —— 不需要
+        // QTouchEvent，也不需要一台触摸屏。
+        {
+            // 同一簇的 5 个"掌心"点（两两间距都在聚簇阈值内）。
+            const QVector<QPointF> palmTight{
+                QPointF(400, 290), QPointF(418, 296), QPointF(424, 312),
+                QPointF(408, 322), QPointF(392, 310)};
+            // 同一形状摊开约 2.5 倍：更宽的手掌接触面。
+            const QVector<QPointF> palmWide{
+                QPointF(370, 278), QPointF(404, 272), QPointF(430, 294),
+                QPointF(422, 322), QPointF(388, 325)};
+
+            PdfCanvas::TouchClassState st;
+            PdfCanvas::TouchClassResult r = PdfCanvas::classifyTouch(palmTight, st);
+            check("palm: the first frame does not act yet",
+                  int(r.mode == PdfCanvas::TouchClass::Writing && !r.hasWritePos), 1);
+            r = PdfCanvas::classifyTouch(palmTight, st);
+            check("palm: enters on the 2nd consecutive frame",
+                  int(r.mode == PdfCanvas::TouchClass::PalmEraser), 1);
+            const qreal radiusTight = r.radiusPx;
+
+            PdfCanvas::TouchClassState stWide;
+            PdfCanvas::classifyTouch(palmWide, stWide);
+            r = PdfCanvas::classifyTouch(palmWide, stWide);
+            check("palm: a wider cluster gives a bigger radius",
+                  int(r.mode == PdfCanvas::TouchClass::PalmEraser
+                      && r.radiusPx > radiusTight + 8.0), 1);
+            check("palm: the radius is inside the clamp",
+                  int(radiusTight >= 14.0 && r.radiusPx <= 44.0 * 3.0 + 0.01), 1);
+
+            // 半径上限：一长串点（每两点 70 px，连成一个超宽的簇）不能把圆环
+            // 撑出 3 倍最大档。
+            {
+                QVector<QPointF> chained;
+                for (int i = 0; i < 8; ++i)
+                    chained.append(QPointF(100.0 + 70.0 * i, 400.0));
+                PdfCanvas::TouchClassState s;
+                PdfCanvas::classifyTouch(chained, s);
+                const PdfCanvas::TouchClassResult rr = PdfCanvas::classifyTouch(chained, s);
+                check("palm: an oversized cluster is clamped at the ceiling",
+                      int(rr.mode == PdfCanvas::TouchClass::PalmEraser
+                          && rr.radiusPx <= 44.0 * 3.0 + 0.01), 1);
+            }
+
+            // 手掌 + 远处一个书写点：不擦，把手指交给落笔路径。
+            {
+                QVector<QPointF> withFinger = palmTight;
+                withFinger.append(QPointF(650, 500));
+                PdfCanvas::TouchClassState s;
+                const PdfCanvas::TouchClassResult rr = PdfCanvas::classifyTouch(withFinger, s);
+                check("palm + writing finger: not the eraser",
+                      int(rr.mode == PdfCanvas::TouchClass::Writing && rr.hasWritePos), 1);
+                check("palm + writing finger: the finger is the write point",
+                      int(rr.hasWritePos
+                          && QLineF(rr.writePos, QPointF(650, 500)).length() < 2.0), 1);
+            }
+
+            // 两个明确分离的 2+2 簇 = 双指，不是掌擦。
+            {
+                const QVector<QPointF> pinchPts{QPointF(300, 300), QPointF(330, 305),
+                                                QPointF(700, 300), QPointF(730, 298)};
+                PdfCanvas::TouchClassState s;
+                const PdfCanvas::TouchClassResult rr = PdfCanvas::classifyTouch(pinchPts, s);
+                check("pinch: separated clusters stay a pinch",
+                      int(rr.mode == PdfCanvas::TouchClass::Pinch), 1);
+            }
+
+            // 单点 = 书写，既不是双指也不是掌擦。
+            {
+                PdfCanvas::TouchClassState s;
+                const PdfCanvas::TouchClassResult rr =
+                    PdfCanvas::classifyTouch(QVector<QPointF>{QPointF(420, 360)}, s);
+                check("single point: writing, not a gesture",
+                      int(rr.mode == PdfCanvas::TouchClass::Writing && rr.hasWritePos), 1);
+            }
+
+            // 点数抖动锁：同一簇里 4,5,3,4,2,4 个点（整簇每帧微移几像素）。
+            // 进入后一直是掌擦（不翻成双指、也不退回书写），半径只在一个小窗口
+            // 内移动 —— 这就是"点数抖动不能让橡皮闪"的那把锁。
+            {
+                const QPointF base[5] = {QPointF(400, 290), QPointF(418, 296),
+                                         QPointF(424, 312), QPointF(408, 322),
+                                         QPointF(392, 310)};
+                const int counts[6] = {4, 5, 3, 4, 2, 4};
+                PdfCanvas::TouchClassState s;
+                int pinchFrames = 0;
+                int palmFrames = 0;
+                qreal rMin = 1e9, rMax = -1e9;
+                for (int i = 0; i < 6; ++i) {
+                    const QPointF shift(qreal((i % 3) * 4), qreal((i % 2) * 3));
+                    QVector<QPointF> frame;
+                    for (int k = 0; k < counts[i]; ++k)
+                        frame.append(base[k] + shift);
+                    const PdfCanvas::TouchClassResult rr = PdfCanvas::classifyTouch(frame, s);
+                    if (rr.mode == PdfCanvas::TouchClass::Pinch)
+                        ++pinchFrames;
+                    if (rr.mode == PdfCanvas::TouchClass::PalmEraser) {
+                        ++palmFrames;
+                        rMin = qMin(rMin, rr.radiusPx);
+                        rMax = qMax(rMax, rr.radiusPx);
+                    }
+                }
+                out(QStringLiteral("[selftest] palm flicker: palm frames=%1 pinch=%2 radius %3..%4")
+                        .arg(palmFrames).arg(pinchFrames)
+                        .arg(rMin, 0, 'f', 1).arg(rMax, 0, 'f', 1));
+                check("flicker: never mistaken for a pinch", pinchFrames, 0);
+                // 前两帧是进入判定（需要连续 2 帧 >= 4 点）：第 2 帧进入，之后
+                // 的 3 点、2 点帧都不会退出。
+                check("flicker: stays in palm erase after entry", palmFrames, 5);
+                check("flicker: the radius stays in a tight band",
+                      int(rMax - rMin <= 14.0), 1);
+                // 抬到只剩一根手指 = 离开掌擦，回到书写。
+                const PdfCanvas::TouchClassResult rr =
+                    PdfCanvas::classifyTouch(QVector<QPointF>{QPointF(420, 360)}, s);
+                check("flicker: lifting to one finger leaves the eraser",
+                      int(rr.mode == PdfCanvas::TouchClass::Writing), 1);
+            }
+
+            // 端到端：同一串抖动帧真的沿路径擦掉墨，而且不缩放、不平移、不改
+            // 工具栏 —— 分类器的结论确实接到了擦除路径上（只测分类器本身会漏掉
+            // 这里：手掌手势曾经因为重置分类状态而每隔一帧断一次）。
+            {
+                PdfCanvas palm;
+                palm.setAttribute(Qt::WA_DontShowOnScreen, true);
+                palm.resize(900, 700);
+                palm.show();
+                QString pe;
+                check("palm canvas: opens the page", int(palm.openPdf(pdfPath, &pe)), 1);
+                palm.setTool(PdfCanvas::InkTool::Pen);
+
+                // 在页面上找一个视口位置，并在它上面画一条横线。
+                const QSize vp = palm.testViewportSize();
+                qreal vy = 0.25 * vp.height();
+                while (vy < vp.height() && palm.testPageAtViewportY(vy) < 0)
+                    vy += 10.0;
+                const qreal fx = palm.testFracX(0, 0.5 * vp.width());
+                const qreal fy = palm.testFracAtViewportY(vy);
+                check("palm canvas: the test lands on the page",
+                      int(fx > 0.0 && fy > 0.0), 1);
+                palm.testAddStroke(0, QPointF(fx - 0.12, fy), QPointF(fx + 0.12, fy),
+                                   QColor(0x10, 0x10, 0x10), 6.0);
+                auto inkPoints = [&palm]() {
+                    int n = 0;
+                    for (int i = 0; i < palm.strokeCount(); ++i)
+                        n += palm.testStrokePoints(0, i);
+                    return n;
+                };
+                const int beforePalm = inkPoints();
+                const int scrollBefore = palm.verticalScrollBar()->value();
+                const qreal zoomBefore = palm.testZoom();
+
+                const QPointF base[5] = {QPointF(400, 290), QPointF(418, 296),
+                                         QPointF(424, 312), QPointF(408, 322),
+                                         QPointF(392, 310)};
+                const int counts[6] = {4, 5, 3, 4, 2, 4};
+                bool flapped = false;
+                for (int i = 0; i < 6; ++i) {
+                    const QPointF shift(qreal((i % 3) * 4), qreal((i % 2) * 3));
+                    QVector<QPointF> frame;
+                    for (int k = 0; k < counts[i]; ++k)
+                        frame.append(base[k] + shift + QPointF(0.0, vy - 300.0));
+                    palm.testPalmFrame(frame);
+                    if (i >= 1 && !palm.testPalmEraseActive())
+                        flapped = true;
+                }
+                check("palm frames: the gesture does not flap", flapped ? 0 : 1, 1);
+                check("palm frames: the ink is removed",
+                      int(inkPoints() < beforePalm), 1);
+                check("palm frames: no zoom",
+                      int(qFuzzyCompare(palm.testZoom(), zoomBefore)), 1);
+                check("palm frames: no pan",
+                      palm.verticalScrollBar()->value(), scrollBefore);
+                check("palm frames: the toolbar tool is left alone",
+                      int(palm.tool() == PdfCanvas::InkTool::Pen), 1);
+                palm.testPalmFrame({});     // 手掌抬起
+                check("palm frames: lifting ends the gesture",
+                      palm.testPalmEraseActive() ? 0 : 1, 1);
+            }
         }
 
         // Two-finger jitter: a big IR panel reports its contacts with a few pixels of noise.
