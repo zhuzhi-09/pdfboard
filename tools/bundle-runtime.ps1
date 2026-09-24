@@ -55,7 +55,11 @@ $bundled = @()
 foreach ($name in $files) {
     $src = Join-Path $pick.Dir $name
     $ver = [version](Get-Item $src).VersionInfo.FileVersion
-    if ($ver -gt $ceiling) {
+    # Compare major.minor only: the ceiling means "the 14.44 family". A build number such as
+    # 14.44.35211.0 is by definition greater than "14.44.0.0", which is what the CI runner
+    # ships - comparing full versions made the guard fire on a perfectly good redist.
+    $family = [version]("{0}.{1}" -f $ver.Major, $ver.Minor)
+    if ($family -gt $ceiling) {
         throw ("$name is $ver, newer than the verified ceiling $ceiling. Bump the ceiling " +
                "deliberately (tools/bundle-runtime.ps1 + docs 2.60) and re-verify on an old " +
                "Windows 10 build before shipping.")
