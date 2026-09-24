@@ -99,10 +99,22 @@ QImage rasterizePageWithInk(const PdfCanvas *canvas, int page, int dpi,
                 color = QColor(Qt::red);
             const qreal wNorm = so.value(QStringLiteral("w")).toDouble(0.004);
             const QJsonArray pts = so.value(QStringLiteral("p")).toArray();
-            if (pts.size() < 4)
+            if (pts.size() < 2)
                 continue;
 
             // Same normalized -> pixel mapping the on-screen ink uses.
+            const qreal w = qMax<qreal>(1.0, wNorm * iw);
+            if (pts.size() < 4) {
+                // One point is a tap: the screen draws it as a dot (round cap over zero
+                // length), so the export has to as well or taps would vanish from the
+                // saved PDF/PNG.
+                p.setPen(QPen(color, w, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                p.setBrush(Qt::NoBrush);
+                p.drawPoint(QPointF(pts.at(0).toDouble() * (iw - 1),
+                                    pts.at(1).toDouble() * (ih - 1)));
+                continue;
+            }
+
             QPainterPath path;
             path.moveTo(pts.at(0).toDouble() * (iw - 1),
                         pts.at(1).toDouble() * (ih - 1));
@@ -110,8 +122,7 @@ QImage rasterizePageWithInk(const PdfCanvas *canvas, int page, int dpi,
                 path.lineTo(pts.at(i).toDouble() * (iw - 1),
                             pts.at(i + 1).toDouble() * (ih - 1));
 
-            p.setPen(QPen(color, qMax<qreal>(1.0, wNorm * iw),
-                          Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            p.setPen(QPen(color, w, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
             p.setBrush(Qt::NoBrush);
             p.drawPath(path);
         }

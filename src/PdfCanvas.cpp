@@ -14,6 +14,7 @@
 #include <QDateTime>
 #include <QElapsedTimer>
 #include <QMouseEvent>
+#include <QContextMenuEvent>
 #include <QCursor>
 #include <QGuiApplication>
 #include <QNativeGestureEvent>
@@ -668,17 +669,27 @@ void PdfCanvas::drawInk(QPainter &p, int page, const QRectF &rect)
     const bool live = (m_drawing && m_drawPage == page);
 
     auto drawStroke = [&p, &rect](const Stroke &s) {
-        if (s.pts.size() < 2)
+        if (s.pts.isEmpty())
             return;
+        const auto device = [&rect](const QPointF &n) {
+            return QPointF(rect.left() + n.x() * rect.width(),
+                           rect.top() + n.y() * rect.height());
+        };
+        // A lone sample is a tap, and a tap is a dot: a round-capped pen over zero length
+        // paints exactly one. Taps used to disappear because this function demanded two
+        // points and endInput() discarded the stroke - see the commit rule there.
+        if (s.pts.size() == 1) {
+            p.setPen(QPen(s.color, qMax<qreal>(0.5, s.width * rect.width()),
+                          Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+            p.setBrush(Qt::NoBrush);
+            p.drawPoint(device(s.pts.first()));
+            return;
+        }
         // Smooth through the samples instead of joining them with straight
         // segments: sparse input (a fast pen stroke, touch coalescing) otherwise
         // turns into visible corners, and zooming in makes every corner larger.
         // This is the standard quadratic scheme - the curve runs through the
         // midpoints and each sample acts as its control point.
-        const auto device = [&rect](const QPointF &n) {
-            return QPointF(rect.left() + n.x() * rect.width(),
-                           rect.top() + n.y() * rect.height());
-        };
         QPainterPath path;
         path.moveTo(device(s.pts.first()));
         if (s.pts.size() == 2) {
@@ -1622,16 +1633,24 @@ void PdfCanvas::endInput()
             const QPointF d = m_current.pts.at(i) - m_current.pts.at(i - 1);
             lenPx += qSqrt(QPointF::dotProduct(d, d)) * r.width();
         }
-        if (lenPx < 3.0) {
-            eraseLog(QStringLiteral("ink discarded (tap/noise, len=%1 px)")
+        if (lenPx < 3.0 && m_strokeFromTouch) {
+            eraseLog(QStringLiteral("ink discarded (touch tap/noise, len=%1 px)")
                          .arg(lenPx, 0, 'f', 2));
             m_current = Stroke{};
             m_drawPage = -1;
             viewport()->update();
             return;
         }
-        eraseLog(QStringLiteral("ink committed (len=%1 px, pts=%2)")
-                     .arg(lenPx, 0, 'f', 1).arg(m_current.pts.size()));
+        if (lenPx < 3.0) {
+            // A mouse or stylus tap (or a jittery click) is a dot the teacher meant to
+            // place. Only touch keeps the "too short = noise" rule - that filter exists
+            // for a stray finger during a gesture, not for a deliberate tap.
+            eraseLog(QStringLiteral("ink committed as a dot (len=%1 px, pts=%2)")
+                         .arg(lenPx, 0, 'f', 2).arg(m_current.pts.size()));
+        } else {
+            eraseLog(QStringLiteral("ink committed (len=%1 px, pts=%2)")
+                         .arg(lenPx, 0, 'f', 1).arg(m_current.pts.size()));
+        }
         pushUndoSnapshot();                    // state before the new stroke
         m_ink[m_drawPage].append(m_current);
         emit inkChanged(strokeCount());
@@ -1666,6 +1685,7 @@ void PdfCanvas::panBy(const QPointF &delta)
 
 void PdfCanvas::mousePressEvent(QMouseEvent *e)
 {
+    m_strokeFromTouch = false;       // a real mouse: taps are dots (see endInput)
     if (m_touchInkBlocked) {          // a two-finger touch gesture owns the input
         eraseLog(QStringLiteral("mouse press ignored (touch lock)"));
         QAbstractScrollArea::mousePressEvent(e);
@@ -1715,6 +1735,16 @@ void PdfCanvas::mouseMoveEvent(QMouseEvent *e)
         return;
     }
     moveInputTo(e->position());
+}
+
+// Windows turns a "press and hold" touch into a right-click, which Qt delivers as a
+// context menu event: during touch writing that popped the system menu and interrupted
+// the stroke. The canvas has nothing to offer in a context menu (undo / clear / page
+// jump all live on the island), so the request is swallowed rather than propagated to
+// the window - see also the QEvent::ContextMenu case in viewportEvent().
+void PdfCanvas::contextMenuEvent(QContextMenuEvent *e)
+{
+    e->accept();
 }
 
 void PdfCanvas::mouseReleaseEvent(QMouseEvent *e)
@@ -1991,6 +2021,11 @@ bool PdfCanvas::event(QEvent *e)
 bool PdfCanvas::viewportEvent(QEvent *e)
 {
     switch (e->type()) {
+    case QEvent::ContextMenu:
+        // "Press and hold" on a touch panel arrives as a context menu request; during
+        // writing that used to break the stroke. See contextMenuEvent().
+        e->accept();
+        return true;
     case QEvent::Leave:
         // The pointer left the canvas: drop the indicator (and give the cursor back).
         clearEraserHover();
@@ -2061,6 +2096,7 @@ bool PdfCanvas::handleWheel(QWheelEvent *we)
 // the stroke (and briefly after it) - the same trick the touch path uses.
 bool PdfCanvas::handleTablet(QTabletEvent *te)
 {
+    m_strokeFromTouch = false;       // a stylus: taps are dots (see endInput)
     InputProbe::instance().addEvent(1);
 
     if (m_tool == InkTool::Move)
@@ -2119,6 +2155,9 @@ bool PdfCanvas::handleTouch(QTouchEvent *te)
     // Free move pans the view, so it works on a blank canvas too.
     if (m_tool != InkTool::Move && (!m_doc || m_geom.isEmpty()))
         return false;
+    // The only path that feeds real finger input: a finger tap may still be noise, so it
+    // keeps the "too short = discard" rule in endInput(). A mouse/stylus tap leaves a dot.
+    m_strokeFromTouch = true;
 
     QVector<QPointF> pts;
     for (const QEventPoint &p : te->points()) {

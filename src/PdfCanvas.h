@@ -192,6 +192,9 @@ protected:
     void resizeEvent(QResizeEvent *e) override;
     void scrollContentsBy(int dx, int dy) override;
     void mousePressEvent(QMouseEvent *e) override;
+    // Touch writing must never be interrupted by the system's "press and hold" right-click:
+    // the canvas has no context menu, so the event is swallowed instead of propagating.
+    void contextMenuEvent(QContextMenuEvent *e) override;
     void mouseMoveEvent(QMouseEvent *e) override;
     void mouseReleaseEvent(QMouseEvent *e) override;
 
@@ -329,6 +332,9 @@ private:
     // follows this, so a pointer move only repaints two small circles (old + new).
     QPointF m_eraserHoverPos;
     bool    m_eraserHover = false;
+    // Which input started the stroke in progress: only a finger keeps the "too short =
+    // noise" rule, a mouse/stylus tap is committed as a dot.
+    bool    m_strokeFromTouch = false;
     // Polls the global cursor so the indicator and mouse strokes survive crossing the
     // floating island (a child widget that would otherwise eat every mouse event).
     QTimer *m_pointerTrack = nullptr;

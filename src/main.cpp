@@ -2109,6 +2109,53 @@ static int runImageSelfTest()
         const QImage shotB(PdfExport::pngPageName(leakB, 1, 1));
         check("eraser: export ignores the overlay", int(!shotA.isNull() && shotA == shotB), 1);
 
+        // A tap must leave a dot. It used to vanish twice over: drawInk() required two
+        // points and endInput() threw the stroke away as "tap/noise". The tap hooks drive
+        // beginInputAt/endInput directly, i.e. the mouse/stylus path (a real finger sets
+        // m_strokeFromTouch in handleTouch and keeps the old noise rule).
+        {
+            PdfCanvas tap;
+            tap.setAttribute(Qt::WA_DontShowOnScreen, true);
+            tap.resize(900, 700);
+            tap.show();
+            QString tapErr;
+            check("tap: canvas opens the page", int(tap.openPdf(pdfPath, &tapErr)), 1);
+            const QSize vp = tap.testViewportSize();
+            const QPointF dot(0.35 * vp.width(), 0.35 * vp.height());
+            // Pin the pen colour: the default is red, whose grey level (~95) is nowhere near
+            // the "near-black" the pixel scan below looks for.
+            tap.setPenColor(QColor(0x10, 0x10, 0x10));
+            tap.testTouchBegin(dot);
+            tap.testTouchEnd();
+            check("tap: commits one stroke", tap.strokeCount(), 1);
+            check("tap: stored as a single sample",
+                  int(tap.testStrokePoints(0, 0) >= 1 && tap.testStrokePoints(0, 0) <= 2), 1);
+            // Where did the tap land ON THE PAGE? Derive it from the canvas instead of
+            // assuming viewport == page: the page is inset by margins and page padding.
+            const qreal fx = tap.testFracX(0, dot.x());
+            const qreal fy = tap.testFracAtViewportY(dot.y());
+            check("tap: lands on the page", int(fx >= 0.0 && fy >= 0.0), 1);
+            const QImage shot = PdfExport::renderPageWithInk(&tap, 0, 96, &tapErr);
+            int dotPx = 0;
+            if (!shot.isNull() && fx >= 0.0 && fy >= 0.0) {
+                const int cx = int(fx * shot.width()), cy = int(fy * shot.height());
+                for (int y = cy - 18; y <= cy + 18; ++y) {
+                    if (y < 0 || y >= shot.height())
+                        continue;
+                    for (int x = cx - 18; x <= cx + 18; ++x) {
+                        if (x < 0 || x >= shot.width())
+                            continue;
+                        if (qGray(shot.pixel(x, y)) < 40)    // the near-black ink only
+                            ++dotPx;
+                    }
+                }
+            }
+            // One assertion, not two: "a few pixels but not a streak" cannot be satisfied
+            // by finding nothing.
+            check("tap: a dot is drawn (and is a dot, not a line)",
+                  int(dotPx >= 6 && dotPx < 400), 1);
+        }
+
         // A touch (or stylus) drag must never be hijacked by the global mouse cursor. NOTE:
         // the real trigger - Windows synthesising button-PRESSED mouse events for touch -
         // cannot be reproduced headlessly, so this only locks the weaker, still useful fact
