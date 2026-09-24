@@ -97,18 +97,12 @@ jobs:
           # app then cannot start at all) and vc_redist needs admin rights, which this
           # per-user installer deliberately avoids. Microsoft supports shipping these
           # DLLs next to the exe; the VS redist folder is the licensed source.
-          # VC++ runtime, app-local. Source: this machine's System32, i.e. the exact
-          # version the staged exe already loads successfully in the Self test below.
-          # Copying the newest VS redist instead shipped a 14.5x CRT that fails to
-          # initialise on older Windows (0xC0000142) - including the classroom machines
-          # these DLLs are for. Only what dumpbin lists as needed is copied.
-          $crtFiles = "msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll"
-          foreach ($name in $crtFiles) {
-            $from = Join-Path $env:SystemRoot "System32\$name"
-            if (-not (Test-Path $from)) { throw "$name not found in System32" }
-            Copy-Item $from dist/stage/ -Force
-          }
-          "bundled VC runtime from $env:SystemRoot\System32"
+          # VC++ runtime, app-local, from the VS redist that matches the toolchain - never
+          # from this runner's System32, whose version drifts with the image (that is how a
+          # 14.51 CRT once shipped and failed on older classroom machines). One shared rule
+          # for package.cmd and both workflows; the bundled version is recorded in
+          # runtime.txt and anything past the script's ceiling fails the build. See docs 2.60.
+          ./tools/bundle-runtime.ps1 -Stage dist/stage
           New-Item -ItemType Directory -Force dist/stage/translations | Out-Null
           Copy-Item "$env:QT_ROOT_DIR/translations/*zh_CN.qm" dist/stage/translations/ -ErrorAction SilentlyContinue
 

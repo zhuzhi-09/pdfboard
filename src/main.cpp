@@ -2661,6 +2661,21 @@ int main(int argc, char **argv)
     // configured with. Qt does not use it unless asked, which would make every
     // update check fail on exactly the machines that need the accelerator.
     QNetworkProxyFactory::setUseSystemConfiguration(true);
+
+    // Record which app-local runtime the package shipped: startup.log then names the exact CRT
+    // version a machine is running, which is the first thing to check when one refuses to start
+    // (see docs 2.60). runtime.txt is written next to the exe by tools/bundle-runtime.ps1.
+    {
+        QFile rt(QCoreApplication::applicationDirPath() + QStringLiteral("/runtime.txt"));
+        const QString diag = QString::fromLocal8Bit(qgetenv("LOCALAPPDATA"))
+                             + QStringLiteral("/PDFBoard/logs/startup.log");
+        QFile log(diag);
+        if (rt.open(QIODevice::ReadOnly) && log.open(QIODevice::Append)) {
+            log.write(QStringLiteral("随包运行库：\n").toUtf8());
+            log.write(rt.readAll());
+            log.flush();
+        }
+    }
     app.setApplicationName(QStringLiteral("PDFBoard"));
 
     // Crash evidence first: a log, a minidump and the last operations, written even

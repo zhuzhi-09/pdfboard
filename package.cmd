@@ -37,16 +37,12 @@ rem no translation bundle except the Chinese one the app asks for.
 "%QT%\bin\windeployqt.exe" --release --no-translations --no-system-d3d-compiler "%~dp0dist\stage\pdfboard.exe" || ( echo [package] windeployqt failed & exit /b 1 )
   del /q "%~dp0dist\stage\dxcompiler.dll" "%~dp0dist\stage\dxil.dll" "%~dp0dist\stage\vc_redist.x64.exe" 2>nul
 
-  rem VC++ runtime, deployed app-local. Source: this machine's System32 - the exact
-  rem version the app already loads here, so it is guaranteed to initialise. The newest
-  rem VS redist ships a 14.5x CRT that dies on older Windows with 0xC0000142 (DLL init
-  rem failed), and a classroom machine may have no runtime at all, which is why this is
-  rem bundled rather than assumed. Only what dumpbin lists as needed is copied.
-  for %%F in (msvcp140.dll vcruntime140.dll vcruntime140_1.dll) do (
-      if not exist "%SystemRoot%\System32\%%F" ( echo [package] ERROR: %%F not found in System32 & exit /b 1 )
-      copy /y "%SystemRoot%\System32\%%F" "%~dp0dist\stage\" >nul || ( echo [package] copy of %%F failed & exit /b 1 )
-  )
-  echo [package] VC runtime bundled from %SystemRoot%\System32
+  rem VC++ runtime, app-local, taken from the VS redist that matches the toolchain - never
+  rem from this machine's System32, whose version drifts with Windows/runner updates (that is
+  rem how a 14.51 CRT once shipped and failed on older classroom machines). The rule lives in
+  rem one shared script; the version actually bundled is recorded in dist\stage\runtime.txt
+  rem and anything past the script's ceiling fails the build. See docs 2.60.
+  powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0tools\bundle-runtime.ps1" -Stage "%~dp0dist\stage" || ( echo [package] bundling the VC runtime failed & exit /b 1 )
 mkdir "%~dp0dist\stage\translations" 2>nul
 copy /y "%QT%\translations\*zh_CN.qm" "%~dp0dist\stage\translations\" >nul 2>nul
 
