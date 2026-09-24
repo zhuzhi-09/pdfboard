@@ -2156,6 +2156,37 @@ static int runImageSelfTest()
                   int(dotPx >= 6 && dotPx < 400), 1);
         }
 
+        // The eraser END of a stylus must erase this stroke instead of drawing ink, and it must
+        // leave the toolbar's tool alone (the teacher turned the pen around, not the UI).
+        // Derive the page-space position from the canvas - the page is inset, so viewport
+        // fractions are NOT page fractions (that mistake cost a round earlier).
+        {
+            canvas.setTool(PdfCanvas::InkTool::Pen);
+            const QSize vpT = canvas.testViewportSize();
+            const qreal fy = canvas.testFracAtViewportY(0.40 * vpT.height());
+            const qreal fx = canvas.testFracX(0, 0.50 * vpT.width());
+            check("pen tail: the test lands on the page", int(fx > 0.0 && fy > 0.0), 1);
+            canvas.testAddStroke(0, QPointF(fx - 0.05, fy), QPointF(fx + 0.05, fy),
+                                 QColor(0x10, 0x10, 0x10), 6.0);
+            const QString inkBefore = canvas.testStrokeSummary(0);
+            // NOTE: "the summary changed" is NOT a usable assertion here - drawing a new stroke
+            // changes it too. What only an ERASE can do is remove ink, so count the points.
+            auto inkPoints = [&canvas]() {
+                int n = 0;
+                for (int i = 0; i < canvas.strokeCount(); ++i)
+                    n += canvas.testStrokePoints(0, i);
+                return n;
+            };
+            const int ptsBefore = inkPoints();
+            canvas.testEraserTailStroke(QPointF(0.50 * vpT.width(), 0.36 * vpT.height()),
+                                        QPointF(0.50 * vpT.width(), 0.44 * vpT.height()));
+            const int ptsAfter = inkPoints();
+            check("pen tail: the eraser end removes ink (a pen would add it)",
+                  int(ptsBefore > 0 && ptsAfter < ptsBefore), 1);
+            check("pen tail: the toolbar tool is left alone",
+                  int(canvas.tool() == PdfCanvas::InkTool::Pen), 1);
+        }
+
         // Two-finger jitter: a big IR panel reports its contacts with a few pixels of noise.
         // That noise hits both the finger distance (scale) and their centroid (pan), which
         // made the page breathe and shake. The smoothing must remove the visible part of it

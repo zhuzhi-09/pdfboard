@@ -863,7 +863,9 @@ void PdfCanvas::trackPointer()
 
 bool PdfCanvas::eraserIndicatorVisible() const
 {
-    return m_tool == InkTool::Eraser && !m_pinchActive && !m_touchInkBlocked
+    // Any erase shows the ring - including a stylus used with its eraser end, where the toolbar
+    // still says "pen". The ring is the size readout, and it is needed most in that case.
+    return (m_tool == InkTool::Eraser || m_erasing) && !m_pinchActive && !m_touchInkBlocked
            && !m_moveDragActive && (m_erasing || m_eraserHover);
 }
 
@@ -977,6 +979,12 @@ void PdfCanvas::testTrackPointer() { trackPointer(); }
 void PdfCanvas::testPinchBegin(const QPointF &a, const QPointF &b) { startPinch(a, b); }
 void PdfCanvas::testPinchFrame(const QPointF &a1, const QPointF &b1) { applyPinchFrame(a1, b1); }
 void PdfCanvas::testPinchEnd() { endPinch(); }
+void PdfCanvas::testEraserTailStroke(const QPointF &from, const QPointF &to)
+{
+    beginInputAt(from, /*asEraser=*/true);
+    moveInputTo(to);
+    endInput();
+}
 QPointF PdfCanvas::testEraserHoverPos() const { return m_eraserHoverPos; }
 
 QImage PdfCanvas::testRenderEraserIndicator(const QPointF &viewportPos, qreal radiusPx,
@@ -1523,9 +1531,11 @@ bool PdfCanvas::eraseAtPointer(int page, const QPointF &viewportPos)
 // Mouse and touch both funnel through these, so pen / eraser / pinch behave
 // identically whichever input produced them.
 
-void PdfCanvas::beginInputAt(const QPointF &viewportPos)
+void PdfCanvas::beginInputAt(const QPointF &viewportPos, bool asEraser)
 {
-    if (m_tool == InkTool::Move)    // free move never draws ink
+    // `asEraser` comes from hardware that names its own eraser (a stylus turned around): this
+    // stroke erases and the toolbar keeps whatever tool it had.
+    if (m_tool == InkTool::Move && !asEraser)    // free move never draws ink
         return;
 
     // Writing wins over sharpening: if the page bitmaps are still queued for a
@@ -1539,7 +1549,7 @@ void PdfCanvas::beginInputAt(const QPointF &viewportPos)
     if (page < 0)
         return;
 
-    if (m_tool == InkTool::Eraser) {
+    if (m_tool == InkTool::Eraser || asEraser) {
         m_erasing = true;
         m_erasePushed = false;
         m_lastErasePos = viewportPos;
@@ -2125,7 +2135,7 @@ bool PdfCanvas::handleTablet(QTabletEvent *te)
         m_touchInkBlocked = true;          // swallow the synthesized mice
         if (m_touchRelease)
             m_touchRelease->stop();
-        beginInputAt(pos);
+        beginInputAt(pos, te->pointerType() == QPointingDevice::PointerType::Eraser);
         return true;
     case QEvent::TabletMove:
         if (m_drawing || m_erasing)

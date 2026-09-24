@@ -18,7 +18,7 @@
 ; passes /DAppVersion=... /DOutputBase=... so its artifacts do not collide with
 ; the tagged releases. Local builds keep the plain version below.
 #ifndef AppVersion
-  #define AppVersion "1.9.6"
+  #define AppVersion "1.9.7"
 #endif
 #ifndef OutputBase
   #define OutputBase "PDFBoard-" + AppVersion + "-setup"

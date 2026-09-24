@@ -172,6 +172,9 @@ public:
     void   testPinchBegin(const QPointF &a, const QPointF &b);
     void   testPinchFrame(const QPointF &a1, const QPointF &b1);
     void   testPinchEnd();
+    // The eraser end of a stylus (QTabletEvent::pointerType() == Eraser) must erase the stroke
+    // instead of drawing ink; this drives that exact path without a tablet attached.
+    void   testEraserTailStroke(const QPointF &from, const QPointF &to);
     QImage testRenderEraserIndicator(const QPointF &viewportPos, qreal radiusPx,
                                      const QSize &imageSize);
     int    strokeCount() const;
@@ -280,7 +283,9 @@ private:
     // comment on the implementation for why that matters.
     bool handleWheel(QWheelEvent *we);
     // Shared input entry points (used by both mouse and touch handlers).
-    void beginInputAt(const QPointF &viewportPos);   // pen stroke / erase start
+    // `asEraser` is for hardware that names its own eraser: a stylus used with its eraser end
+    // erases this stroke without touching the toolbar's tool state.
+    void beginInputAt(const QPointF &viewportPos, bool asEraser = false);
     void moveInputTo(const QPointF &viewportPos);
     void endInput();
     // Free-move mode: pans the view by the pointer movement since the previous
