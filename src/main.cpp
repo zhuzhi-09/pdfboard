@@ -21,6 +21,7 @@
 #include <QApplication>
 #include <QByteArray>
 #include <QColor>
+#include <QDateTime>
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
@@ -2056,6 +2057,15 @@ static int runImageSelfTest()
     check("roundtrip: png loaded", int(!exported.isNull()), 1);
     check("roundtrip: png is 800x600", int(exported.size() == QSize(800, 600)), 1);
 
+    // Deployment diagnostics must exist even when the app itself could not start: the file is
+    // written from the first line of main, so a machine that fails on the Qt platform plugin
+    // still leaves something to send us.
+    {
+        const QString startupLog = QString::fromLocal8Bit(qgetenv("LOCALAPPDATA"))
+                                   + QStringLiteral("/PDFBoard/logs/startup.log");
+        check("startup diagnostics written", int(QFileInfo(startupLog).size() > 0), 1);
+    }
+
     // Eraser indicator: a screen-only ring whose diameter IS the wipe diameter, with the
     // eraser glyph in the middle so the tool is recognisable. Three things must hold:
     // the ring is drawn, it scales with the radius it is given, and none of it reaches an
@@ -2481,8 +2491,50 @@ static void serveLaterLaunches(MainWindow &w)
     });
 }
 
+// Deployment diagnostics. If Qt cannot even initialise its platform plugin the process aborts
+// before any of our logging exists: on a teacher's PC that shows up as one modal error and
+// leaves us with nothing to look at (real report: "no Qt platform plugin could be
+// initialized" on a machine we cannot touch). Installing a Qt message handler as the FIRST
+// statement of main(), plus asking the plugin loader for its own trace, writes the whole story
+// to %LOCALAPPDATA%\PDFBoard\logs\startup.log - so "it does not start on teacher X's PC"
+// becomes one file they can send over.
+static void installStartupDiagnostics()
+{
+    qputenv("QT_DEBUG_PLUGINS", QByteArrayLiteral("1"));
+
+    const QString dir = QString::fromLocal8Bit(qgetenv("LOCALAPPDATA"))
+                        + QStringLiteral("/PDFBoard/logs");
+    QDir().mkpath(dir);
+    // Static: it has to survive the abort, so it is never closed on purpose.
+    static QFile file(dir + QStringLiteral("/startup.log"));
+    if (file.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+        file.write(QStringLiteral("PDFBoard 启动诊断：Qt 消息 + 插件加载轨迹"
+                                  "（每次启动重写；程序起不来时把这个文件发给我们）\n")
+                       .toUtf8());
+        file.flush();
+    }
+
+    qInstallMessageHandler([](QtMsgType type, const QMessageLogContext &, const QString &msg) {
+        const char *tag = type == QtDebugMsg     ? "debug"
+                          : type == QtInfoMsg    ? "info"
+                          : type == QtWarningMsg ? "warn"
+                                                 : "fatal";
+        const QString line = QStringLiteral("[%1] %2: %3\n")
+                                 .arg(QDateTime::currentDateTime().toString("HH:mm:ss.zzz"),
+                                      QString::fromLatin1(tag), msg);
+        if (file.isOpen()) {
+            file.write(line.toUtf8());
+            file.flush();          // a qFatal immediately after must still reach the disk
+        }
+        fputs(line.toLocal8Bit().constData(), stderr);
+    });
+}
+
 int main(int argc, char **argv)
 {
+    // Must be first: the platform plugin is initialised inside the QApplication constructor
+    // below, and a failure there aborts the process before anything else can log.
+    installStartupDiagnostics();
     // Ink quality lever (must be set BEFORE QApplication is built): on Windows Qt
     // compresses touch updates into one event per frame by default, silently
     // dropping most of the panel's samples. With them dropped, a fast stroke
