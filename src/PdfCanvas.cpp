@@ -974,6 +974,9 @@ void PdfCanvas::clearEraserHover()
 void PdfCanvas::testSetEraserHover(const QPointF &viewportPos) { setEraserHover(viewportPos); }
 void PdfCanvas::testClearEraserHover() { clearEraserHover(); }
 void PdfCanvas::testTrackPointer() { trackPointer(); }
+void PdfCanvas::testPinchBegin(const QPointF &a, const QPointF &b) { startPinch(a, b); }
+void PdfCanvas::testPinchFrame(const QPointF &a1, const QPointF &b1) { applyPinchFrame(a1, b1); }
+void PdfCanvas::testPinchEnd() { endPinch(); }
 QPointF PdfCanvas::testEraserHoverPos() const { return m_eraserHoverPos; }
 
 QImage PdfCanvas::testRenderEraserIndicator(const QPointF &viewportPos, qreal radiusPx,
@@ -2131,6 +2134,114 @@ bool PdfCanvas::handleTablet(QTabletEvent *te)
 }
 
 // One finger draws / erases; two fingers pinch-zoom and pan at the same time.
+// --- two-finger gesture smoothing ---------------------------------------------------
+// IR panels report their contact points with a few pixels of noise, and that noise hits BOTH
+// the finger distance (scale) and their centroid (pan): the page breathed and shook, which
+// is exhausting to read on a classroom panel. Each frame is therefore NOT applied directly.
+// The raw gesture is accumulated, an EMA follows it, and only the difference between the
+// smoothed value and what has already been applied is spent - so the noise averages out, a
+// real gesture still tracks with ~2-3 frames of lag, and nothing drifts (the smoothed value
+// converges exactly to the raw one).
+constexpr qreal kPinchSmoothAlpha   = 0.35;   // ~3 frames of lag at 60 Hz
+constexpr qreal kPinchScaleDeadZone = 0.005;  // 0.5 %: above the smoothed noise wobble
+                                              // (~0.23 %/frame) and far below a real pinch
+                                              // (~0.7 %/frame). This one matters most: every
+                                              // zoom step re-anchors the scrollbars, so scale
+                                              // noise shows up as the page moving sideways.
+constexpr qreal kPinchPanDeadZonePx = 3.0;    // below this the pan is panel noise, not intent
+constexpr qreal kPinchRateMin       = 0.6;    // a single ghost frame cannot teleport
+constexpr qreal kPinchRateMax       = 1.7;    // the scale by more than this
+
+constexpr qreal kPinchRestAlpha    = 0.08;    // slow average: ~12 frames
+constexpr qreal kPinchRestSpanTol  = 0.02;    // 2 % of span still counts as "not pinching"
+constexpr qreal kPinchRestPanPx    = 6.0;     // ...and 6 px of centroid travel as "not panning"
+
+void PdfCanvas::startPinch(const QPointF &a, const QPointF &b)
+{
+    m_pinchActive = true;
+    m_touchInkBlocked = true;              // no inking until every finger lifts
+    m_pinchPts = {a, b};
+    m_pinchScaleRaw = m_pinchScaleSmooth = m_pinchScaleApplied = 1.0;
+    m_pinchPanRaw = m_pinchPanSmooth = m_pinchPanApplied = QPointF();
+    m_pinchCentroidSmooth = (a + b) / 2.0;
+    m_pinchRestSpan = QLineF(a, b).length();
+    m_pinchRestCentroid = (a + b) / 2.0;
+}
+
+void PdfCanvas::applyPinchFrame(const QPointF &a1, const QPointF &b1)
+{
+    const QPointF a0 = m_pinchPts.value(0);
+    const QPointF b0 = m_pinchPts.value(1);
+    m_pinchPts = {a1, b1};
+
+    // Is the gesture AT REST? Two fingers held on the glass while the teacher reads keep
+    // emitting noise, and any residual drift is exactly what "the page shakes" feels like.
+    // Compare the live gesture against a slow average of it: when the two agree, the fingers
+    // are not actually moving, so NOTHING is applied and the page is perfectly still - which
+    // no amount of smoothing achieves on its own, because smoothing only lowers the amplitude
+    // of the shake, never its slow creep.
+    const qreal dLive = QLineF(a1, b1).length();
+    const QPointF cLive = (a1 + b1) / 2.0;
+    m_pinchRestSpan += (dLive - m_pinchRestSpan) * kPinchRestAlpha;
+    m_pinchRestCentroid += (cLive - m_pinchRestCentroid) * kPinchRestAlpha;
+    const bool atRest =
+        (m_pinchRestSpan > 20.0 && qAbs(dLive / m_pinchRestSpan - 1.0) < kPinchRestSpanTol)
+        && (QLineF(cLive, m_pinchRestCentroid).length() < kPinchRestPanPx);
+    if (atRest) {
+        // Keep the accumulators in step, so leaving "rest" starts clean instead of replaying
+        // the noise that was ignored while reading.
+        m_pinchScaleRaw = m_pinchScaleSmooth = m_pinchScaleApplied = 1.0;
+        m_pinchPanRaw = m_pinchPanSmooth = m_pinchPanApplied = QPointF();
+        m_pinchCentroidSmooth = cLive;
+        return;
+    }
+
+    // Pan first. Smoothing the accumulated travel is NOT enough on its own: an EMA over a
+    // random walk has the same long-term variance as the walk itself (measured: 32 px of
+    // drift with smoothing, 32 px without), and the panel noise IS a random walk. What
+    // actually stops it is a dead zone - a centroid move below the noise floor is simply not
+    // spent. A deliberate pan moves far more than that per frame, so it still tracks.
+    m_pinchPanRaw += (a1 + b1) / 2.0 - (a0 + b0) / 2.0;
+    m_pinchPanSmooth += (m_pinchPanRaw - m_pinchPanSmooth) * kPinchSmoothAlpha;
+    const QPointF pending(m_pinchPanSmooth.x() - m_pinchPanApplied.x(),
+                          m_pinchPanSmooth.y() - m_pinchPanApplied.y());
+    if (qAbs(pending.x()) >= kPinchPanDeadZonePx || qAbs(pending.y()) >= kPinchPanDeadZonePx) {
+        const QPointF step(qRound(pending.x()), qRound(pending.y()));
+        if (!step.isNull())
+            panBy(step);
+        // The remainder is dropped on purpose: keeping it would let the noise accumulate
+        // again, which is exactly the drift this dead zone exists to remove.
+        m_pinchPanApplied = m_pinchPanSmooth;
+    }
+
+    // Scale: clamp the frame, follow it with the EMA, apply only above the dead zone.
+    const qreal d0 = QLineF(a0, b0).length();
+    const qreal d1 = QLineF(a1, b1).length();
+    m_pinchCentroidSmooth += ((a1 + b1) / 2.0 - m_pinchCentroidSmooth) * kPinchSmoothAlpha;
+    if (d0 > 20.0 && d1 > 20.0) {
+        m_pinchScaleRaw *= qBound(kPinchRateMin, d1 / d0, kPinchRateMax);
+        m_pinchScaleSmooth += (m_pinchScaleRaw - m_pinchScaleSmooth) * kPinchSmoothAlpha;
+        const qreal stepScale = m_pinchScaleSmooth / m_pinchScaleApplied;
+        if (stepScale > 1.0 + kPinchScaleDeadZone
+            || stepScale < 1.0 - kPinchScaleDeadZone) {
+            const qreal before = m_zoom;
+            // Anchor at the SMOOTHED centroid: anchoring at the raw one injects its jitter
+            // into every zoom step, which is half of what shakes the page.
+            zoomAt(stepScale, m_pinchCentroidSmooth);
+            // Record what was actually achieved (applyZoom clamps at the zoom limits) so the
+            // next step stays relative to reality instead of accumulating an error.
+            if (before > 0.0)
+                m_pinchScaleApplied *= (m_zoom / before);
+        }
+    }
+}
+
+void PdfCanvas::endPinch()
+{
+    m_pinchActive = false;
+    m_pinchPts.clear();
+}
+
 bool PdfCanvas::touchBelongsToOverlay(const QVector<QPointF> &viewportPts) const
 {
     // A gesture that is already running owns the touch. The island, palette and
@@ -2205,28 +2316,11 @@ bool PdfCanvas::handleTouch(QTouchEvent *te)
         m_moveDragActive = false;
         if (!m_pinchActive) {
             cancelGesture();               // drop any partial single-finger stroke
-            m_pinchActive = true;
-            m_touchInkBlocked = true;      // no inking until every finger lifts
-            m_pinchPts = {pts.at(0), pts.at(1)};
+            startPinch(pts.at(0), pts.at(1));
             return true;
         }
         m_touchInkBlocked = true;
-        const QPointF a0 = m_pinchPts.value(0);
-        const QPointF b0 = m_pinchPts.value(1);
-        const QPointF a1 = pts.at(0);
-        const QPointF b1 = pts.at(1);
-
-        // Pan by the centroid movement, zoom by the distance ratio (anchored at
-        // the centroid) - both from the same gesture.
-        panBy((a1 + b1) / 2.0 - (a0 + b0) / 2.0);
-        const qreal d0 = QLineF(a0, b0).length();
-        const qreal d1 = QLineF(a1, b1).length();
-        if (d0 > 20.0 && d1 > 20.0) {
-            const qreal ratio = d1 / d0;
-            if (ratio > 1.004 || ratio < 0.996)
-                zoomAt(ratio, (a1 + b1) / 2.0);
-        }
-        m_pinchPts = {a1, b1};
+        applyPinchFrame(pts.at(0), pts.at(1));
         return true;
     }
 

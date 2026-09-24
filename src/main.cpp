@@ -2156,6 +2156,104 @@ static int runImageSelfTest()
                   int(dotPx >= 6 && dotPx < 400), 1);
         }
 
+        // Two-finger jitter: a big IR panel reports its contacts with a few pixels of noise.
+        // That noise hits both the finger distance (scale) and their centroid (pan), which
+        // made the page breathe and shake. The smoothing must remove the visible part of it
+        // while leaving a real pinch as responsive as before.
+        {
+            PdfCanvas pinch;
+            pinch.setAttribute(Qt::WA_DontShowOnScreen, true);
+            pinch.resize(900, 700);
+            pinch.show();
+            QString pe;
+            check("pinch: canvas opens the page", int(pinch.openPdf(pdfPath, &pe)), 1);
+            const QSize vp = pinch.testViewportSize();
+            // Zoom in first: with the page shorter than the viewport there is no scroll
+            // range, a pan gets clamped at 0 and the shake check could never fail. Then park
+            // the view mid-page so noise can move it either way.
+            pinch.setZoomLevel(3.0);
+            pinch.verticalScrollBar()->setValue(pinch.verticalScrollBar()->maximum() / 2);
+            // A realistic two-hand span: a wider baseline keeps the relative noise small.
+            const QPointF a(0.30 * vp.width(), 0.45 * vp.height());
+            const QPointF b(0.70 * vp.width(), 0.45 * vp.height());
+            const qreal zoom0 = pinch.testZoom();
+            const int scroll0 = pinch.verticalScrollBar()->value();
+
+            unsigned long long s = 88172645463325252ull;   // deterministic xorshift64
+            auto noise = [&s]() {
+                s ^= s << 13;
+                s ^= s >> 7;
+                s ^= s << 17;
+                return qreal(int(s % 7)) - 3.0;            // -3 .. +3 px (IR panel ballpark)
+            };
+            pinch.testPinchBegin(a, b);
+            for (int i = 0; i < 60; ++i) {
+                pinch.testPinchFrame(a + QPointF(noise(), noise()),
+                                     b + QPointF(noise(), noise()));
+            }
+            pinch.testPinchEnd();
+            // Informational: the numbers this test reasons about, printed so a human (and the
+            // mutation run with the smoothing disabled) can see whether anything moved at all.
+            out(QStringLiteral("[selftest] pinch noise: zoom %1 -> %2, scroll %3 -> %4")
+                    .arg(zoom0, 0, 'f', 4).arg(pinch.testZoom(), 0, 'f', 4)
+                    .arg(scroll0).arg(pinch.verticalScrollBar()->value()));
+            // NOTE: only the shake is asserted here. A "noise must not change the zoom" check
+            // looked reasonable but was removed after a mutation run (smoothing disabled)
+            // showed it passed anyway - i.e. it asserted nothing. What actually protects the
+            // scale is the rate clamp below, which DOES fail when disabled.
+            check("pinch: contact noise does not shake the page",
+                  int(qAbs(pinch.verticalScrollBar()->value() - scroll0) <= 2), 1);
+
+            // A single "ghost" contact - IR panels do emit them - must not teleport the scale.
+            // Run at zoom 1.0 so the 4.0 ceiling cannot mask the difference.
+            {
+                pinch.setZoomLevel(1.0);
+                QCoreApplication::processEvents();
+                const QPointF e1(0.30 * vp.width(), 0.45 * vp.height());
+                const QPointF e2(0.70 * vp.width(), 0.45 * vp.height());
+                pinch.testPinchBegin(e1, e2);
+                const qreal beforeGhost = pinch.testZoom();
+                // One frame in which the span doubles (a contact jumps far away).
+                pinch.testPinchFrame(e1, QPointF(0.30 * vp.width() + 2.0 * (e2 - e1).x(),
+                                                 0.45 * vp.height()));
+                pinch.testPinchEnd();
+                out(QStringLiteral("[selftest] pinch ghost: zoom %1 -> %2")
+                        .arg(beforeGhost, 0, 'f', 4).arg(pinch.testZoom(), 0, 'f', 4));
+                check("pinch: a ghost contact cannot teleport the zoom",
+                      int(pinch.testZoom() / beforeGhost < 1.75), 1);
+            }
+
+            // ...and a real pinch must still track: fingers separating to ~1.8x.
+            const QPointF c(0.40 * vp.width(), 0.45 * vp.height());
+            const QPointF d(0.60 * vp.width(), 0.45 * vp.height());
+            const qreal d0 = QLineF(c, d).length();
+            const QPointF mid = (c + d) / 2.0;
+            const QPointF half = (d - c) / 2.0;
+            const qreal zoom1 = pinch.testZoom();
+            qreal dLast = d0;
+            qreal zMid = zoom1, dMid = d0;
+            pinch.testPinchBegin(c, d);
+            for (int i = 1; i <= 40; ++i) {
+                const qreal k = 1.0 + 0.02 * i;               // 2 % per frame
+                const QPointF p1 = mid - half * k;
+                const QPointF p2 = mid + half * k;
+                dLast = QLineF(p1, p2).length();
+                pinch.testPinchFrame(p1, p2);
+                if (i == 10) {                                 // after the rest detector releases
+                    zMid = pinch.testZoom();
+                    dMid = dLast;
+                }
+            }
+            pinch.testPinchEnd();
+            // Compare the SECOND HALF against the finger travel: the first frame or two are
+            // deliberately swallowed by the rest detector, so an absolute comparison would
+            // fail by design. What matters is that a real pinch tracks 1:1 once it is moving.
+            const qreal applied = pinch.testZoom() / zMid;
+            const qreal wanted = dLast / dMid;
+            check("pinch: a real pinch still tracks",
+                  int(qAbs(applied / wanted - 1.0) < 0.02), 1);
+        }
+
         // A touch (or stylus) drag must never be hijacked by the global mouse cursor. NOTE:
         // the real trigger - Windows synthesising button-PRESSED mouse events for touch -
         // cannot be reproduced headlessly, so this only locks the weaker, still useful fact

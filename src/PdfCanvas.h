@@ -166,8 +166,12 @@ public:
     void   testClearEraserHover();
     // Pointer tracking: exposed so a test can prove a touch/stylus drag is never hijacked
     // by the global mouse cursor (the "dragging sometimes damages the wrong strokes" bug).
-    void    testTrackPointer();
+    void   testTrackPointer();
     QPointF testEraserHoverPos() const;
+    // Two-finger smoothing: feed a synthetic gesture and watch the zoom / scrollbar.
+    void   testPinchBegin(const QPointF &a, const QPointF &b);
+    void   testPinchFrame(const QPointF &a1, const QPointF &b1);
+    void   testPinchEnd();
     QImage testRenderEraserIndicator(const QPointF &viewportPos, qreal radiusPx,
                                      const QSize &imageSize);
     int    strokeCount() const;
@@ -263,7 +267,13 @@ private:
     // palette, page grid) instead of the page. Only a touch that would START
     // something is redirected; a stroke already running keeps every sample, so
     // writing across the island works and the ink simply goes underneath it.
-    bool touchBelongsToOverlay(const QVector<QPointF> &viewportPts) const;
+    bool   touchBelongsToOverlay(const QVector<QPointF> &viewportPts) const;
+    // Two-finger gesture: started, fed one frame at a time, ended. Extracted from
+    // handleTouch so the smoothing below is testable, and so every frame goes through the
+    // same maths (see applyPinchFrame for why it is drift-free).
+    void   startPinch(const QPointF &a, const QPointF &b);
+    void   applyPinchFrame(const QPointF &a1, const QPointF &b1);
+    void   endPinch();
 
     // Wheel input: Ctrl+wheel zooms at the pointer; the plain wheel scrolls. A
     // running (or just finished) touch gesture owns the wheel entirely - see the
@@ -332,6 +342,20 @@ private:
     // follows this, so a pointer move only repaints two small circles (old + new).
     QPointF m_eraserHoverPos;
     bool    m_eraserHover = false;
+    // Two-finger smoothing state (see applyPinchFrame): the raw gesture is accumulated, an
+    // EMA follows it, and only the difference from what was applied is ever spent - so the
+    // panel's contact noise averages out without the zoom drifting.
+    QPointF m_pinchPanRaw;
+    QPointF m_pinchPanSmooth;
+    QPointF m_pinchPanApplied;
+    QPointF m_pinchCentroidSmooth;
+    qreal   m_pinchScaleRaw = 1.0;
+    qreal   m_pinchScaleSmooth = 1.0;
+    qreal   m_pinchScaleApplied = 1.0;
+    // Slow average of the live gesture, used to tell "the fingers are held still" (which must
+    // apply nothing at all) from "the teacher is actually pinching or panning".
+    qreal   m_pinchRestSpan = 0.0;
+    QPointF m_pinchRestCentroid;
     // Which input started the stroke in progress: only a finger keeps the "too short =
     // noise" rule, a mouse/stylus tap is committed as a dot.
     bool    m_strokeFromTouch = false;
