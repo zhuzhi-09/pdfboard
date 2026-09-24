@@ -1933,6 +1933,9 @@ static int runUpdateSelfTest()
 // network and no external file. Locks the extension filter, the points-per-pixel
 // rule, the PNG naming rule, the lossless image -> PDF -> PNG 1:1 round trip and
 // the oversize downscale, then deletes everything it wrote.
+// Defined next to main(); the image self test sweeps the cache too (see kTempKeepDays).
+static void sweepTempCache();
+
 static int runImageSelfTest()
 {
     int failed = 0;
@@ -2073,6 +2076,27 @@ static int runImageSelfTest()
             head = QString::fromUtf8(sf.read(400));
         check("startup diagnostics name the OS build",
               int(head.contains(QStringLiteral("build"))) , 1);
+    }
+
+    // Temp-cache housekeeping: stale working copies go, fresh ones stay. This is what keeps a
+    // classroom machine from filling its disk over a school year.
+    {
+        const QString sweepDir = QDir(QDir::tempPath()).filePath(QStringLiteral("pdfboard"));
+        QDir().mkpath(sweepDir);
+        const QString stale = sweepDir + QStringLiteral("/sweep-test-old.dpz");
+        const QString fresh = sweepDir + QStringLiteral("/sweep-test-new.dpz");
+        { QFile f(stale); f.open(QIODevice::WriteOnly); f.write("x"); }
+        { QFile f(fresh); f.open(QIODevice::WriteOnly); f.write("x"); }
+        {   // setFileTime is a per-file call, not a static one.
+            QFile f(stale);
+            if (f.open(QIODevice::ReadWrite))
+                f.setFileTime(QDateTime::currentDateTime().addDays(-30),
+                              QFileDevice::FileModificationTime);
+        }
+        sweepTempCache();
+        check("temp cache: stale work copy swept", int(!QFile::exists(stale)), 1);
+        check("temp cache: fresh work copy kept", int(QFile::exists(fresh)), 1);
+        QFile::remove(fresh);
     }
 
     // Eraser indicator: a screen-only ring whose diameter IS the wipe diameter, with the
@@ -2547,6 +2571,35 @@ static void installStartupDiagnostics()
     });
 }
 
+// Housekeeping for the working copies. Every distinct document leaves a work-*.dpz under
+// <temp>/pdfboard (plus the Word/image conversions), and on a classroom machine those simply
+// accumulate until the disk complains - nothing else ever removes them. Anything older than
+// this goes at startup; the app recreates whatever it needs, because the fingerprint check
+// treats a missing work copy as "not cached".
+constexpr int kTempKeepDays = 14;
+
+static void sweepTempCache()
+{
+    QDir d(QDir(QDir::tempPath()).filePath(QStringLiteral("pdfboard")));
+    if (!d.exists())
+        return;
+    const QDateTime cutoff = QDateTime::currentDateTime().addDays(-kTempKeepDays);
+    int removed = 0;
+    // Oldest first: the first file that is still fresh ends the sweep. (Newest first would be
+    // wrong - a fresh file at the head says nothing about the ones behind it.)
+    for (const QFileInfo &fi : d.entryInfoList(QDir::Files, QDir::Time | QDir::Reversed)) {
+        if (fi.lastModified() >= cutoff)
+            break;
+        if (QFile::remove(fi.absoluteFilePath()))
+            ++removed;
+    }
+    // Silent unless the diagnostics log is on: this is not something a teacher needs to see.
+    if (removed > 0 && AppLog::isEnabled())
+        AppLog::write(QStringLiteral("cache"),
+                      QStringLiteral("清理临时工作副本 %1 个（超过 %2 天）")
+                          .arg(removed).arg(kTempKeepDays));
+}
+
 int main(int argc, char **argv)
 {
     // Must be first: the platform plugin is initialised inside the QApplication constructor
@@ -2578,6 +2631,9 @@ int main(int argc, char **argv)
     // when the diagnostics log is switched off. Installed here (not before the
     // QApplication) so the path resolves to .../PDFBoard/logs.
     CrashLog::install();
+    // Working copies are a cache, not data: sweep the stale ones once per run so a classroom
+    // machine cannot slowly fill its disk.
+    sweepTempCache();
     CrashLog::breadcrumb("startup", QCoreApplication::applicationVersion());
 
     // Qt's own dialogs (message boxes) should follow the system language.

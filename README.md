@@ -80,7 +80,7 @@
 
 ```powershell
 package.cmd
-# 产物：dist\PDFBoard-1.10.0-setup.exe   （自带 Qt 运行库，约 17 MB）
+# 产物：dist\PDFBoard-1.10.1-setup.exe   （自带 Qt 运行库，约 17 MB）
 ```
 
 安装器做这些事（全部**当前用户**范围，不需要管理员）：
@@ -96,12 +96,20 @@ package.cmd
 **静默部署**（供教室集中管理客户端调用）：
 
 ```bat
-PDFBoard-1.10.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+PDFBoard-1.10.1-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 rem 不要桌面快捷方式：
-PDFBoard-1.10.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
+PDFBoard-1.10.1-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 ```
 
 > 卸载时若程序正在运行，静默模式下无法提示关闭，会残留被占用的文件（Windows 常见行为）。先退出程序再卸载即可完全清除。
+
+### 临时文件与日志
+
+程序会在系统临时目录 `%TEMP%\pdfboard\` 保存**工作副本**（每个打开过的文档一份，用于快速恢复批注），
+**每次启动会自动清理超过 14 天的**，所以长期使用也不会把磁盘占满（下次打开时再生成即可）。
+
+诊断日志**默认关闭**（设置 → 调试）；即使打开，也只有「每秒一行」的运行探针和「每笔一行」的书写记录
+（**不会按采样点逐点记录**），并且到 2 MB 自动轮转，不会无限增长。
 
 ### 打不开怎么办（Windows 上最常见的一种）
 
@@ -126,7 +134,7 @@ PDFBoard-1.10.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 - 手动触发（Actions → nightly → Run workflow）
 
 产物发布到固定的 **`nightly` 预发布**（每次覆盖同名文件，不会越堆越多）：
-`PDFBoard-nightly-setup.exe` / `PDFBoard-nightly-portable.zip`，版本号形如 `1.10.0-nightly.<提交号>`。
+`PDFBoard-nightly-setup.exe` / `PDFBoard-nightly-portable.zip`，版本号形如 `1.10.1-nightly.<提交号>`。
 
 ### 稳定版发布
 
@@ -144,26 +152,26 @@ PDFBoard-1.10.0-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 ```powershell
 # 1. 改版本号：installer/pdfboard.iss 的 AppVersion + assets/app.rc 的 FILEVERSION/FileVersion
 # 2. 提交推送
-git commit -am "chore: 版本号 1.10.0"
+git commit -am "chore: 版本号 1.10.1"
 git push
 
 # 3. 写更新日志到文件（推荐；UTF-8 保存）。
 #    别用 PowerShell 的 `-m "多行…"`——它会把字符串里的换行弄坏，标签注解就残缺了。
 @'
-v1.10.0
+v1.10.1
 - 修复：缩略图在深色模式下没有白底
 - 新增：打开文件时提示更新日志
 '@ | Set-Content -Encoding utf8 notes.txt
 
 # 4. 打「注解」标签（-a）把更新日志写进 tag message，再推送；CI 自动出正式 Release
-git tag -a v1.10.0 -F notes.txt
-git push origin v1.10.0
+git tag -a v1.10.1 -F notes.txt
+git push origin v1.10.1
 ```
 
 > 不想用文件？也可以重复 `-m`，每次一行（Git 会把它们连成多段）：
-> `git tag -a v1.10.0 -m "v1.10.0" -m "- 修复：…" -m "- 新增：…"`
+> `git tag -a v1.10.1 -m "v1.10.1" -m "- 修复：…" -m "- 新增：…"`
 >
-> 忘记写注解（`git tag v1.10.0` 的轻量标签）不会失败，但 Release 只会是自动生成的提交列表——老师点开更新提示几乎看不到有用内容。
+> 忘记写注解（`git tag v1.10.1` 的轻量标签）不会失败，但 Release 只会是自动生成的提交列表——老师点开更新提示几乎看不到有用内容。
 
 ### 代码签名（可选）
 
