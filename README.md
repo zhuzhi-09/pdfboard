@@ -54,7 +54,8 @@
 - **工具岛可拖动**：任意位置按住就能拖（按钮上也可以，不用瞄准边缘）；位置只在本
   次运行内有效，重启回到默认的底部居中
 - **全屏**：工具岛的「全屏」按钮或 `F11` 进入，`Esc`（或再点一次）退出；应用内的
-  工具岛与标签栏保留，只收起窗口边框与任务栏
+  工具岛与标签栏保留，只收起窗口边框与任务栏。**全屏时右上角始终有一个「退出全屏（Esc）」按钮**，
+  所以在主页 / 设置页也一样能退出（那里工具岛是隐藏的）
 - **自由移动**模式：拖动画布即可自由平移画面（双指仍缩放/平移），不产生笔迹
 - **深色模式**：设置里可选 跟随系统 / 浅色 / 深色，切换即时生效；**PDF 纸面始终保持白色**
   （投影可读性优先），只有应用界面跟随主题
@@ -79,7 +80,7 @@
 
 ```powershell
 package.cmd
-# 产物：dist\PDFBoard-1.9.7-setup.exe   （自带 Qt 运行库，约 17 MB）
+# 产物：dist\PDFBoard-1.9.8-setup.exe   （自带 Qt 运行库，约 17 MB）
 ```
 
 安装器做这些事（全部**当前用户**范围，不需要管理员）：
@@ -95,9 +96,9 @@ package.cmd
 **静默部署**（供教室集中管理客户端调用）：
 
 ```bat
-PDFBoard-1.9.7-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
+PDFBoard-1.9.8-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART
 rem 不要桌面快捷方式：
-PDFBoard-1.9.7-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
+PDFBoard-1.9.8-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 ```
 
 > 卸载时若程序正在运行，静默模式下无法提示关闭，会残留被占用的文件（Windows 常见行为）。先退出程序再卸载即可完全清除。
@@ -111,7 +112,7 @@ PDFBoard-1.9.7-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 - 手动触发（Actions → nightly → Run workflow）
 
 产物发布到固定的 **`nightly` 预发布**（每次覆盖同名文件，不会越堆越多）：
-`PDFBoard-nightly-setup.exe` / `PDFBoard-nightly-portable.zip`，版本号形如 `1.9.7-nightly.<提交号>`。
+`PDFBoard-nightly-setup.exe` / `PDFBoard-nightly-portable.zip`，版本号形如 `1.9.8-nightly.<提交号>`。
 
 ### 稳定版发布
 
@@ -129,26 +130,26 @@ PDFBoard-1.9.7-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 ```powershell
 # 1. 改版本号：installer/pdfboard.iss 的 AppVersion + assets/app.rc 的 FILEVERSION/FileVersion
 # 2. 提交推送
-git commit -am "chore: 版本号 1.9.7"
+git commit -am "chore: 版本号 1.9.8"
 git push
 
 # 3. 写更新日志到文件（推荐；UTF-8 保存）。
 #    别用 PowerShell 的 `-m "多行…"`——它会把字符串里的换行弄坏，标签注解就残缺了。
 @'
-v1.9.7
+v1.9.8
 - 修复：缩略图在深色模式下没有白底
 - 新增：打开文件时提示更新日志
 '@ | Set-Content -Encoding utf8 notes.txt
 
 # 4. 打「注解」标签（-a）把更新日志写进 tag message，再推送；CI 自动出正式 Release
-git tag -a v1.9.7 -F notes.txt
-git push origin v1.9.7
+git tag -a v1.9.8 -F notes.txt
+git push origin v1.9.8
 ```
 
 > 不想用文件？也可以重复 `-m`，每次一行（Git 会把它们连成多段）：
-> `git tag -a v1.9.7 -m "v1.9.7" -m "- 修复：…" -m "- 新增：…"`
+> `git tag -a v1.9.8 -m "v1.9.8" -m "- 修复：…" -m "- 新增：…"`
 >
-> 忘记写注解（`git tag v1.9.7` 的轻量标签）不会失败，但 Release 只会是自动生成的提交列表——老师点开更新提示几乎看不到有用内容。
+> 忘记写注解（`git tag v1.9.8` 的轻量标签）不会失败，但 Release 只会是自动生成的提交列表——老师点开更新提示几乎看不到有用内容。
 
 ### 代码签名（可选）
 

@@ -379,6 +379,33 @@ MainWindow::MainWindow(QWidget *parent)
     // shortcuts) and the control just displays it. Hidden on the home / settings
     // pages by updateZoomBar().
     m_zoomBar = new ZoomBar(statusBar());
+
+    // Fullscreen needs a visible way out on EVERY page: the island carries the fullscreen
+    // button, but it is hidden on the home and settings pages, so a teacher who went
+    // fullscreen and then tapped the house saw no way back at all (user report). This pill
+    // belongs to the window, floats above the page stack, and exists only in fullscreen.
+    {
+        const Theme::Palette &pal = Theme::light();
+        m_fullscreenExit = new QPushButton(QStringLiteral("退出全屏（Esc）"), this);
+        m_fullscreenExit->setObjectName(QStringLiteral("fullscreenExit"));
+        m_fullscreenExit->setCursor(Qt::PointingHandCursor);
+        m_fullscreenExit->setFocusPolicy(Qt::NoFocus);
+        m_fullscreenExit->setStyleSheet(
+            QStringLiteral("QPushButton#fullscreenExit {"
+                           " background: %1; color: %2;"
+                           " border: 1px solid %3; border-radius: %4;"
+                           " padding: %5 %6; font-weight: 600; }"
+                           "QPushButton#fullscreenExit:hover { background: %7; }")
+                .arg(Theme::rgba(pal.surface))
+                .arg(Theme::rgba(pal.text))
+                .arg(Theme::rgba(pal.surfaceEdge))
+                .arg(Theme::px(Theme::Space4))
+                .arg(Theme::px(Theme::Space2))
+                .arg(Theme::px(Theme::Space4))
+                .arg(Theme::rgba(pal.surfaceHover)));
+        m_fullscreenExit->hide();
+        connect(m_fullscreenExit, &QPushButton::clicked, this, &MainWindow::onFullscreen);
+    }
     connect(m_zoomBar, &ZoomBar::zoomRequested, this, [this](qreal zoom) {
         // A feedback loop through this connection is what overflowed the stack
         // (0xC00000FD) when the slider was dragged quickly. ZoomBar no longer writes
@@ -523,6 +550,9 @@ void MainWindow::changeEvent(QEvent *event)
         if (InkToolbar *bar = canvas->toolbar())
             bar->setFullscreenActive(isFullScreen());
     }
+    // ...and so does the exit pill, which must be reachable on the home / settings pages
+    // where no island is shown at all.
+    updateFullscreenExit();
 }
 
 // Closing the window walks every dirty document and asks the same four-way
@@ -1292,6 +1322,32 @@ void MainWindow::refreshTabTitle(int index)
 
 // F11 / the island's 「全屏」: a plain toggle that returns to the window state
 // the user came from (maximized or normal).
+// Fullscreen must never be a trap: this pill is shown while - and only while - the window is
+// fullscreen, on every page, so leaving fullscreen never depends on the island being visible.
+void MainWindow::repositionFullscreenExit()
+{
+    if (!m_fullscreenExit || !m_fullscreenExit->isVisible())
+        return;
+    m_fullscreenExit->adjustSize();
+    const int margin = Theme::Space4;
+    m_fullscreenExit->move(width() - m_fullscreenExit->width() - margin, margin);
+    m_fullscreenExit->raise();
+}
+
+void MainWindow::updateFullscreenExit()
+{
+    if (!m_fullscreenExit)
+        return;
+    m_fullscreenExit->setVisible(isFullScreen());
+    repositionFullscreenExit();
+}
+
+void MainWindow::resizeEvent(QResizeEvent *event)
+{
+    QMainWindow::resizeEvent(event);
+    repositionFullscreenExit();
+}
+
 void MainWindow::onFullscreen()
 {
     if (isFullScreen()) {

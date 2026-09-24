@@ -14,6 +14,7 @@ class QCloseEvent;
 class QEvent;
 class QKeyEvent;
 class QLabel;
+class QPushButton;
 class QStackedWidget;
 
 class MainWindow : public QMainWindow
@@ -33,6 +34,7 @@ protected:
     void keyPressEvent(QKeyEvent *event) override;
     // Window state changes are pushed down to every canvas toolbar.
     void changeEvent(QEvent *event) override;
+    void resizeEvent(QResizeEvent *event) override;
     // Closing the window asks about every dirty document; a single 取消
     // aborts the whole close.
     void closeEvent(QCloseEvent *event) override;
@@ -134,6 +136,11 @@ private:
     QLabel *m_inkLabel    = nullptr;
     QLabel *m_memLabel    = nullptr;
     ZoomBar *m_zoomBar    = nullptr;   // Word-like zoom control, document pages only
+    // Fullscreen exit pill. The island's fullscreen button hides with the island (home and
+    // settings pages), which used to leave fullscreen with no on-screen way out.
+    QPushButton *m_fullscreenExit = nullptr;
+    void updateFullscreenExit();
+    void repositionFullscreenExit();
     // Depth of the zoom signal chain (bar -> canvas -> bar). A value above one means
     // something is feeding back; the cap turns that into a logged no-op instead of a
     // stack overflow, and writes a breadcrumb so a crash report names the culprit.

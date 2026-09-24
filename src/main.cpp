@@ -26,6 +26,7 @@
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QNetworkProxyFactory>
+#include <QPushButton>
 #include <QSlider>
 #include <QMouseEvent>
 #include <QImageReader>
@@ -255,6 +256,28 @@ static int runSmokeSelfTest(const QString &path)
         // a non-zero count means only the cap is holding it down.
         out(QStringLiteral("[selftest] 排版拒绝次数 = %1（0 = 反馈环已消失）")
                 .arg(canvas->testRelayoutRefusals()));
+    }
+
+    // Fullscreen must always have a visible way out. The island carries the fullscreen button,
+    // but it hides on the home and settings pages, so a teacher who went fullscreen and then
+    // tapped the house could see no way back (user report). Assert both exits, from the home
+    // page: the on-screen pill, and Esc.
+    {
+        QMetaObject::invokeMethod(&window, "onFullscreen");
+        check("fullscreen: entered", window.isFullScreen() ? 1 : 0, 1);
+        QMetaObject::invokeMethod(&window, "showHomePage");
+        auto *pill = window.findChild<QPushButton *>(QStringLiteral("fullscreenExit"));
+        check("fullscreen: exit pill exists", pill ? 1 : 0, 1);
+        check("fullscreen: exit pill visible on the home page",
+              (pill && pill->isVisible()) ? 1 : 0, 1);
+        // Esc goes to whatever has focus, exactly like a real key press.
+        QKeyEvent esc(QEvent::KeyPress, Qt::Key_Escape, Qt::NoModifier);
+        QWidget *target = QApplication::focusWidget();
+        QCoreApplication::sendEvent(target ? target : static_cast<QObject *>(&window), &esc);
+        check("fullscreen: Esc leaves fullscreen from the home page",
+              window.isFullScreen() ? 0 : 1, 1);
+        check("fullscreen: exit pill hidden again",
+              (pill && pill->isVisible()) ? 0 : 1, 1);
     }
 
     // Page switches must not leave a dangling or double-wired control. The invocations
