@@ -2670,6 +2670,18 @@ static QString probeMissingImport(const QString &dllPath)
 // Windows 10 1809 (build 17763) is the floor Qt 6.8 supports, and an older build fails with a
 // message no teacher can act on ("no Qt platform plugin could be initialized"). MessageBoxW
 // comes in through the Qt headers already, so nothing is declared by hand here.
+// The one API that actually decides whether this program can run. Qt's Windows platform plugin
+// imports UiaRaiseNotificationEvent from UIAutomationCore.dll, and Microsoft documents that
+// function as "Minimum supported client: Windows 10, version 1709" (build 16299). Firefox and
+// .NET both guard that very call behind a runtime availability check for this reason; Qt does
+// not, so on an older build the plugin simply fails to load - which is what "no Qt platform
+// plugin could be initialized" means here. Checking the API beats guessing a build number.
+static bool systemHasRequiredApis()
+{
+    const HMODULE uia = LoadLibraryA("UIAutomationCore.dll");
+    return uia && GetProcAddress(uia, "UiaRaiseNotificationEvent") != nullptr;
+}
+
 static bool g_windowsTooOld = false;
 
 // Deployment diagnostics. If Qt cannot even initialise its platform plugin the process aborts
@@ -2716,14 +2728,18 @@ static void installStartupDiagnostics()
         }
         // Qt 6.8 needs Windows 10 1809; say so in Chinese, on screen and in the log, instead of
         // letting the English plugin error be the only thing the teacher sees.
-        // Anything below Windows 10 1809 - including Windows 7/8.1, which report major < 10.
+        // Anything below Windows 10 1709 - including Windows 7/8.1, which report major < 10 -
+        // misses the API above, so the check is on the API first and the build number second.
         const bool tooOld = os.type() == QOperatingSystemVersion::Windows
-                            && (os.majorVersion() < 10
-                                || (os.majorVersion() == 10 && os.microVersion() < 17763));
+                            && (!systemHasRequiredApis()
+                                || os.majorVersion() < 10
+                                || (os.majorVersion() == 10 && os.microVersion() < 16299));
         if (tooOld) {
             g_windowsTooOld = true;
-            file.write(QStringLiteral("结果：系统版本过低（Windows %1.%2，内部版本 %3），"
-                                      "本程序需要 1809（内部版本 17763）或更高。\n")
+            file.write(QStringLiteral("结果：系统缺少本程序需要的系统接口"
+                                      "（Windows %1.%2，内部版本 %3），"
+                                      "本程序需要 Windows 10 版本 1709"
+                                      "（内部版本 16299）或更高。\n")
                            .arg(os.majorVersion())
                            .arg(os.minorVersion())
                            .arg(os.microVersion())
@@ -2789,8 +2805,10 @@ int main(int argc, char **argv)
     if (g_windowsTooOld) {
         const QString text =
             QStringLiteral("这台电脑的 Windows 版本较旧，本程序无法运行。\n\n"
-                           "「落墨·大屏批注」需要 Windows 10 1809（内部版本 17763）"
-                           "或更高版本。\n"
+                           "「落墨·大屏批注」需要 Windows 10 版本 1709"
+                           "（内部版本 16299）或更高版本，\n"
+                           "当前系统缺少它必须的一个系统接口"
+                           "（UIAutomationCore 的 UiaRaiseNotificationEvent）。\n\n"
                            "请让管理员升级系统后再打开本程序。\n\n"
                            "（诊断信息已写入 %LOCALAPPDATA%\\PDFBoard\\logs\\startup.log）");
         MessageBoxW(nullptr, reinterpret_cast<const wchar_t *>(text.utf16()),
