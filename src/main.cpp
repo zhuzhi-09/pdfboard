@@ -282,6 +282,42 @@ static int runSmokeSelfTest(const QString &path)
               (pill && pill->isVisible()) ? 0 : 1, 1);
     }
 
+    // 保存 on a document that has no .dpz yet must ASK where to put it (Word-like): the
+    // annotations must never live only in a temp working copy, and no .dpz may appear next to
+    // the user's PDF. The file dialog is stubbed to "cancel" here, which also proves the
+    // document stays dirty instead of being marked saved.
+    {
+        // Snapshot BOTH places a save could write to: next to the PDF (must never happen) and
+        // the temp work-copy cache (what a silent 保存 used to do - that comparison is what
+        // makes this a real regression lock rather than a vacant one).
+        const QString srcDir = QFileInfo(path).absolutePath();
+        const QString cacheDir = QDir(QDir::tempPath()).filePath(QStringLiteral("pdfboard"));
+        const auto listing = [](const QString &d) {
+            return QDir(d).entryList(QDir::Files, QDir::Name);
+        };
+        const QStringList srcBefore = listing(srcDir);
+        const QStringList cacheBefore = listing(cacheDir);
+
+        // Mark it dirty the way a teacher would: a real ink stroke.
+        const QSize vpS = canvas->testViewportSize();
+        canvas->testTouchBegin(QPointF(0.40 * vpS.width(), 0.40 * vpS.height()));
+        canvas->testTouchMove(QPointF(0.55 * vpS.width(), 0.55 * vpS.height()));
+        canvas->testTouchEnd();
+        check("save: an ink stroke marks the document dirty",
+              window.testDocumentDirty(0) ? 1 : 0, 1);
+
+        window.testStubSaveAsCancel();
+        QMetaObject::invokeMethod(&window, "onSave");
+        check("save: cancelled 另存为 writes nothing (not even a temp copy)",
+              int(listing(srcDir) == srcBefore && listing(cacheDir) == cacheBefore), 1);
+        check("save: a plain PDF still has no sibling .dpz",
+              int(!QFile::exists(srcDir + QStringLiteral("/")
+                                 + QFileInfo(path).completeBaseName() + QStringLiteral(".dpz"))),
+              1);
+        check("save: document stays unsaved after cancelling",
+              window.testDocumentDirty(0) ? 1 : 0, 1);
+    }
+
     // Page switches must not leave a dangling or double-wired control. The invocations
     // are asserted on their return value: a name that does not resolve fails silently,
     // and the checks after it would then pass without the page ever having switched

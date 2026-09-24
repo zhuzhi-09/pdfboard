@@ -202,7 +202,7 @@ jobs:
             dist/PDFBoard-nightly-portable.zip
           body: |
             > 这是**自动构建的夜间版本**，随 `main` 的每次提交更新，可能不稳定。
-            > 稳定版本请看 Releases 里的版本标签（如 `v1.10.1`）。
+            > 稳定版本请看 Releases 里的版本标签（如 `v1.11.0`）。
 
             **提交**：`${{ github.sha }}`
             **版本号**：`${{ steps.ver.outputs.version }}`

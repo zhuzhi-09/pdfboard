@@ -26,6 +26,12 @@ public:
     // Open a PDF directly (used by the GUI smoke test / CLI arg).
     void openPath(const QString &path);
 
+    // Save routing, for the self tests. A modal file dialog cannot run headlessly, so the
+    // save-as flow can be stubbed to "cancelled": the assertions then check what the routing
+    // does (or does not) write, and that the document stays unsaved.
+    void testStubSaveAsCancel() { m_saveAsCancelled = true; }
+    bool testDocumentDirty(int index) const;
+
 protected:
     // Dropping a PDF onto the window opens it in a new tab.
     void dragEnterEvent(QDragEnterEvent *e) override;
@@ -141,6 +147,9 @@ private:
     QPushButton *m_fullscreenExit = nullptr;
     void updateFullscreenExit();
     void repositionFullscreenExit();
+    // One-shot: self tests cannot drive a modal file dialog, so the save-as flow is stubbed to
+    // "cancelled" - see the public testStubSaveAsCancel()/testDocumentDirty() above.
+    bool m_saveAsCancelled = false;
     // Depth of the zoom signal chain (bar -> canvas -> bar). A value above one means
     // something is feeding back; the cap turns that into a logged no-op instead of a
     // stack overflow, and writes a breadcrumb so a crash report names the culprit.

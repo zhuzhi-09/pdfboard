@@ -998,54 +998,12 @@ bool MainWindow::saveDocument(int index)
         return true;
     }
 
-    // No real bundle yet: 保存 keeps a working copy under the temp dir, keyed
-    // by the source path, and the tab keeps the SOURCE file name - saving must
-    // not turn a .docx into a `work-<hash>.dpz` tab (the 1.3.2 over-correction)
-    // and must not create anything next to the source. 另存为 remains the only
-    // way to put the annotations where the user chooses.
-    const QString source = !info.wordPath.isEmpty() ? info.wordPath : info.sourcePdf;
-    const QString target = AnnotationBundle::workingBundlePathFor(source);
-    if (!QDir().mkpath(QFileInfo(target).absolutePath())) {
-        AppLog::write(QStringLiteral("save"),
-                      QStringLiteral("保存失败：无法创建临时目录：%1")
-                          .arg(QFileInfo(target).absolutePath()));
-        QMessageBox::warning(this, QStringLiteral("保存失败"),
-                             QStringLiteral("无法创建临时工作目录：%1")
-                                 .arg(QFileInfo(target).absolutePath()));
-        return false;
-    }
-
-    const QByteArray pdf = readPdfBytes(info.sourcePdf);
-    if (pdf.isEmpty()) {
-        AppLog::write(QStringLiteral("save"),
-                      QStringLiteral("保存失败：无法读取源 PDF：%1").arg(info.sourcePdf));
-        QMessageBox::warning(this, QStringLiteral("保存失败"),
-                             QStringLiteral("无法读取源 PDF：%1").arg(info.sourcePdf));
-        return false;
-    }
-
-    // The fingerprint pins the working copy to the file it was made from, so a
-    // restore can tell "same path" from "same document".
-    const QJsonObject fingerprint = AnnotationBundle::sourceFingerprintFor(source);
-
-    QString err;
-    if (!AnnotationBundle::write(target, pdf, canvas->exportInk(), &err, fingerprint)) {
-        AppLog::write(QStringLiteral("save"),
-                      QStringLiteral("保存工作副本失败：%1（%2）").arg(target, err));
-        QMessageBox::warning(this, QStringLiteral("保存失败"), err);
-        return false;
-    }
-
-    // The first 保存 materialises the `<basename>.dpz` title: the source name
-    // plus the signal that the annotations live in a copy, not next to it.
-    m_docs[index].title = QFileInfo(source).completeBaseName() + QStringLiteral(".dpz");
-    AppLog::write(QStringLiteral("save"),
-                  QStringLiteral("保存工作副本 %1：批注 %2 条")
-                      .arg(QFileInfo(target).fileName())
-                      .arg(canvas->strokeCount()));
-    markDocumentSaved(index);
-    statusBar()->showMessage(QStringLiteral("已保存 %1").arg(m_docs.at(index).title), 4000);
-    return true;
+    // No real bundle yet: a plain PDF, a Word file or an imported image. Saving into a temp
+    // working copy was wrong - the teacher would never find the annotations there, and the
+    // 14-day cache sweep would eventually delete them. Like Word with a document that has no
+    // file yet, 保存 asks where the .dpz should live; 取消 writes nothing, and the caller (the
+    // close prompt) treats that as "keep the document open".
+    return saveDocumentAs(index);
 }
 
 // Ctrl+Shift+S / the island's 「另存为」: choose between a `.dpz` bundle
@@ -1053,6 +1011,12 @@ bool MainWindow::saveDocument(int index)
 // Returns true only when a file was actually written.
 bool MainWindow::saveDocumentAs(int index)
 {
+    // Self tests cannot drive a modal file dialog: this one-shot flag makes the call report
+    // "the user cancelled" instead, which is what the routing assertions check.
+    if (m_saveAsCancelled) {
+        m_saveAsCancelled = false;
+        return false;
+    }
     if (index < 0 || index >= m_canvases.size())
         return false;
     PdfCanvas *canvas = m_canvases.at(index);
@@ -1308,6 +1272,13 @@ void MainWindow::markDocumentSaved(int index)
         return;
     m_docs[index].dirty = false;
     refreshTabTitle(index);
+}
+
+bool MainWindow::testDocumentDirty(int index) const
+{
+    if (index < 0 || index >= m_docs.size())
+        return false;
+    return m_docs.at(index).dirty;
 }
 
 // The tab strip shows the source name plus a leading `*` while the ink has
