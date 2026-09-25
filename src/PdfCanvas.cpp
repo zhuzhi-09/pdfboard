@@ -1611,6 +1611,22 @@ bool PdfCanvas::eraseAtPointer(int page, const QPointF &viewportPos, qreal radiu
 // --- 掌擦（手掌接触面橡皮）的手势执行 --------------------------------------
 // 分类器（classifyTouch）已经把"这一帧是不是手掌"和"该用多大半径"算好了，
 // 这里只执行：取消在跑的笔迹/缩放/平移，把指示环跟到簇心，并沿路径擦过来。
+// 定义在文件后部（匿名命名空间里，掌擦分类器旁边）；这里提前声明同一个函数。
+namespace {
+void resetPalmClass(PdfCanvas::TouchClassState &state);
+}   // namespace
+
+void PdfCanvas::setPalmEraserEnabled(bool on)
+{
+    if (m_palmEraserEnabled == on)
+        return;
+    m_palmEraserEnabled = on;
+    // 关掉时必须立刻收手：否则这一簇会继续当橡皮擦，而开关已经关了。
+    if (!on && m_palmEraseActive)
+        endPalmErase();
+    resetPalmClass(m_touchClass);   // 不留旧滞回，重新打开时从干净状态开始
+}
+
 void PdfCanvas::palmEraseTo(const QPointF &centroid, qreal radiusPx)
 {
     if (!m_palmEraseActive) {
@@ -2499,8 +2515,12 @@ qreal updatePalmRadius(PdfCanvas::TouchClassState &state, const QVector<QPointF>
 //       kPalmEnterFrames 帧                      -> PalmEraser（进入）
 //     其余（2-3 点、未进入）                     -> Writing，但无可落笔点
 //        （这一帧什么都不做，等下一帧看清）
+// `palmEraserEnabled` = false（设置里关掉了手掌擦除）时，上面所有会变成
+// PalmEraser 的单簇分支都改成"什么都不做"的 Writing；多簇（双指）与单点
+// 书写的路径完全不受开关影响。
 PdfCanvas::TouchClassResult PdfCanvas::classifyTouch(const QVector<QPointF> &pts,
-                                                     TouchClassState &state)
+                                                     TouchClassState &state,
+                                                     bool palmEraserEnabled)
 {
     TouchClassResult r;
     if (pts.isEmpty()) {
@@ -2538,6 +2558,15 @@ PdfCanvas::TouchClassResult PdfCanvas::classifyTouch(const QVector<QPointF> &pts
 
     const QVector<QPointF> &cluster = clusters.first();
     const QPointF centroid = pointsCentroid(cluster);
+
+    if (!palmEraserEnabled) {
+        // 开关关闭：这一簇本来会被判成掌擦，现在什么都不做 —— 不擦、不画、不缩放。
+        // 状态一并清掉，免得重新打开时还带着旧的滞回。
+        resetPalmClass(state);
+        r.mode = TouchClass::Writing;
+        r.hasWritePos = false;
+        return r;
+    }
 
     if (cluster.size() < kPalmStayPoints) {
         // 单点 = 书写/点击；<= 1 点也意味着掌擦该结束了。

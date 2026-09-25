@@ -469,6 +469,14 @@ void SettingsPage::buildUi()
                                        QStringLiteral("开机自动启动"),
                                        QStringLiteral("登录 Windows 后自动打开本程序"),
                                        m_autoStart, Theme::Space3, Theme::Space3));
+    m_palmEraser = new ToggleSwitch(general.frame);
+    m_palmEraser->setToolTip(QStringLiteral("手掌按在屏幕上自动变成橡皮，擦除范围随接触面变化"));
+    m_palmEraser->setChecked(AppSettings::palmEraserEnabled());
+    connect(m_palmEraser, &QAbstractButton::toggled, this, &SettingsPage::onPalmEraserToggled);
+    general.col->addWidget(makeTextRow(general.frame,
+                                       QStringLiteral("手掌当橡皮"),
+                                       QStringLiteral("手掌压上去自动变橡皮，尺寸随接触面变化"),
+                                       m_palmEraser, Theme::Space3, Theme::Space3));
     col->addWidget(general.frame);
 
     // --- Word 文档 ----------------------------------------------------------
@@ -1498,6 +1506,19 @@ void SettingsPage::onAutoStartToggled(bool on)
     // Put the switch back to the registry state that actually exists.
     const QSignalBlocker block(m_autoStart);
     m_autoStart->setChecked(AppSettings::isAutoStartEnabled());
+}
+
+void SettingsPage::onPalmEraserToggled(bool on)
+{
+    QString err;
+    if (!AppSettings::setPalmEraserEnabled(on, &err)) {
+        QMessageBox::warning(this, QStringLiteral("保存失败"), err);
+        // Put the switch back to the registry state that actually exists.
+        const QSignalBlocker block(m_palmEraser);
+        m_palmEraser->setChecked(AppSettings::palmEraserEnabled());
+        return;
+    }
+    emit palmEraserChanged();
 }
 
 void SettingsPage::onRegisterPdf()

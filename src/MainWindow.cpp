@@ -254,6 +254,12 @@ MainWindow::MainWindow(QWidget *parent)
     // Picking 系统 / 浅色 / 深色 in the settings page re-applies the theme
     // everywhere. 系统 additionally follows the live OS colour scheme.
     connect(m_settingsPage, &SettingsPage::themeChanged, this, &MainWindow::applyTheme);
+    // 手掌当橡皮的开关：立刻作用于所有已打开的文档（新文档在 createCanvas 里读取）。
+    connect(m_settingsPage, &SettingsPage::palmEraserChanged, this, [this] {
+        const bool on = AppSettings::palmEraserEnabled();
+        for (PdfCanvas *canvas : m_canvases)
+            canvas->setPalmEraserEnabled(on);
+    });
 
     // The settings page reports the Word-settings restore through the window's
     // status bar; the page itself owns no status bar.
@@ -464,6 +470,9 @@ PdfCanvas *MainWindow::createCanvas()
 {
     auto *canvas = new PdfCanvas(m_stack);
     m_stack->addWidget(canvas);
+
+    // 手掌当橡皮是全局设置：新文档按当前值初始化（已打开的文档由设置页的信号更新）。
+    canvas->setPalmEraserEnabled(AppSettings::palmEraserEnabled());
 
     // Every canvas tracks its own edits, so a document that was drawn on and
     // then switched away from stays dirty. The receiver context is the canvas

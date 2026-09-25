@@ -2519,6 +2519,58 @@ static int runImageSelfTest()
                       int(rr.mode == PdfCanvas::TouchClass::Writing), 1);
             }
 
+            // 开关：关掉后同一簇不再判成掌擦；打开时照旧判成掌擦。
+            // 两条一起才算证明开关真的管用（只测一条的话，写死返回值也能过）。
+            {
+                const QVector<QPointF> palmCluster{
+                    QPointF(400, 340), QPointF(425, 350), QPointF(445, 340),
+                    QPointF(435, 372), QPointF(408, 366), QPointF(418, 358)};
+                PdfCanvas::TouchClassState onState;
+                PdfCanvas::TouchClassResult rOn;
+                for (int i = 0; i < 4; ++i)
+                    rOn = PdfCanvas::classifyTouch(palmCluster, onState,
+                                                   /*palmEraserEnabled=*/true);
+                check("switch: on, the palm cluster erases",
+                      int(rOn.mode == PdfCanvas::TouchClass::PalmEraser), 1);
+
+                PdfCanvas::TouchClassState offState;
+                PdfCanvas::TouchClassResult rOff;
+                for (int i = 0; i < 4; ++i)
+                    rOff = PdfCanvas::classifyTouch(palmCluster, offState,
+                                                    /*palmEraserEnabled=*/false);
+                check("switch: off, the same cluster does not erase",
+                      int(rOff.mode != PdfCanvas::TouchClass::PalmEraser), 1);
+                check("switch: off, and nothing is drawn either",
+                      int(!rOff.hasWritePos), 1);
+            }
+
+            // 关掉时正压在掌擦上 -> 必须立刻收手，不能卡在掌擦状态
+            {
+                PdfCanvas sw;
+                sw.setAttribute(Qt::WA_DontShowOnScreen, true);
+                sw.resize(900, 700);
+                sw.show();
+                QString se;
+                check("switch: canvas opens the page", int(sw.openPdf(pdfPath, &se)), 1);
+                sw.setTool(PdfCanvas::InkTool::Pen);
+                sw.setPalmEraserEnabled(true);
+                const QSize sv = sw.testViewportSize();
+                qreal sy = 0.25 * sv.height();
+                while (sy < sv.height() && sw.testPageAtViewportY(sy) < 0)
+                    sy += 10.0;
+                const QPointF c(0.5 * sv.width(), sy);
+                const QVector<QPointF> cluster{c + QPointF(-20, 0), c + QPointF(0, -18),
+                                               c + QPointF(20, 0), c + QPointF(0, 18),
+                                               c + QPointF(12, 12)};
+                sw.testPalmFrame(cluster);      // 第 1 帧：只确认，不动作
+                sw.testPalmFrame(cluster);      // 第 2 帧：进入掌擦
+                check("switch: palm erase is active first",
+                      sw.testPalmEraseActive() ? 1 : 0, 1);
+                sw.setPalmEraserEnabled(false);
+                check("switch: switching off ends the gesture at once",
+                      sw.testPalmEraseActive() ? 0 : 1, 1);
+            }
+
             // 端到端：同一串抖动帧真的沿路径擦掉墨，而且不缩放、不平移、不改
             // 工具栏 —— 分类器的结论确实接到了擦除路径上（只测分类器本身会漏掉
             // 这里：手掌手势曾经因为重置分类状态而每隔一帧断一次）。

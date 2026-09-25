@@ -54,6 +54,8 @@ public:
 
 signals:
     void themeChanged();     // an appearance mode was picked and stored
+    // 手掌当橡皮的开关变了：主窗口据此更新所有已打开的文档（新文档在创建时读取）。
+    void palmEraserChanged();
     // A transient line for the window's status bar (the Word settings restore
     // result; the page itself owns no status bar).
     void statusMessage(const QString &message);
@@ -64,6 +66,7 @@ protected:
 
 private slots:
     void onAutoStartToggled(bool on);
+    void onPalmEraserToggled(bool on);
     void onRegisterPdf();
     void onChooseSaveDir();
     void onResetSaveDir();
@@ -88,6 +91,7 @@ private:
     QWidget         *m_column    = nullptr;   // the centred content column
     QLabel          *m_gear      = nullptr;   // page title gear (repixmapped)
     QAbstractButton *m_autoStart = nullptr;
+    QAbstractButton *m_palmEraser = nullptr;   // 手掌当橡皮（默认开）
     QPushButton     *m_register  = nullptr;
     QLabel          *m_savePathLabel = nullptr;
     QPushButton     *m_chooseSaveDir = nullptr;
