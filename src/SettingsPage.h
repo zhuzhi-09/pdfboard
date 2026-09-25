@@ -91,7 +91,7 @@ private:
     QWidget         *m_column    = nullptr;   // the centred content column
     QLabel          *m_gear      = nullptr;   // page title gear (repixmapped)
     QAbstractButton *m_autoStart = nullptr;
-    QAbstractButton *m_palmEraser = nullptr;   // 手掌当橡皮（默认开）
+    QAbstractButton *m_palmEraser = nullptr;   // 手掌当橡皮（实验性，默认关）
     QPushButton     *m_register  = nullptr;
     QLabel          *m_savePathLabel = nullptr;
     QPushButton     *m_chooseSaveDir = nullptr;

@@ -109,8 +109,9 @@ public:
     qreal   eraserRadius() const { return m_eraserRadius; }
     void    setEraserRadius(qreal radiusPx);   // 吸附到最近的一档
 
-    // 手掌擦除开关（设置页「手掌擦除」，默认开）。关掉后手掌帧永远不进入
-    // 擦除，也结束正在进行的掌擦；双指与单指书写不受影响。
+    // 手掌擦除开关（设置页「手掌当橡皮（实验性）」）。**出厂默认关**：多指触摸会被
+    // Windows 自身的手势识别接走，这条功能对多数大屏不可用。关掉后手掌簇永远不进入
+    // 擦除，也结束正在进行的掌擦；**单指书写与双指手势不受影响**。
     void    setPalmEraserEnabled(bool on);
     bool    palmEraserEnabled() const { return m_palmEraserEnabled; }
 
@@ -142,7 +143,7 @@ public:
     };
     static TouchClassResult classifyTouch(const QVector<QPointF> &pts,
                                           TouchClassState &state,
-                                          bool palmEraserEnabled = true);
+                                          bool palmEraserEnabled = false);
 
     // Ink undo / redo: snapshot stack of the whole per-page ink model.
     void undo();
@@ -406,8 +407,9 @@ private:
     QPointF m_lastErasePos;             // previous eraser sample (for sweeping)
     bool    m_hasLastErasePos = false;
     // 掌擦：分类器（classifyTouch）负责防抖，这里只跟着它的结论走。
-    // 开关默认开；主机把已保存的设置推给每份画布（见 MainWindow）。
-    bool    m_palmEraserEnabled = true;
+    // 开关出厂默认关（实验性功能，见 AppSettings::palmEraserEnabled）；主机把已保存
+    // 的设置推给每份画布（见 MainWindow）。擦除是破坏性操作，忘了推就宁可不擦。
+    bool    m_palmEraserEnabled = false;
     qreal   m_palmRadius = 0.0;         // 当前动态半径（掌擦期间显示与命中都用它）
     bool    m_palmEraseActive = false;  // 掌擦手势进行中
     QPointF m_palmLastPos;              // 掌擦的上一帧簇心（沿路径扫擦）

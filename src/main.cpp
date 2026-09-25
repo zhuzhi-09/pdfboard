@@ -2414,17 +2414,18 @@ static int runImageSelfTest()
                 QPointF(422, 322), QPointF(388, 325)};
 
             PdfCanvas::TouchClassState st;
-            PdfCanvas::TouchClassResult r = PdfCanvas::classifyTouch(palmTight, st);
+            PdfCanvas::TouchClassResult r = PdfCanvas::classifyTouch(palmTight, st,
+                                                                      /*palmEraserEnabled=*/true);
             check("palm: the first frame does not act yet",
                   int(r.mode == PdfCanvas::TouchClass::Writing && !r.hasWritePos), 1);
-            r = PdfCanvas::classifyTouch(palmTight, st);
+            r = PdfCanvas::classifyTouch(palmTight, st, /*palmEraserEnabled=*/true);
             check("palm: enters on the 2nd consecutive frame",
                   int(r.mode == PdfCanvas::TouchClass::PalmEraser), 1);
             const qreal radiusTight = r.radiusPx;
 
             PdfCanvas::TouchClassState stWide;
-            PdfCanvas::classifyTouch(palmWide, stWide);
-            r = PdfCanvas::classifyTouch(palmWide, stWide);
+            PdfCanvas::classifyTouch(palmWide, stWide, /*palmEraserEnabled=*/true);
+            r = PdfCanvas::classifyTouch(palmWide, stWide, /*palmEraserEnabled=*/true);
             check("palm: a wider cluster gives a bigger radius",
                   int(r.mode == PdfCanvas::TouchClass::PalmEraser
                       && r.radiusPx > radiusTight + 8.0), 1);
@@ -2438,8 +2439,9 @@ static int runImageSelfTest()
                 for (int i = 0; i < 8; ++i)
                     chained.append(QPointF(100.0 + 70.0 * i, 400.0));
                 PdfCanvas::TouchClassState s;
-                PdfCanvas::classifyTouch(chained, s);
-                const PdfCanvas::TouchClassResult rr = PdfCanvas::classifyTouch(chained, s);
+                PdfCanvas::classifyTouch(chained, s, /*palmEraserEnabled=*/true);
+                const PdfCanvas::TouchClassResult rr = PdfCanvas::classifyTouch(
+                    chained, s, /*palmEraserEnabled=*/true);
                 check("palm: an oversized cluster is clamped at the ceiling",
                       int(rr.mode == PdfCanvas::TouchClass::PalmEraser
                           && rr.radiusPx <= 44.0 * 3.0 + 0.01), 1);
@@ -2450,7 +2452,8 @@ static int runImageSelfTest()
                 QVector<QPointF> withFinger = palmTight;
                 withFinger.append(QPointF(650, 500));
                 PdfCanvas::TouchClassState s;
-                const PdfCanvas::TouchClassResult rr = PdfCanvas::classifyTouch(withFinger, s);
+                const PdfCanvas::TouchClassResult rr = PdfCanvas::classifyTouch(
+                    withFinger, s, /*palmEraserEnabled=*/true);
                 check("palm + writing finger: not the eraser",
                       int(rr.mode == PdfCanvas::TouchClass::Writing && rr.hasWritePos), 1);
                 check("palm + writing finger: the finger is the write point",
@@ -2463,7 +2466,8 @@ static int runImageSelfTest()
                 const QVector<QPointF> pinchPts{QPointF(300, 300), QPointF(330, 305),
                                                 QPointF(700, 300), QPointF(730, 298)};
                 PdfCanvas::TouchClassState s;
-                const PdfCanvas::TouchClassResult rr = PdfCanvas::classifyTouch(pinchPts, s);
+                const PdfCanvas::TouchClassResult rr = PdfCanvas::classifyTouch(
+                    pinchPts, s, /*palmEraserEnabled=*/true);
                 check("pinch: separated clusters stay a pinch",
                       int(rr.mode == PdfCanvas::TouchClass::Pinch), 1);
             }
@@ -2472,7 +2476,8 @@ static int runImageSelfTest()
             {
                 PdfCanvas::TouchClassState s;
                 const PdfCanvas::TouchClassResult rr =
-                    PdfCanvas::classifyTouch(QVector<QPointF>{QPointF(420, 360)}, s);
+                    PdfCanvas::classifyTouch(QVector<QPointF>{QPointF(420, 360)}, s,
+                                             /*palmEraserEnabled=*/true);
                 check("single point: writing, not a gesture",
                       int(rr.mode == PdfCanvas::TouchClass::Writing && rr.hasWritePos), 1);
             }
@@ -2494,7 +2499,8 @@ static int runImageSelfTest()
                     QVector<QPointF> frame;
                     for (int k = 0; k < counts[i]; ++k)
                         frame.append(base[k] + shift);
-                    const PdfCanvas::TouchClassResult rr = PdfCanvas::classifyTouch(frame, s);
+                    const PdfCanvas::TouchClassResult rr = PdfCanvas::classifyTouch(
+                        frame, s, /*palmEraserEnabled=*/true);
                     if (rr.mode == PdfCanvas::TouchClass::Pinch)
                         ++pinchFrames;
                     if (rr.mode == PdfCanvas::TouchClass::PalmEraser) {
@@ -2514,7 +2520,8 @@ static int runImageSelfTest()
                       int(rMax - rMin <= 14.0), 1);
                 // 抬到只剩一根手指 = 离开掌擦，回到书写。
                 const PdfCanvas::TouchClassResult rr =
-                    PdfCanvas::classifyTouch(QVector<QPointF>{QPointF(420, 360)}, s);
+                    PdfCanvas::classifyTouch(QVector<QPointF>{QPointF(420, 360)}, s,
+                                             /*palmEraserEnabled=*/true);
                 check("flicker: lifting to one finger leaves the eraser",
                       int(rr.mode == PdfCanvas::TouchClass::Writing), 1);
             }
@@ -2542,6 +2549,15 @@ static int runImageSelfTest()
                       int(rOff.mode != PdfCanvas::TouchClass::PalmEraser), 1);
                 check("switch: off, and nothing is drawn either",
                       int(!rOff.hasWritePos), 1);
+
+                // 关掉的是"掌擦"，不是手指书写：单点必须仍是可落笔的书写点。
+                // （曾经的实现把开关判断放在单点分支之前 —— 一关开关连手指书写
+                //   都会失效；它一直没被发现，因为正式路径压根没把开关传进来。）
+                PdfCanvas::TouchClassState oneState;
+                const PdfCanvas::TouchClassResult rOne = PdfCanvas::classifyTouch(
+                    QVector<QPointF>{QPointF(420, 360)}, oneState,
+                    /*palmEraserEnabled=*/false);
+                check("switch: off, one finger still writes", int(rOne.hasWritePos), 1);
             }
 
             // 关掉时正压在掌擦上 -> 必须立刻收手，不能卡在掌擦状态
@@ -2575,6 +2591,58 @@ static int runImageSelfTest()
             // 工具栏 —— 分类器的结论确实接到了擦除路径上（只测分类器本身会漏掉
             // 这里：手掌手势曾经因为重置分类状态而每隔一帧断一次）。
             {
+                // 开关关掉后：同一串手掌帧必须一根笔迹都不擦，而且不能起掌擦手势。
+                // 这条曾经漏测 —— 分类器的开关参数在正式路径上没被传进去，于是
+                // "关掉开关"其实照样擦；off 分支还早于单点书写，会连手指书写一起关。
+                // 这一块把两个后果都钉住（出厂默认就是关，所以它同时也是默认值的回归）。
+                {
+                    PdfCanvas off;
+                    off.setAttribute(Qt::WA_DontShowOnScreen, true);
+                    off.resize(900, 700);
+                    off.show();
+                    QString oe;
+                    check("switch: off canvas opens the page",
+                          int(off.openPdf(pdfPath, &oe)), 1);
+                    off.setTool(PdfCanvas::InkTool::Pen);
+                    check("switch: off is the factory default",
+                          off.palmEraserEnabled() ? 0 : 1, 1);
+                    off.setPalmEraserEnabled(false);
+
+                    const QSize vpo = off.testViewportSize();
+                    qreal oy = 0.25 * vpo.height();
+                    while (oy < vpo.height() && off.testPageAtViewportY(oy) < 0)
+                        oy += 10.0;
+                    const qreal ofx = off.testFracX(0, 0.5 * vpo.width());
+                    const qreal ofy = off.testFracAtViewportY(oy);
+                    check("switch: off test lands on the page",
+                          int(ofx > 0.0 && ofy > 0.0), 1);
+                    off.testAddStroke(0, QPointF(ofx - 0.12, ofy), QPointF(ofx + 0.12, ofy),
+                                      QColor(0x10, 0x10, 0x10), 6.0);
+                    auto offInk = [&off]() {
+                        int n = 0;
+                        for (int i = 0; i < off.strokeCount(); ++i)
+                            n += off.testStrokePoints(0, i);
+                        return n;
+                    };
+                    const int offBefore = offInk();
+                    check("switch: off, there is ink to protect", int(offBefore > 0), 1);
+
+                    const QPointF obase[5] = {QPointF(400, 290), QPointF(418, 296),
+                                              QPointF(424, 312), QPointF(408, 322),
+                                              QPointF(392, 310)};
+                    const int ocounts[6] = {4, 5, 3, 4, 2, 4};
+                    for (int i = 0; i < 6; ++i) {
+                        const QPointF shift(qreal((i % 3) * 4), qreal((i % 2) * 3));
+                        QVector<QPointF> frame;
+                        for (int k = 0; k < ocounts[i]; ++k)
+                            frame.append(obase[k] + shift + QPointF(0.0, oy - 300.0));
+                        off.testPalmFrame(frame);
+                    }
+                    check("switch: off, palm frames do not erase", offInk(), offBefore);
+                    check("switch: off, no palm gesture starts",
+                          off.testPalmEraseActive() ? 0 : 1, 1);
+                }
+
                 PdfCanvas palm;
                 palm.setAttribute(Qt::WA_DontShowOnScreen, true);
                 palm.resize(900, 700);
@@ -2582,6 +2650,7 @@ static int runImageSelfTest()
                 QString pe;
                 check("palm canvas: opens the page", int(palm.openPdf(pdfPath, &pe)), 1);
                 palm.setTool(PdfCanvas::InkTool::Pen);
+                palm.setPalmEraserEnabled(true);   // 这块测掌擦本身：显式打开，与出厂默认（关）无关
 
                 // 在页面上找一个视口位置，并在它上面画一条横线。
                 const QSize vp = palm.testViewportSize();

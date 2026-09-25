@@ -470,12 +470,12 @@ void SettingsPage::buildUi()
                                        QStringLiteral("登录 Windows 后自动打开本程序"),
                                        m_autoStart, Theme::Space3, Theme::Space3));
     m_palmEraser = new ToggleSwitch(general.frame);
-    m_palmEraser->setToolTip(QStringLiteral("手掌按在屏幕上自动变成橡皮，擦除范围随接触面变化"));
+    m_palmEraser->setToolTip(QStringLiteral("实验性功能：多指触摸会被 Windows 手势拦截，多数面板上不可用"));
     m_palmEraser->setChecked(AppSettings::palmEraserEnabled());
     connect(m_palmEraser, &QAbstractButton::toggled, this, &SettingsPage::onPalmEraserToggled);
     general.col->addWidget(makeTextRow(general.frame,
-                                       QStringLiteral("手掌当橡皮"),
-                                       QStringLiteral("手掌压上去自动变橡皮，尺寸随接触面变化"),
+                                       QStringLiteral("手掌当橡皮（实验性）"),
+                                       QStringLiteral("实验性功能，暂不可用：多指触摸会被系统手势拦截"),
                                        m_palmEraser, Theme::Space3, Theme::Space3));
     col->addWidget(general.frame);
 

@@ -351,8 +351,9 @@ bool AppSettings::setWordNagFixEnabled(bool on, QString *errorOut)
 bool AppSettings::palmEraserEnabled()
 {
     QSettings s(kAppKey, QSettings::NativeFormat);
-    // 默认开：缺失/非法值都读成 true，功能保持出厂状态。
-    return s.value(kPalmEraserValue, true).toBool();
+    // 默认关：这是实验性功能，而且多指触摸会先被 Windows 自己的手势识别接走，
+    // 我们的分类器收不到完整的多指帧，所以对多数面板不可用。用户显式打开过就保留。
+    return s.value(kPalmEraserValue, false).toBool();
 }
 
 bool AppSettings::setPalmEraserEnabled(bool on, QString *errorOut)

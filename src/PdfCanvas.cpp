@@ -2559,7 +2559,10 @@ PdfCanvas::TouchClassResult PdfCanvas::classifyTouch(const QVector<QPointF> &pts
     const QVector<QPointF> &cluster = clusters.first();
     const QPointF centroid = pointsCentroid(cluster);
 
-    if (!palmEraserEnabled) {
+    // 开关关的是"掌擦"，不是手指书写：只有点数够得上手掌的那些簇（>= 2 点）才
+    // 走"什么都不做"；单点必须继续落到下面的书写分支，否则关掉开关会连手指
+    // 书写一起关掉。
+    if (!palmEraserEnabled && cluster.size() >= kPalmStayPoints) {
         // 开关关闭：这一簇本来会被判成掌擦，现在什么都不做 —— 不擦、不画、不缩放。
         // 状态一并清掉，免得重新打开时还带着旧的滞回。
         resetPalmClass(state);
@@ -2688,7 +2691,7 @@ bool PdfCanvas::handleTouch(QTouchEvent *te)
     // --- 先分类这一帧：掌擦 / 双指 / 书写三条路互斥 -------------------------
     // 分类器只看点集和它自己的跨帧状态（见 classifyTouch），既有双指语义
     // 一分不动；点数抖动的单簇不再被误当成双指。
-    TouchClassResult cls = classifyTouch(pts, m_touchClass);
+    TouchClassResult cls = classifyTouch(pts, m_touchClass, m_palmEraserEnabled);
     // 自由移动模式完全不做掌擦（那是"拖动画面"模式）：手掌帧沿用原来的
     // 双指路径，该模式的行为不变。
     if (m_tool == InkTool::Move && cls.mode == TouchClass::PalmEraser)
@@ -2823,7 +2826,7 @@ void PdfCanvas::testPalmFrame(const QVector<QPointF> &viewportPts)
 {
     // Same classify -> execute route as handleTouch's palm branch, minus the
     // QTouchEvent plumbing (see the header comment).
-    TouchClassResult cls = classifyTouch(viewportPts, m_touchClass);
+    TouchClassResult cls = classifyTouch(viewportPts, m_touchClass, m_palmEraserEnabled);
     if (cls.mode == TouchClass::PalmEraser && m_tool != InkTool::Move) {
         palmEraseTo(pointsCentroid(viewportPts), cls.radiusPx);
         return;
