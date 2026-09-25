@@ -21,6 +21,7 @@ const QString kDebugLogValue = QStringLiteral("DebugLog");
 const QString kThemeModeValue = QStringLiteral("ThemeMode");
 const QString kWordOpenModeValue = QStringLiteral("WordOpenMode");
 const QString kWordNagFixValue = QStringLiteral("WordNagFix");
+const QString kPalmEraserValue = QStringLiteral("PalmEraser");
 const QString kRecentFilesValue = QStringLiteral("RecentFiles");
 
 // 最近项目 keeps at most this many paths; the oldest entry is dropped first.
@@ -340,6 +341,29 @@ bool AppSettings::setWordNagFixEnabled(bool on, QString *errorOut)
     if (s.status() != QSettings::NoError) {
         if (errorOut)
             *errorOut = QStringLiteral("无法写入注册表（Word 提醒设置）");
+        return false;
+    }
+    if (errorOut)
+        errorOut->clear();
+    return true;
+}
+
+bool AppSettings::palmEraserEnabled()
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    // 默认开：缺失/非法值都读成 true，功能保持出厂状态。
+    return s.value(kPalmEraserValue, true).toBool();
+}
+
+bool AppSettings::setPalmEraserEnabled(bool on, QString *errorOut)
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    s.setValue(kPalmEraserValue, on);
+    s.sync();
+
+    if (s.status() != QSettings::NoError) {
+        if (errorOut)
+            *errorOut = QStringLiteral("无法写入注册表（手掌擦除设置）");
         return false;
     }
     if (errorOut)

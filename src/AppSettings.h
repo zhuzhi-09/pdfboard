@@ -71,6 +71,13 @@ bool setWordOpenMode(int mode, QString *errorOut = nullptr);
 bool wordNagFixEnabled();
 bool setWordNagFixEnabled(bool on, QString *errorOut = nullptr);
 
+// 手掌擦除: ON by default (the classroom panel's palm-as-eraser is the feature
+// the app ships with). When OFF, a palm-sized contact never triggers the
+// dynamic eraser - it does nothing at all - while pinch and single-finger
+// writing keep working exactly as before.
+bool palmEraserEnabled();
+bool setPalmEraserEnabled(bool on, QString *errorOut = nullptr);
+
 // Timestamp (ms since epoch) of the last quiet update check, so the settings
 // page asks the network at most about once a day.
 qint64 lastUpdateCheckMs();
