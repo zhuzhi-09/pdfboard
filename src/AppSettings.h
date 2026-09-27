@@ -78,6 +78,12 @@ bool setWordNagFixEnabled(bool on, QString *errorOut = nullptr);
 bool palmEraserEnabled();
 bool setPalmEraserEnabled(bool on, QString *errorOut = nullptr);
 
+// Toolbar look: 0 = 简约 (glyph only, the default), 1 = 文字 (glyph over its
+// label). Only the presentation changes - both styles expose every button.
+// Anything else stored in the registry reads back as 0.
+int  toolbarStyle();
+bool setToolbarStyle(int style, QString *errorOut = nullptr);
+
 // Timestamp (ms since epoch) of the last quiet update check, so the settings
 // page asks the network at most about once a day.
 qint64 lastUpdateCheckMs();

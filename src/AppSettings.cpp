@@ -22,6 +22,7 @@ const QString kThemeModeValue = QStringLiteral("ThemeMode");
 const QString kWordOpenModeValue = QStringLiteral("WordOpenMode");
 const QString kWordNagFixValue = QStringLiteral("WordNagFix");
 const QString kPalmEraserValue = QStringLiteral("PalmEraser");
+const QString kToolbarStyleValue = QStringLiteral("ToolbarStyle");
 const QString kRecentFilesValue = QStringLiteral("RecentFiles");
 
 // 最近项目 keeps at most this many paths; the oldest entry is dropped first.
@@ -365,6 +366,30 @@ bool AppSettings::setPalmEraserEnabled(bool on, QString *errorOut)
     if (s.status() != QSettings::NoError) {
         if (errorOut)
             *errorOut = QStringLiteral("无法写入注册表（手掌擦除设置）");
+        return false;
+    }
+    if (errorOut)
+        errorOut->clear();
+    return true;
+}
+
+int AppSettings::toolbarStyle()
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    const int style = s.value(kToolbarStyleValue, 0).toInt();
+    // 默认简约（0）。越界值（手工改过注册表）一律读回默认。
+    return (style == 0 || style == 1) ? style : 0;
+}
+
+bool AppSettings::setToolbarStyle(int style, QString *errorOut)
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    s.setValue(kToolbarStyleValue, qBound(0, style, 1));
+    s.sync();
+
+    if (s.status() != QSettings::NoError) {
+        if (errorOut)
+            *errorOut = QStringLiteral("无法写入注册表（工具栏风格）");
         return false;
     }
     if (errorOut)

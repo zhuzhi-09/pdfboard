@@ -286,7 +286,12 @@ struct Metrics {
 // `scale` multiplies every FLOOR as well as the font-derived value, so a whole
 // piece of chrome can shrink as one unit (the island ships at IslandScale).
 // The default 1.0 keeps every existing caller bit-identical.
-inline Metrics metrics(const QFont &font, qreal scale = 1.0)
+//
+// `compact` drops the reserved label row: a chip button that shows ONLY its
+// glyph (the island's 简约 style) needs no room for a text line, so its height
+// falls to the touch target itself. Without this the bar would stay as tall as
+// the labelled one - the container asks for the same buttonHeight either way.
+inline Metrics metrics(const QFont &font, qreal scale = 1.0, bool compact = false)
 {
     const QFontMetricsF fm(font);
     const qreal h = qMax<qreal>(12.0, fm.height());
@@ -319,11 +324,19 @@ inline Metrics metrics(const QFont &font, qreal scale = 1.0)
     m.emptyCard     = int(qMax<qreal>(104.0, h * 6.40));
     m.emptyGlyph    = int(m.emptyCard * 0.46);
 
-    // A chip button stacks its glyph over its label. The minimum height must
-    // cover that stack plus the padding, otherwise the label is clipped.
-    const qreal stack = m.icon + qMax<qreal>(6.0, h * 0.40) + h;
-    m.buttonHeight  = int(qMax<qreal>(qreal(m.touch) + 6.0,
-                                      stack + m.padY * 2.0 + 2.0));
+    if (compact) {
+        // Glyph only: no label row is reserved, and the button IS the touch
+        // target (no extra +6 breathing room), so the bar is as slim as the
+        // classroom panel still allows.
+        m.buttonHeight  = int(qMax<qreal>(qreal(m.touch),
+                                          qreal(m.icon) + m.padY * 2.0 + 2.0));
+    } else {
+        // A chip button stacks its glyph over its label. The minimum height must
+        // cover that stack plus the padding, otherwise the label is clipped.
+        const qreal stack = m.icon + qMax<qreal>(6.0, h * 0.40) + h;
+        m.buttonHeight  = int(qMax<qreal>(qreal(m.touch) + 6.0,
+                                          stack + m.padY * 2.0 + 2.0));
+    }
     return m;
 }
 

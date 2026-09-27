@@ -56,6 +56,8 @@ signals:
     void themeChanged();     // an appearance mode was picked and stored
     // 手掌当橡皮的开关变了：主窗口据此更新所有已打开的文档（新文档在创建时读取）。
     void palmEraserChanged();
+    // 工具栏风格变了（简约 / 文字）：主窗口据此更新所有已打开文档的工具岛。
+    void toolbarStyleChanged();
     // A transient line for the window's status bar (the Word settings restore
     // result; the page itself owns no status bar).
     void statusMessage(const QString &message);
@@ -74,6 +76,7 @@ private slots:
     void onOpenLogDir();
     void onThemePicked(int mode);
     void onWordModePicked(int mode);
+    void onToolbarStylePicked(int style);
     void onWordNagFixToggled(bool on);
     void onRestoreWordNag();
 
@@ -86,6 +89,7 @@ private:
     void refreshWordNag();
     void syncThemeSegment();
     void syncWordSegment();
+    void syncToolbarStyleSegment();
 
     QWidget         *m_body      = nullptr;   // the scrolling body
     QWidget         *m_column    = nullptr;   // the centred content column
@@ -105,6 +109,10 @@ private:
     QButtonGroup *m_themeGroup = nullptr;
     QPushButton  *m_themeSegments[3] = {};
     QLabel       *m_themeNote = nullptr;
+
+    // 工具栏风格: 简约（纯图标，默认）/ 文字（图标+名称），两个互斥分段。
+    QButtonGroup *m_toolbarStyleGroup = nullptr;
+    QPushButton  *m_toolbarStyleSegments[2] = {};
 
     // 打开 Word 文档时: the same three-segment control, persisted through
     // AppSettings::setWordOpenMode (0 每次询问 / 1 批注 / 2 用 Word 打开).

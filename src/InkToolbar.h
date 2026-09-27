@@ -7,6 +7,7 @@
 #include <QHash>
 #include <QPoint>
 #include <QSize>
+#include <QVector>
 #include <QWidget>
 
 class PdfCanvas;
@@ -41,6 +42,18 @@ public:
 
     bool isCollapsed() const { return m_collapsed; }
 
+    // Two looks for the SAME set of buttons (the host switches this from the
+    // stored preference; see SettingsPage / MainWindow):
+    //   Compact - glyph only, a slim single row (the default)
+    //   Text    - glyph over its label (the original look)
+    // Only the presentation changes: every button, tooltip, signal and gesture
+    // is identical in both, and the labels stay on the buttons for the tooltip
+    // and for the self test that locates them by text.
+    enum class Style { Compact, Text };
+
+    void  setStyle(Style s);
+    Style style() const { return m_style; }
+
     // Re-centre at the bottom of the host viewport and keep the bar on top.
     void reposition();
 
@@ -68,6 +81,14 @@ public:
     void testPressOn(QWidget *watched, const QPoint &localPos);
     void testMoveOn(QWidget *watched, const QPoint &localPos);
     void testReleaseOn(QWidget *watched, const QPoint &localPos);
+    // 工具岛风格（自测用）：断言"默认简约、纯图标、切到文字又显示标签、两种风格
+    // 按钮数一致、简约更矮且按钮不低于触控下限"。
+    Style testStyle() const { return m_style; }
+    void  testSetStyle(Style s) { setStyle(s); }
+    int   testBarHeight() const;                 // sizeHint().height()
+    int   testButtonHeight() const { return m_metrics.buttonHeight; }
+    bool  testLabelButtonsIconOnly() const;      // all labelled buttons icon-only?
+    int   testLabelButtonCount() const { return int(m_labelButtons.size()); }
 
 public slots:
     void setCollapsed(bool on);
@@ -93,6 +114,10 @@ protected:
 
 private:
     void buildUi();
+    // Sets every button's presentation for the current m_style: Compact = glyph
+    // only (a slim row at the touch floor), Text = glyph over its label. Also
+    // re-sizes the page chip and the chevron, which are not in m_labelButtons.
+    void applyButtonStyle();
     // One shared drag path: the island's own mouse handlers and the child
     // event filter both funnel through these, so the gesture behaves the same
     // no matter where on the island it was started.
@@ -112,6 +137,10 @@ private:
     void dismissPageGrid();        // any command hides the picker it covers
 
     Theme::Metrics m_metrics;
+    // The widget's own font BEFORE the island scale was applied. Metrics are
+    // derived from it (Theme::metrics(chromeFont(m_baseFont), IslandScale, ...)),
+    // so the style switch can recompute them without double-scaling font().
+    QFont m_baseFont;
 
     PdfCanvas   *m_canvas      = nullptr;
     QFrame      *m_chip        = nullptr;
@@ -138,11 +167,13 @@ private:
     // Glyph of every icon button, so the icons can be rebuilt (DPI change or a
     // new pen colour) without tracking each button separately.
     QHash<QToolButton *, IconPainter::Glyph> m_glyphs;
+    QVector<QToolButton *> m_labelButtons;   // the icon(+label) buttons, not the arrows
     QColor m_iconPenColor;         // pen colour baked into the current icons
     qreal  m_iconDpr = 1.0;        // device pixel ratio the icons were drawn for
 
     bool m_collapsed = false;
     bool m_fullscreenActive = false;
+    Style m_style = Style::Compact;   // factory default: the slim glyph-only row
 
     // Drag state. m_userPos and m_dragged are session-only: the island returns
     // to its default spot on the next launch.

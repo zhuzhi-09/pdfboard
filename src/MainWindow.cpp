@@ -258,6 +258,16 @@ MainWindow::MainWindow(QWidget *parent)
         for (PdfCanvas *canvas : m_canvases)
             canvas->setPalmEraserEnabled(on);
     });
+    // 工具栏风格（简约 / 文字）：同样立刻作用于所有已打开文档的工具岛。
+    connect(m_settingsPage, &SettingsPage::toolbarStyleChanged, this, [this] {
+        const InkToolbar::Style style = (AppSettings::toolbarStyle() == 0)
+                                            ? InkToolbar::Style::Compact
+                                            : InkToolbar::Style::Text;
+        for (PdfCanvas *canvas : m_canvases) {
+            if (InkToolbar *bar = canvas->toolbar())
+                bar->setStyle(style);
+        }
+    });
 
     // The settings page reports the Word-settings restore through the window's
     // status bar; the page itself owns no status bar.
@@ -480,6 +490,11 @@ PdfCanvas *MainWindow::createCanvas()
 
     // 手掌当橡皮是全局设置：新文档按当前值初始化（已打开的文档由设置页的信号更新）。
     canvas->setPalmEraserEnabled(AppSettings::palmEraserEnabled());
+
+    // 工具栏风格同样是全局设置：新文档按当前值初始化（已打开的文档由设置页的信号更新）。
+    if (InkToolbar *bar = canvas->toolbar())
+        bar->setStyle(AppSettings::toolbarStyle() == 0 ? InkToolbar::Style::Compact
+                                                       : InkToolbar::Style::Text);
 
     // Every canvas tracks its own edits, so a document that was drawn on and
     // then switched away from stays dirty. The receiver context is the canvas

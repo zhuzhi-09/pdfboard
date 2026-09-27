@@ -691,9 +691,11 @@ void InkToolbar::buildUi()
     // The island ships at 80% of the chrome type scale: font and metrics shrink
     // together, so the bar stays one proportional piece.
     const QFont base = font();
+    m_baseFont = base;
     setFont(Theme::islandFont(base));
     setCursor(Qt::OpenHandCursor);
-    m_metrics = Theme::metrics(Theme::chromeFont(base), Theme::IslandScale);
+    m_metrics = Theme::metrics(Theme::chromeFont(base), Theme::IslandScale,
+                               m_style == Style::Compact);
     const Theme::Metrics m = m_metrics;
 
     auto *outer = new QVBoxLayout(this);
@@ -733,10 +735,9 @@ void InkToolbar::buildUi()
         button->setFocusPolicy(Qt::NoFocus);
         button->setCursor(Qt::PointingHandCursor);
         button->setFont(font());
-        button->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
         button->setIconSize(QSize(m.icon, m.icon));
-        button->setMinimumSize(QSize(m.touch, m.buttonHeight));
         m_glyphs.insert(button, glyph);
+        m_labelButtons.append(button);   // presentation set by applyButtonStyle()
         into->addWidget(button);
         return button;
     };
@@ -790,7 +791,6 @@ void InkToolbar::buildUi()
     m_pageButton->setCursor(Qt::PointingHandCursor);
     m_pageButton->setFont(font());
     m_pageButton->setToolButtonStyle(Qt::ToolButtonTextOnly);
-    m_pageButton->setMinimumSize(QSize(m.touch + Theme::Space5, m.buttonHeight));
     row->addWidget(m_pageButton);
 
     // Save actions sit between the page counter and the settings gear.
@@ -818,7 +818,6 @@ void InkToolbar::buildUi()
     m_moreButton->setFont(font());
     m_moreButton->setToolButtonStyle(Qt::ToolButtonIconOnly);
     m_moreButton->setIconSize(QSize(m.icon, m.icon));
-    m_moreButton->setMinimumSize(QSize(m.touch, m.buttonHeight));
     m_glyphs.insert(m_moreButton, IconPainter::Glyph::ChevronUp);
     chipRow->addWidget(m_moreButton);
 
@@ -907,7 +906,56 @@ void InkToolbar::buildUi()
     for (QWidget *child : findChildren<QWidget *>())
         child->installEventFilter(this);
 
+    applyButtonStyle();
     refreshIcons();
+}
+
+void InkToolbar::applyButtonStyle()
+{
+    const Qt::ToolButtonStyle look = (m_style == Style::Compact)
+                                         ? Qt::ToolButtonIconOnly
+                                         : Qt::ToolButtonTextUnderIcon;
+    for (QToolButton *button : m_labelButtons) {
+        button->setToolButtonStyle(look);
+        button->setMinimumSize(QSize(m_metrics.touch, m_metrics.buttonHeight));
+    }
+    // The page chip (a value, always text) and the collapse chevron (always a
+    // glyph) are sized here too, or in Compact they would still be as tall as a
+    // labelled button and prop the row open.
+    if (m_pageButton)
+        m_pageButton->setMinimumSize(QSize(m_metrics.touch + Theme::Space5,
+                                           m_metrics.buttonHeight));
+    if (m_moreButton)
+        m_moreButton->setMinimumSize(QSize(m_metrics.touch, m_metrics.buttonHeight));
+}
+
+void InkToolbar::setStyle(Style s)
+{
+    if (m_style == s)
+        return;
+    m_style = s;
+    m_metrics = Theme::metrics(Theme::chromeFont(m_baseFont), Theme::IslandScale,
+                               m_style == Style::Compact);
+    applyButtonStyle();
+    if (layout())
+        layout()->activate();
+    reposition();       // recompute the chip size and re-centre / re-dock
+}
+
+int InkToolbar::testBarHeight() const
+{
+    return sizeHint().height();
+}
+
+bool InkToolbar::testLabelButtonsIconOnly() const
+{
+    if (m_labelButtons.isEmpty())
+        return false;
+    for (QToolButton *button : m_labelButtons) {
+        if (button->toolButtonStyle() != Qt::ToolButtonIconOnly)
+            return false;
+    }
+    return true;
 }
 
 QWidget *InkToolbar::testEraserPalette() const

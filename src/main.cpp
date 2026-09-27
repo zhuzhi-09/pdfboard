@@ -837,6 +837,55 @@ static int runInkSelfTest(const QString &path)
         }
     }
 
+    // Toolbar style (简约 / 文字): the SAME buttons, two presentations. The
+    // factory default is 简约 (glyph only); 文字 brings the labels back. Both
+    // directions are pinned, and the button COUNT must not change - a different
+    // look must never mean a lost command.
+    if (InkToolbar *bar = canvas.toolbar()) {
+        check("toolbar style: the factory default is compact",
+              bar->testStyle() == InkToolbar::Style::Compact ? 1 : 0, 1);
+
+        const int countCompact = bar->testLabelButtonCount();
+        const int barHeightCompact = bar->testBarHeight();
+        const int buttonCompact = bar->testButtonHeight();
+        const int touchFloor =
+            Theme::metrics(Theme::chromeFont(canvas.font()), Theme::IslandScale).touch;
+        check("toolbar style: compact hides the labels",
+              bar->testLabelButtonsIconOnly() ? 1 : 0, 1);
+        check("toolbar style: compact keeps every button",
+              countCompact > 0 ? 1 : 0, 1);
+        check("toolbar style: compact button is a touch target",
+              buttonCompact >= touchFloor ? 1 : 0, 1);
+        // The labels/text must survive even in the glyph-only row: the self test
+        // finds the eraser by text(), and the tooltip is the discoverability of
+        // an icon-only button.
+        bool labelsKept = true;
+        for (QToolButton *b : bar->findChildren<QToolButton *>()) {
+            if (b->text().isEmpty() && b->toolTip().isEmpty())
+                labelsKept = false;
+        }
+        check("toolbar style: labels and tips kept", labelsKept ? 1 : 0, 1);
+
+        bar->testSetStyle(InkToolbar::Style::Text);
+        check("toolbar style: text shows the labels",
+              bar->testLabelButtonsIconOnly() ? 0 : 1, 1);
+        check("toolbar style: same button count in both styles",
+              bar->testLabelButtonCount(), countCompact);
+        check("toolbar style: compact is the shorter bar",
+              int(barHeightCompact < bar->testBarHeight()), 1);
+        check("toolbar style: compact button is shorter",
+              int(buttonCompact < bar->testButtonHeight()), 1);
+
+        // Deterministic screenshots for human review (dev machines only).
+        if (QDir(QStringLiteral("D:/dev/tmp")).exists()) {
+            bar->grab().save(QStringLiteral("D:/dev/tmp/island-text.png"), "PNG");
+            bar->testSetStyle(InkToolbar::Style::Compact);
+            bar->grab().save(QStringLiteral("D:/dev/tmp/island-compact.png"), "PNG");
+        } else {
+            bar->testSetStyle(InkToolbar::Style::Compact);
+        }
+    }
+
     // Free move (自由移动) mode: a left-button drag pans the view on BOTH axes
     // and must stay inert for ink and for the toolbar island.
     {
@@ -1139,6 +1188,22 @@ static int runThemeSelfTest()
     Theme::applyStoredMode(AppSettings::themeMode());
     check("click path: dark applies",
           qGray(Theme::light().desk.rgb()) < qGray(Theme::makeLightPalette().desk.rgb()) ? 1 : 0, 1);
+
+    // 工具栏风格（简约 / 文字）的注册表往返：默认简约(0)，越界回 0，处理完复原。
+    const QVariant savedToolbarStyle = raw.value(QStringLiteral("ToolbarStyle"));
+    raw.remove(QStringLiteral("ToolbarStyle"));
+    raw.sync();
+    check("toolbar style: default is compact", AppSettings::toolbarStyle(), 0);
+    raw.setValue(QStringLiteral("ToolbarStyle"), 9);
+    raw.sync();
+    check("toolbar style: out-of-range reads compact", AppSettings::toolbarStyle(), 0);
+    check("toolbar style: set 1 succeeds", AppSettings::setToolbarStyle(1, nullptr) ? 1 : 0, 1);
+    check("toolbar style: stored 1 reads back", AppSettings::toolbarStyle(), 1);
+    if (savedToolbarStyle.isValid())
+        raw.setValue(QStringLiteral("ToolbarStyle"), savedToolbarStyle);
+    else
+        raw.remove(QStringLiteral("ToolbarStyle"));
+    raw.sync();
 
     if (savedValue.isValid())
         raw.setValue(QStringLiteral("ThemeMode"), savedValue);

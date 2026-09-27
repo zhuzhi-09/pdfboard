@@ -612,6 +612,28 @@ void SettingsPage::buildUi()
         m_themeNote->setWordWrap(true);
         nh->addWidget(m_themeNote, 1);
         appearance.col->addWidget(noteWrap);
+        appearance.col->addWidget(makeRowSeparator(appearance.frame));
+
+        // 工具栏风格：两种外观、同一组按钮（简约 = 纯图标，文字 = 图标+名称）。
+        ButtonRow styleSegments = makeButtonRow(appearance.frame, font());
+        m_toolbarStyleGroup = new QButtonGroup(this);
+        m_toolbarStyleGroup->setExclusive(true);
+        const QString styleLabels[2] = { QStringLiteral("简约"), QStringLiteral("文字") };
+        for (int i = 0; i < 2; ++i) {
+            QPushButton *button =
+                addRowButton(styleSegments, font(), styleLabels[i], RowButton::Segment);
+            m_toolbarStyleGroup->addButton(button, i);
+            m_toolbarStyleSegments[i] = button;
+        }
+        connect(m_toolbarStyleGroup, &QButtonGroup::idClicked,
+                this, &SettingsPage::onToolbarStylePicked);
+        syncToolbarStyleSegment();
+
+        appearance.col->addWidget(makeTextRow(
+            appearance.frame,
+            QStringLiteral("工具栏风格"),
+            QStringLiteral("简约（纯图标）/ 文字（图标+名称）"),
+            styleSegments.box, Theme::Space4, Theme::Space4));
     }
     col->addWidget(appearance.frame);
 
@@ -1366,6 +1388,29 @@ void SettingsPage::onThemePicked(int mode)
     syncThemeSegment();
     emit themeChanged();         // MainWindow re-applies the theme everywhere
     refreshThemeNote();
+}
+
+void SettingsPage::syncToolbarStyleSegment()
+{
+    if (!m_toolbarStyleGroup)
+        return;
+    QAbstractButton *button = m_toolbarStyleGroup->button(AppSettings::toolbarStyle());
+    if (!button || button->isChecked())
+        return;
+    const QSignalBlocker block(m_toolbarStyleGroup);
+    button->setChecked(true);
+}
+
+void SettingsPage::onToolbarStylePicked(int style)
+{
+    QString err;
+    if (!AppSettings::setToolbarStyle(style, &err)) {
+        QMessageBox::warning(this, QStringLiteral("设置失败"), err);
+        syncToolbarStyleSegment();   // show the value that is really stored
+        return;
+    }
+    syncToolbarStyleSegment();
+    emit toolbarStyleChanged();      // MainWindow pushes it to every toolbar
 }
 
 void SettingsPage::syncWordSegment()
