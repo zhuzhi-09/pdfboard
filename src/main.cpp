@@ -571,7 +571,12 @@ static int runSmokeSelfTest(const QString &path)
                     moveBtn = b;
             check("idle: the move button is found", moveBtn ? 1 : 0, 1);
             const QPoint hitPt = moveBtn ? moveBtn->rect().center() : QPoint();
-            QWidget *hitAtRest = moveBtn ? island->childAt(hitPt) : nullptr;
+            // childAt 取的是「岛坐标」：把按钮本地中心换算过去，否则量到的是最外层芯片
+            // （断言会退化成"QFrame == QFrame"）。
+            const QPoint hitInIsland = moveBtn ? moveBtn->mapTo(island, hitPt) : QPoint();
+            QWidget *hitAtRest = moveBtn ? island->childAt(hitInIsland) : nullptr;
+            check("idle: the resting hit is the button itself",
+                  (moveBtn && hitAtRest == moveBtn) ? 1 : 0, 1);
 
             // (a) 空闲超时 -> 目标 0.40、效果器已启用（成对的上半）。
             check("idle: no overlay open to start", island->hasOpenOverlay() ? 1 : 0, 0);
@@ -602,7 +607,7 @@ static int runSmokeSelfTest(const QString &path)
 
             // (e) 淡出期间点按钮仍然命中：命中图不变，且按钮真的触发。
             if (moveBtn) {
-                QWidget *hitFaded = island->childAt(hitPt);
+                QWidget *hitFaded = island->childAt(hitInIsland);
                 out(QStringLiteral("[selftest] 淡出中点按钮：命中控件 %1 -> %2（%3）")
                         .arg(hitAtRest ? hitAtRest->metaObject()->className() : "null")
                         .arg(hitFaded ? hitFaded->metaObject()->className() : "null")
