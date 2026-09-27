@@ -26,6 +26,7 @@
 #include <QDir>
 #include <QDragEnterEvent>
 #include <QDropEvent>
+#include <QEasingCurve>
 #include <QElapsedTimer>
 #include <QEvent>
 #include <QFile>
@@ -37,9 +38,12 @@
 #include <QJsonObject>
 #include <QKeyEvent>
 #include <QLabel>
+#include <QLinearGradient>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QPainter>
 #include <QPalette>
+#include <QPixmap>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QScreen>
@@ -47,6 +51,7 @@
 #include <QStatusBar>
 #include <QStyleHints>
 #include <QTimer>
+#include <QVariantAnimation>
 #include <QVBoxLayout>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -121,6 +126,119 @@ QString statusSheet()
         .arg(Theme::rgba(c.textMuted));
 }
 
+}   // namespace (reopened below: PageTransitionLayer needs external linkage to
+    // match the forward declaration in MainWindow.h)
+
+// ---------------------------------------------------------------------------
+// Page-switch transitions: ONE helper for every entry point (see switchToPage).
+//
+// WHY a frozen-frame snapshot overlay, and not the two alternatives the task
+// names:
+//   * QStackedWidget shows exactly ONE page at a time (StackOne), and a
+//     layout-managed child cannot be moved by animating its pos - the layout
+//     re-imposes its geometry on the next activation. So the incoming page
+//     cannot simply be shown next to / above the outgoing one.
+//   * A QGraphicsEffect would recompose a live 4K widget on every animation
+//     frame (the expensive path on a classroom panel) and cannot translate a
+//     widget at all.
+//   * Reparenting the two heavy PdfCanvas widgets into an overlay would fire
+//     show/hide + relayout churn on every switch and risks a stale or duplicated
+//     page - exactly the failure the task forbids.
+// So two one-shot QWidget::grab()s freeze the exact pixels and this layer just
+// blits them (outgoing first, incoming ON TOP). At 4K the page area is roughly
+// 3840x2000, i.e. ~31 MB per grab, so a switch holds two of them (~63 MB) for
+// its ~240 ms; both are released in the finished handler (settleTransition).
+// That is the entire transient cost - no per-frame allocations.
+//
+// The final frame is pixel-identical to the real page: the incoming frame was
+// grabbed at the stack's geometry and is drawn at (0,0) fully opaque, while the
+// real incoming page is ALREADY the stack's current widget underneath - hiding
+// the layer changes nothing on screen (no flash, no jump).
+constexpr int   kPageTransitionMs = 240;
+constexpr qreal kPageSinkFraction = 0.10;        // outgoing sinks 10% of the height
+constexpr qreal kPageOutgoingMinOpacity = 0.55;  // ...and fades 1 -> 0.55
+
+class PageTransitionLayer : public QWidget
+{
+public:
+    explicit PageTransitionLayer(QWidget *parent) : QWidget(parent)
+    {
+        setObjectName(QStringLiteral("pageTransitionLayer"));
+        // paintEvent covers every pixel (desk + both frozen frames).
+        setAttribute(Qt::WA_OpaquePaintEvent, true);
+        // The incoming page is already the stack's current widget underneath: a
+        // frozen frame must never eat the teacher's next touch, so events pass
+        // straight through.
+        setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        setFocusPolicy(Qt::NoFocus);
+        hide();
+    }
+
+    void setFrame(const QPixmap &outgoing, const QPixmap &incoming,
+                  int outX, int outY, int inX, int inY, qreal outOpacity)
+    {
+        m_outgoing = outgoing;
+        m_incoming = incoming;
+        m_outX = outX;
+        m_outY = outY;
+        m_inX = inX;
+        m_inY = inY;
+        m_outOpacity = outOpacity;
+    }
+
+    void clearFrame()
+    {
+        m_outgoing = QPixmap();
+        m_incoming = QPixmap();
+    }
+
+    // The transient memory a switch holds, for the 4K cost report.
+    qint64 frameBytes() const
+    {
+        const auto bytes = [](const QPixmap &pm) {
+            return qint64(pm.width()) * qint64(pm.height()) * (pm.depth() / 8);
+        };
+        return bytes(m_outgoing) + bytes(m_incoming);
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this);
+
+        // The desk behind the pages, exactly like PdfCanvas::paintBackdrop: the
+        // strip the sinking outgoing sheet uncovers at the top has to read as
+        // the same desk, not as a hole.
+        const Theme::Palette &pal = Theme::light();
+        p.fillRect(rect(), pal.desk);
+        const qreal strip = qMax<qreal>(12.0, Theme::metrics(font()).icon * 1.4);
+        QLinearGradient shade(0.0, 0.0, 0.0, strip);
+        shade.setColorAt(0.0, pal.deskShade);
+        shade.setColorAt(1.0, pal.desk);
+        p.fillRect(QRectF(0.0, 0.0, qreal(width()), strip), shade);
+
+        // Outgoing first, then the incoming ON TOP: in both kinds the new page
+        // covers the old one while it travels in.
+        if (!m_outgoing.isNull()) {
+            p.setOpacity(m_outOpacity);
+            p.drawPixmap(m_outX, m_outY, m_outgoing);
+            p.setOpacity(1.0);
+        }
+        if (!m_incoming.isNull())
+            p.drawPixmap(m_inX, m_inY, m_incoming);
+    }
+
+private:
+    QPixmap m_outgoing;
+    QPixmap m_incoming;
+    int    m_outX = 0;
+    int    m_outY = 0;
+    int    m_inX  = 0;
+    int    m_inY  = 0;
+    qreal  m_outOpacity = 1.0;
+};
+
+namespace {
 // True when the mime data carries at least one local PDF, `.dpz` bundle or
 // Word document.
 bool hasLocalDocument(const QMimeData *mime)
@@ -229,6 +347,20 @@ MainWindow::MainWindow(QWidget *parent)
     m_tabs = new DocumentTabs(central);
     layout->addWidget(m_tabs);
     setCentralWidget(central);
+
+    // Page-switch transition plumbing (see switchToPage). The overlay is a child
+    // of the stack but NOT added to its layout, so it floats above every page;
+    // the driver is a plain QVariantAnimation over an eased 0..1 progress,
+    // stopped and re-armed for each leg.
+    m_transLayer = new PageTransitionLayer(m_stack);
+    m_transAnim = new QVariantAnimation(this);
+    m_transAnim->setDuration(kPageTransitionMs);
+    m_transAnim->setEasingCurve(QEasingCurve::OutCubic);
+    m_transAnim->setStartValue(0.0);
+    m_transAnim->setEndValue(1.0);
+    connect(m_transAnim, &QVariantAnimation::valueChanged, this,
+            [this](const QVariant &value) { applyTransitionProgress(value.toReal()); });
+    connect(m_transAnim, &QAbstractAnimation::finished, this, &MainWindow::settleTransition);
 
     connect(m_tabs, &DocumentTabs::currentChanged, this, &MainWindow::onTabCurrentChanged);
     connect(m_tabs, &DocumentTabs::closeRequested, this, &MainWindow::onTabCloseRequested);
@@ -572,8 +704,17 @@ void MainWindow::keyPressEvent(QKeyEvent *event)
 void MainWindow::changeEvent(QEvent *event)
 {
     QMainWindow::changeEvent(event);
+    // A DPI change re-lays out every page (and can resize the stack): settle any
+    // in-flight switch first, so a frozen frame can never be stretched across a
+    // scale change. Fullscreen / maximise resizes the stack too.
+    if (event->type() == QEvent::DevicePixelRatioChange) {
+        settleTransition();
+        return;
+    }
     if (event->type() != QEvent::WindowStateChange)
         return;
+
+    settleTransition();
 
     // The island's fullscreen button mirrors the real window state. Every
     // canvas is a document now, so m_canvases is the complete list.
@@ -747,6 +888,9 @@ void MainWindow::openUpdateSettings()
 void MainWindow::openPath(const QString &path)
 {
     CrashLog::breadcrumb("open", QFileInfo(path).fileName());
+    // Settle-first on a document load: the switch that follows (and the layout it
+    // triggers) must not start from a half-travelled frozen frame.
+    settleTransition();
     QElapsedTimer timer;
     timer.start();
     const bool bundle = AnnotationBundle::isBundle(path);
@@ -1346,6 +1490,9 @@ void MainWindow::updateFullscreenExit()
 
 void MainWindow::resizeEvent(QResizeEvent *event)
 {
+    // Settle-first on a window resize: a frozen frame is bound to the old stack
+    // geometry, so it must not be blitted across the new one.
+    settleTransition();
     QMainWindow::resizeEvent(event);
     repositionFullscreenExit();
 }
@@ -1387,11 +1534,12 @@ void MainWindow::onTabCurrentChanged(int index)
     // Memory policy: the document we leave drops its rendered page bitmaps.
     // It keeps its document handle and its ink. Leaving the settings page for
     // the SAME document is not a document switch, so nothing is released.
-    if (next != m_active && m_active)
-        m_active->releaseCachedPages();
-
+    // switchToPage() performs the release AFTER freezing the outgoing frame, so
+    // the animation never plays on a blanked canvas; the target document is
+    // captured here because m_active is about to move on.
+    PdfCanvas *const previousActive = (next != m_active) ? m_active : nullptr;
     m_active = next;
-    m_stack->setCurrentWidget(next);
+    switchToPage(next, previousActive);
     wireActiveCanvas(next);
     updateTitle();
 }
@@ -1402,6 +1550,9 @@ void MainWindow::onTabCloseRequested(int index)
 {
     if (index < 0 || index >= m_canvases.size())
         return;
+    // Settle-first: the confirmation modal (and the removal after it) must not
+    // run while a frozen frame is still travelling.
+    settleTransition();
     if (!confirmCloseDocument(index))
         return;
     closeTabAt(index);
@@ -1412,9 +1563,20 @@ void MainWindow::closeTabAt(int index)
 {
     if (index < 0 || index >= m_canvases.size())
         return;
+    settleTransition();
 
     PdfCanvas *canvas = m_canvases.at(index);
     const bool wasActive = (canvas == m_active);
+    // Closing the ACTIVE tab lands on a neighbour; the closed canvas is already
+    // out of m_canvases by the time that switch runs, so its index would read as
+    // -1 and the slide direction would be guessed. Compute it here instead:
+    // closing the last chip falls LEFT (-1), otherwise the chip that slides left
+    // into the freed slot enters from the RIGHT (+1). switchToPage consumes and
+    // clears this hint, so it can never leak into a later, unrelated switch.
+    const bool willSwitch = wasActive && !(m_settingsVisible || m_homeVisible);
+    m_pendingDirHint = willSwitch
+                           ? ((index < int(m_canvases.size()) - 1) ? +1 : -1)
+                           : 0;
     m_canvases.removeAt(index);
     if (index < m_docs.size())
         m_docs.removeAt(index);
@@ -1422,6 +1584,7 @@ void MainWindow::closeTabAt(int index)
     // The strip selects the neighbour and reports it through currentChanged
     // (silent while the settings / home page is up).
     m_tabs->removeTab(index);
+    m_pendingDirHint = 0;   // the switch (if any) already consumed it
 
     if (m_canvases.isEmpty()) {
         // The last document went away: the home page takes its place. When the
@@ -1544,12 +1707,15 @@ void MainWindow::showHomePage()
     m_settingsVisible = false;
     m_tabs->setSettingsActive(false);
     m_tabs->setHomeActive(true);
-    m_stack->setCurrentWidget(m_homePage);
+    // Refresh BEFORE the transition freezes the page: the frozen incoming frame
+    // must be what the real page shows, or hiding the overlay would jump.
+    if (m_homePage)
+        m_homePage->refresh();
+    switchToPage(m_homePage);
     // No document is active while the home page is up: the status bar shows the
     // neutral values and the hidden canvases keep their rendered pages.
     wireActiveCanvas(nullptr);
     updateTitle();
-    m_homePage->refresh();
 }
 
 void MainWindow::showSettingsPage()
@@ -1558,7 +1724,7 @@ void MainWindow::showSettingsPage()
     m_homeVisible = false;
     m_tabs->setSettingsActive(true);
     m_tabs->setHomeActive(false);
-    m_stack->setCurrentWidget(m_settingsPage);
+    switchToPage(m_settingsPage);
     // No document is active while the settings page is up: the status bar shows
     // the neutral values and the hidden canvas keeps its rendered pages.
     wireActiveCanvas(nullptr);
@@ -1571,14 +1737,315 @@ void MainWindow::showCanvasPage(PdfCanvas *canvas)
         showHomePage();                  // no document to return to
         return;
     }
+    // The document the settings / home page was entered FROM: leaving it for
+    // another document must still drop its bitmaps (the helper owns that policy;
+    // capture it before m_active is reassigned).
+    PdfCanvas *const previousActive = m_active;
     m_settingsVisible = false;
     m_homeVisible = false;
     m_tabs->setSettingsActive(false);
     m_tabs->setHomeActive(false);
     m_active = canvas;
-    m_stack->setCurrentWidget(canvas);
+    switchToPage(canvas, previousActive);
     wireActiveCanvas(canvas);
     updateTitle();
+}
+
+// ---------------------------------------------------------------------------
+// Page-switch transitions: ONE helper, every entry point.
+//
+// 纵向 (either page is 主页 / 设置): the outgoing sinks ~10% of the page height
+// and fades 1 -> 0.55; the incoming starts one full page height BELOW and rises
+// to 0, drawn on top so it covers the outgoing as it rises.
+// 横向 (document <-> document): the outgoing does not move; the incoming slides
+// in from the side that matches the tab order (a larger index enters from the
+// right edge and moves left) and covers it. In both the incoming is on top.
+//
+// dirHint: 0 = derive from the tab indices (from < to => +1); +1 = enter from the
+// right; -1 = enter from the left. A tab close passes it explicitly because by
+// then the closed canvas is already out of m_canvases (its index reads as -1).
+// ---------------------------------------------------------------------------
+
+bool MainWindow::transitionCanAnimate() const
+{
+    if (!m_transAnim || !m_transLayer || !m_stack)
+        return false;
+    if (m_stack->width() <= 0 || m_stack->height() <= 0)
+        return false;
+    // A window that is not on screen - or a headless WA_DontShowOnScreen window -
+    // must not animate: the switch settles at once. The self test forces the
+    // animation back on with testForceTransitions() to sample deterministic frames.
+    if (!m_transForceAnim
+        && (!isVisible() || testAttribute(Qt::WA_DontShowOnScreen)))
+        return false;
+    return true;
+}
+
+void MainWindow::switchToPage(QWidget *incoming, PdfCanvas *releaseOnLeave, int dirHint)
+{
+    if (!m_stack || !incoming)
+        return;
+
+    // One-shot close direction: consumed and cleared here so it can never leak
+    // into a later, unrelated switch.
+    if (dirHint == 0)
+        dirHint = m_pendingDirHint;
+    m_pendingDirHint = 0;
+
+    // A second switch mid-flight settles the previous leg first: exactly one
+    // overlay / driver can ever be alive, so a stale or duplicated page is
+    // impossible and the new leg starts from a fully landed page.
+    settleTransition();
+
+    QWidget *const outgoing = m_stack->currentWidget();
+    const bool samePage = (outgoing == incoming);
+
+    PageTransition kind = PageTransition::None;
+    int direction = 0;
+    if (!samePage) {
+        const bool overlayInvolved = (incoming == m_homePage) || (incoming == m_settingsPage)
+                                     || (outgoing == m_homePage) || (outgoing == m_settingsPage);
+        kind = overlayInvolved ? PageTransition::Vertical : PageTransition::Horizontal;
+        if (kind == PageTransition::Horizontal) {
+            if (dirHint != 0) {
+                direction = dirHint;
+            } else {
+                const int from = docIndex(qobject_cast<PdfCanvas *>(outgoing));
+                const int to   = docIndex(qobject_cast<PdfCanvas *>(incoming));
+                // To a tab on the RIGHT (larger index) enters from the right edge
+                // and moves left; to the LEFT enters from the left edge.
+                direction = (from >= 0 && to >= 0 && to < from) ? -1 : +1;
+            }
+        }
+    }
+
+    // Freeze the outgoing BEFORE the memory policy drops its rendered bitmaps:
+    // the animation must never play on a blanked canvas.
+    const bool wantAnim = !samePage && transitionCanAnimate();
+    QPixmap outPix;
+    if (wantAnim)
+        outPix = outgoing->grab();
+
+    // The logical switch happens now: the incoming page is the current widget
+    // for the whole animation, so input (the overlay is mouse-transparent) and
+    // any interrupt already target the right page.
+    m_stack->setCurrentWidget(incoming);
+
+    QPixmap inPix;
+    if (wantAnim) {
+        // StackOne gives geometry only to the CURRENT widget; activate the
+        // layout so the incoming really has the stack's rect before the grab
+        // (otherwise the frozen frame would be taken at a stale size).
+        if (m_stack->layout())
+            m_stack->layout()->activate();
+        inPix = incoming->grab();
+    }
+
+    // Memory policy, unchanged: the document we leave for a DIFFERENT document
+    // drops its rendered page bitmaps (it keeps its handle and its ink).
+    if (releaseOnLeave && releaseOnLeave != incoming)
+        releaseOnLeave->releaseCachedPages();
+
+    if (samePage)
+        return;
+
+    if (wantAnim && !outPix.isNull() && !inPix.isNull()
+        && outgoing->size() == incoming->size()) {
+        startTransition(kind, direction, outPix, inPix, outgoing->size());
+    } else {
+        // Defensive path (no driver / hidden window / zero-size page / failed
+        // grab): the logical switch already happened; just stay settled.
+        settleTransition();
+    }
+}
+
+void MainWindow::startTransition(PageTransition kind, int direction,
+                                 const QPixmap &outgoing, const QPixmap &incoming,
+                                 const QSize &pageSize)
+{
+    if (!m_transAnim || !m_transLayer)
+        return;
+
+    m_transKind = kind;
+    m_transDir = direction;
+    m_transSpan = (kind == PageTransition::Vertical) ? pageSize.height() : pageSize.width();
+    // Sink distance: 10 % of the page height (inside the requested 8-15 %).
+    m_transSink = qRound(pageSize.height() * kPageSinkFraction);
+    m_transOutPix = outgoing;
+    m_transInPix  = incoming;
+
+    m_transLayer->setGeometry(m_stack->rect());
+    m_transLayer->show();
+    m_transLayer->raise();
+
+    // The driver is shared: stop it before re-arming so the two legs can never
+    // run together (switchToPage already settled, but be explicit).
+    m_transAnim->stop();
+    m_transActive = true;
+    applyTransitionProgress(0.0);        // explicit first frame: no flash
+    m_transAnim->start();
+}
+
+void MainWindow::applyTransitionProgress(qreal eased)
+{
+    if (!m_transActive || !m_transLayer)
+        return;
+
+    const qreal p = qBound<qreal>(0.0, eased, 1.0);
+    if (m_transKind == PageTransition::Vertical) {
+        // Old sheet sinks down and fades a little; new sheet starts one full
+        // page height BELOW its final position and rises to 0.
+        m_transOutX = 0;
+        m_transOutY = qRound(m_transSink * p);
+        m_transInX  = 0;
+        m_transInY  = qRound(m_transSpan * (1.0 - p));
+        m_transOutOpacity = 1.0 - (1.0 - kPageOutgoingMinOpacity) * p;
+    } else {
+        // The outgoing does not move; the incoming slides in along the tab order
+        // (from the right when moving to a larger index, from the left when
+        // moving to a smaller one).
+        m_transOutX = 0;
+        m_transOutY = 0;
+        m_transInX  = qRound(m_transDir * m_transSpan * (1.0 - p));
+        m_transInY  = 0;
+        m_transOutOpacity = 1.0;
+    }
+
+    m_transLayer->setFrame(m_transOutPix, m_transInPix,
+                           m_transOutX, m_transOutY, m_transInX, m_transInY,
+                           m_transOutOpacity);
+    // The stack raised the incoming page on setCurrentWidget; keep the overlay
+    // above it so the travelling sheet really is on top.
+    m_transLayer->raise();
+    m_transLayer->update();
+}
+
+void MainWindow::settleTransition()
+{
+    const bool wasActive = m_transActive;
+    // Re-entrancy guard FIRST: stop() below may re-enter through finished().
+    m_transActive = false;
+    if (m_transAnim && m_transAnim->state() != QAbstractAnimation::Stopped)
+        m_transAnim->stop();
+
+    m_transKind = PageTransition::None;
+    m_transDir = 0;
+    m_transOutX = m_transOutY = m_transInX = m_transInY = 0;
+    m_transOutOpacity = 1.0;
+    // The two frozen frames are released here - the finished handler - which is
+    // the only transient memory a switch holds.
+    m_transOutPix = QPixmap();
+    m_transInPix  = QPixmap();
+    if (m_transLayer) {
+        m_transLayer->clearFrame();
+        m_transLayer->hide();
+    }
+    if (wasActive)
+        ++m_transFinishedCount;
+}
+
+// --- deterministic self-test hooks (no event loop, no sleep) ----------------
+
+int MainWindow::testTransitionDurationMs() const
+{
+    return m_transAnim ? m_transAnim->duration() : 0;
+}
+
+void MainWindow::testTransitionAt(int ms)
+{
+    if (!m_transAnim || !m_transActive)
+        return;   // nothing in flight: the hook has nothing to sample
+
+    const int duration = qMax(1, m_transAnim->duration());
+    const int at = qBound(0, ms, duration);
+
+    // Stop the clock: the animation's own timer must not advance while the
+    // assertion samples.
+    if (m_transAnim->state() != QAbstractAnimation::Stopped)
+        m_transAnim->pause();
+    m_transAnim->setCurrentTime(at);
+
+    // Apply this frame explicitly: same curve, same endpoints, so a paused
+    // sample and a running animation agree exactly.
+    const QEasingCurve easing(QEasingCurve::OutCubic);
+    applyTransitionProgress(easing.valueForProgress(qreal(at) / qreal(duration)));
+
+    if (at >= duration)
+        settleTransition();   // the same finish path as a natural end
+}
+
+bool MainWindow::testTransitionOverlayVisible() const
+{
+    return m_transLayer && m_transLayer->isVisible();
+}
+
+int MainWindow::testTransitionOverlayChildCount() const
+{
+    // The overlay must never adopt a real page (that is the point of the frozen
+    // frames): zero children, always.
+    return m_transLayer ? int(m_transLayer->children().size()) : 0;
+}
+
+qint64 MainWindow::testTransitionFrameBytes() const
+{
+    return m_transLayer ? m_transLayer->frameBytes() : 0;
+}
+
+int MainWindow::testTransitionKind() const
+{
+    switch (m_transKind) {
+    case PageTransition::Vertical:
+        return 1;
+    case PageTransition::Horizontal:
+        return 2;
+    case PageTransition::None:
+        break;
+    }
+    return 0;
+}
+
+int MainWindow::testTransitionDirection() const
+{
+    return m_transDir;
+}
+
+int MainWindow::testTransitionStartOffset() const
+{
+    return m_transSpan;
+}
+
+int MainWindow::testStackPageKind() const
+{
+    if (!m_stack)
+        return -1;
+    QWidget *const page = m_stack->currentWidget();
+    if (page == m_homePage)
+        return 0;
+    if (page == m_settingsPage)
+        return 1;
+    if (qobject_cast<PdfCanvas *>(page))
+        return 2;
+    return -1;
+}
+
+int MainWindow::testActiveDocumentIndex() const
+{
+    return m_active ? docIndex(m_active) : -1;
+}
+
+int MainWindow::testStatusDocumentIndex() const
+{
+    return m_statusCanvas ? docIndex(m_statusCanvas) : -1;
+}
+
+int MainWindow::testStackWidgetCount() const
+{
+    return m_stack ? m_stack->count() : 0;
+}
+
+int MainWindow::testTabsCurrentIndex() const
+{
+    return m_tabs ? m_tabs->currentIndex() : -1;
 }
 
 void MainWindow::onPageChanged(int page, int count)

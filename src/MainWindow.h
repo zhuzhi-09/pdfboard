@@ -3,6 +3,7 @@
 #include "UpdateChecker.h"
 
 #include <QMainWindow>
+#include <QPixmap>
 #include <QVector>
 
 class DocumentTabs;
@@ -16,6 +17,8 @@ class QKeyEvent;
 class QLabel;
 class QPushButton;
 class QStackedWidget;
+class QVariantAnimation;
+class PageTransitionLayer;   // the frozen-frame overlay (defined in MainWindow.cpp)
 
 class MainWindow : public QMainWindow
 {
@@ -31,6 +34,39 @@ public:
     // does (or does not) write, and that the document stays unsaved.
     void testStubSaveAsCancel() { m_saveAsCancelled = true; }
     bool testDocumentDirty(int index) const;
+
+    // --- 页面切换动画的自测钩子（见 MainWindow.cpp 的 switchToPage）----------
+    // 和 InkToolbar::testDrawerAt 同一套路：把动画钉到 [0, 时长] 内的 ms 毫秒处
+    // 并立即应用该帧，不跑事件循环、不 sleep，采样完全确定。
+    int   testTransitionDurationMs() const;
+    void  testTransitionAt(int ms);
+    bool  testTransitionActive() const { return m_transActive; }
+    int   testTransitionKind() const;          // 0 = 无 / 1 = 纵向 / 2 = 横向
+    int   testTransitionDirection() const;     // 横向 +1 从右入 / -1 从左入；纵向 0
+    int   testTransitionStartOffset() const;   // 纵向 = 页面高；横向 = 页面宽
+    int   testTransitionOutgoingOffsetY() const { return m_transOutY; }
+    int   testTransitionIncomingOffsetY() const { return m_transInY; }
+    int   testTransitionOutgoingOffsetX() const { return m_transOutX; }
+    int   testTransitionIncomingOffsetX() const { return m_transInX; }
+    // 0.55 -> 550（千分数，避免浮点比较）。
+    int   testTransitionOutgoingOpacityPermille() const
+    {
+        return qRound(m_transOutOpacity * 1000.0);
+    }
+    bool   testTransitionOverlayVisible() const;
+    int    testTransitionOverlayChildCount() const;   // 叠加层里绝不该有子件
+    qint64 testTransitionFrameBytes() const;          // 两张冻结帧的字节数（4K 代价）
+    int    testTransitionFinishedCount() const { return m_transFinishedCount; }
+    // 无屏自测里强制走动画路径（真实入口在窗口不可见 / WA_DontShowOnScreen 时直接落位）。
+    void   testForceTransitions(bool on) { m_transForceAnim = on; }
+
+    // 当前页 / 文档接线，供动画断言核对"落到哪一页、状态栏跟的是谁"。
+    int   testStackPageKind() const;          // 0 主页 / 1 设置 / 2 文档 / -1 无
+    int   testDocumentCount() const { return int(m_canvases.size()); }
+    int   testActiveDocumentIndex() const;
+    int   testStatusDocumentIndex() const;    // m_statusCanvas 在标签序里的下标
+    int   testStackWidgetCount() const;
+    int   testTabsCurrentIndex() const;
 
 protected:
     // Dropping a PDF onto the window opens it in a new tab.
@@ -109,6 +145,27 @@ private:
     void       markDocumentSaved(int index);
     void       refreshTabTitle(int index);  // source name + the dirty `*`
 
+    // --- 页面切换动画（单一来源）--------------------------------------------
+    // 所有换页都走 switchToPage()：
+    //   * 纵向（任一页是主页 / 设置）：旧页下沉 ~10% 并淡化 1 -> 0.55，新页从
+    //     下方一整页高处升起盖住旧页；
+    //   * 横向（文档 <-> 文档）：旧页不动，新页沿标签顺序从左右滑入盖住旧页。
+    // 新页永远画在最上层（冻结帧叠加层），底部标签 / 状态栏 / ZoomBar 不参与动画。
+    // releaseOnLeave 是"离开时释放位图"的内存策略目标（原逻辑只在标签切换时释放
+    // 上一个活动文档，这里原样保留）。
+    // dirHint: 0 = 按标签下标推导；+1 = 从右缘进入；-1 = 从左缘进入（关标签时被关
+    // 的画布已不在 m_canvases 里，下标会读成 -1，所以关标签显式传方向）。
+    enum class PageTransition { None, Vertical, Horizontal };
+    void switchToPage(QWidget *incoming, PdfCanvas *releaseOnLeave = nullptr, int dirHint = 0);
+    void startTransition(PageTransition kind, int direction,
+                         const QPixmap &outgoing, const QPixmap &incoming,
+                         const QSize &pageSize);
+    void applyTransitionProgress(qreal eased);
+    // 收尾（自然结束与自测钉到末帧共用同一条路径）：停表、隐藏叠加层、释放两张
+    // 冻结帧（finished 处理）。
+    void settleTransition();
+    bool transitionCanAnimate() const;
+
     // Update check: once shortly after launch, and again after every document
     // opens (throttled). A newer release is announced at most once per session -
     // a teacher opening twenty files must not be interrupted twenty times, and
@@ -158,4 +215,25 @@ private:
     UpdateChecker::Client *m_updateClient = nullptr;
     QString                m_updateAnnouncedVersion;  // per session
     qint64                 m_lastUpdateCheckMs = 0;   // throttles file-open checks
+
+    // The page-switch transition. ONE driver for every switch; the two frozen
+    // frames are the only transient memory (see the comment on
+    // PageTransitionLayer in MainWindow.cpp and docs 2.73).
+    QVariantAnimation  *m_transAnim  = nullptr;   // the eased 0..1 progress driver
+    PageTransitionLayer *m_transLayer = nullptr;  // opaque overlay child of m_stack
+    PageTransition      m_transKind  = PageTransition::None;
+    bool                m_transActive = false;
+    bool                m_transForceAnim = false; // test hook: animate while headless
+    int                 m_transDir  = 0;          // horizontal: +1 right->left, -1 left->right
+    int                 m_pendingDirHint = 0;     // one-shot close direction (see closeTabAt)
+    int                 m_transSpan = 0;          // page height (V) / width (H)
+    int                 m_transSink = 0;          // V: how far the outgoing sinks
+    int                 m_transOutX = 0;
+    int                 m_transOutY = 0;
+    int                 m_transInX  = 0;
+    int                 m_transInY  = 0;
+    qreal               m_transOutOpacity = 1.0;
+    QPixmap             m_transOutPix;            // frozen outgoing frame
+    QPixmap             m_transInPix;             // frozen incoming frame (on top)
+    int                 m_transFinishedCount = 0;
 };

@@ -335,6 +335,195 @@ static int runSmokeSelfTest(const QString &path)
     check("smoke: still alive after switches", 1, 1);
     check("smoke: bar back on a document", (bar && bar->isVisible()) ? 1 : 0, 1);
 
+    // --- Page-switch transitions ------------------------------------------------
+    // Every frame below is sampled through testTransitionAt(ms) - no event loop
+    // and no sleeps. This window is headless (WA_DontShowOnScreen), so the
+    // production rule is "settle at once"; testForceTransitions(true) turns the
+    // animation path back on for this block only.
+    {
+        window.resize(1280, 800);            // a known canvas geometry
+        QCoreApplication::processEvents();
+
+        // Document switches go through the REAL tab strip (setCurrentIndex), so
+        // the chip selection, the stack and the status bar are all driven by the
+        // production path - not by poking the stack directly.
+        DocumentTabs *tabs = window.findChild<DocumentTabs *>();
+        check("transition: tab strip exists", tabs ? 1 : 0, 1);
+
+        // A second document is needed for the horizontal (document <-> document)
+        // kind; a copy of the same file is a genuinely distinct tab.
+        const QString secondPath =
+            QDir(QDir::tempPath()).filePath(QStringLiteral("pdfboard-selftest-second.pdf"));
+        QFile::remove(secondPath);
+        const bool copied = QFile::copy(path, secondPath);
+        check("transition: second document prepared", copied ? 1 : 0, 1);
+        if (copied) {
+            window.openPath(secondPath);     // no force yet: settles at once (headless)
+            check("transition: two documents open", window.testDocumentCount(), 2);
+        }
+
+        window.testForceTransitions(true);
+        const int duration = window.testTransitionDurationMs();
+        check("transition: has a duration", duration > 0 ? 1 : 0, 1);
+        const int finishBefore = window.testTransitionFinishedCount();
+
+        // --- (A) vertical: document -> home -------------------------------------
+        QMetaObject::invokeMethod(&window, "showHomePage");
+        check("v: overlay is up during the switch",
+              window.testTransitionOverlayVisible() ? 1 : 0, 1);
+        check("v: kind is vertical", window.testTransitionKind(), 1);
+        const int spanV = window.testTransitionStartOffset();
+        check("v: span is one page height", spanV > 0 ? 1 : 0, 1);
+
+        window.testTransitionAt(0);
+        const int vOutStart = window.testTransitionOutgoingOffsetY();
+        const int vInStart  = window.testTransitionIncomingOffsetY();
+        check("v: outgoing starts at rest", vOutStart, 0);
+        check("v: incoming starts one page below", vInStart, spanV);
+        check("v: outgoing is fully opaque at the start",
+              window.testTransitionOutgoingOpacityPermille(), 1000);
+
+        window.testTransitionAt(duration / 2);
+        const int vOutMid = window.testTransitionOutgoingOffsetY();
+        const int vInMid  = window.testTransitionIncomingOffsetY();
+        const int vOpaMid = window.testTransitionOutgoingOpacityPermille();
+        check("v: mid outgoing sank (offset > 0)", vOutMid > 0 ? 1 : 0, 1);
+        check("v: mid incoming rose but is still below its start",
+              (vInMid > 0 && vInMid < vInStart) ? 1 : 0, 1);
+        check("v: mid outgoing dimmed (1 -> ~0.55)",
+              (vOpaMid < 1000 && vOpaMid >= 550) ? 1 : 0, 1);
+        out(QStringLiteral("[selftest] 竖直采样 50%：旧页Y 起点 %1 -> %2；新页Y 起点 %3 -> %4；旧不透明度 %5‰")
+                .arg(vOutStart).arg(vOutMid).arg(vInStart).arg(vInMid).arg(vOpaMid));
+
+        // Deterministic human-eye frame (dev machines only).
+        if (QDir(QStringLiteral("D:/dev/tmp")).exists()) {
+            if (auto *layer = window.findChild<QWidget *>(QStringLiteral("pageTransitionLayer")))
+                layer->grab().save(QStringLiteral("D:/dev/tmp/page-transition-v-mid.png"), "PNG");
+        }
+
+        // The incoming offset must fall strictly at every sample.
+        int prevIn = -1;
+        bool vMonotone = true;
+        for (int step = 0; step < 4; ++step) {
+            window.testTransitionAt(duration * step / 4);
+            const int in = window.testTransitionIncomingOffsetY();
+            if (prevIn >= 0 && !(in < prevIn))
+                vMonotone = false;
+            prevIn = in;
+        }
+        check("v: incoming offset strictly decreasing", vMonotone ? 1 : 0, 1);
+
+        window.testTransitionAt(duration);   // the same finish path as a natural end
+        check("v: incoming lands at 0", window.testTransitionIncomingOffsetY(), 0);
+        out(QStringLiteral("[selftest] 竖直收尾：新页Y = %1；当前页 = 主页（%2）；叠加层隐藏")
+                .arg(window.testTransitionIncomingOffsetY()).arg(window.testStackPageKind()));
+        check("v: transition reported finished",
+              window.testTransitionFinishedCount(), finishBefore + 1);
+        check("v: nothing left active", window.testTransitionActive() ? 0 : 1, 1);
+        check("v: overlay hidden again", window.testTransitionOverlayVisible() ? 0 : 1, 1);
+        check("v: the home page is the current page", window.testStackPageKind(), 0);
+        check("v: overlay adopted no page", window.testTransitionOverlayChildCount(), 0);
+
+        // --- (B) horizontal: document -> document -------------------------------
+        tabs->setCurrentIndex(0);            // home -> doc 0
+        window.testTransitionAt(duration);
+        check("h: back on a document", window.testStackPageKind(), 2);
+
+        tabs->setCurrentIndex(1);            // doc 0 -> doc 1
+        check("h: kind is horizontal", window.testTransitionKind(), 2);
+        check("h: to a larger index enters from the right", window.testTransitionDirection(), 1);
+        const int spanH = window.testTransitionStartOffset();
+        check("h: span is one page width", spanH > 0 ? 1 : 0, 1);
+
+        window.testTransitionAt(0);
+        check("h: incoming starts at +span (right edge)",
+              window.testTransitionIncomingOffsetX(), spanH);
+        const int hOutX0 = window.testTransitionOutgoingOffsetX();
+        window.testTransitionAt(duration / 2);
+        const int hInMid = window.testTransitionIncomingOffsetX();
+        check("h: mid incoming is positive (moving to a larger index)",
+              hInMid > 0 ? 1 : 0, 1);
+        check("h: mid incoming amplitude shrank", hInMid < spanH ? 1 : 0, 1);
+        check("h: the outgoing document does not move",
+              window.testTransitionOutgoingOffsetX(), hOutX0);
+        check("h: the outgoing document rests at x 0",
+              window.testTransitionOutgoingOffsetX(), 0);
+        out(QStringLiteral("[selftest] 水平采样 50%：新页X 起点 %1 -> %2（方向 %3，+1 = 自右入）；旧页X 起 %4 中 %5")
+                .arg(spanH).arg(hInMid).arg(window.testTransitionDirection())
+                .arg(hOutX0).arg(window.testTransitionOutgoingOffsetX()));
+
+        if (QDir(QStringLiteral("D:/dev/tmp")).exists()) {
+            if (auto *layer = window.findChild<QWidget *>(QStringLiteral("pageTransitionLayer")))
+                layer->grab().save(QStringLiteral("D:/dev/tmp/page-transition-h-mid.png"), "PNG");
+        }
+
+        int hPrev = spanH;
+        bool hMonotone = true;
+        for (int step = 0; step < 4; ++step) {
+            window.testTransitionAt(duration * step / 4);
+            const int in = window.testTransitionIncomingOffsetX();
+            if (step > 0 && !(in < hPrev))
+                hMonotone = false;
+            hPrev = in;
+        }
+        check("h: incoming x strictly decreasing", hMonotone ? 1 : 0, 1);
+        window.testTransitionAt(duration);
+        check("h: landed, nothing active", window.testTransitionActive() ? 0 : 1, 1);
+        check("h: doc 1 is the current document", window.testActiveDocumentIndex(), 1);
+        check("h: the tab strip follows doc 1", window.testTabsCurrentIndex(), 1);
+        check("h: the status bar follows doc 1", window.testStatusDocumentIndex(), 1);
+
+        // Reverse: doc 1 -> doc 0 enters from the LEFT (a smaller index).
+        tabs->setCurrentIndex(0);
+        check("h: to a smaller index enters from the left", window.testTransitionDirection(), -1);
+        window.testTransitionAt(duration / 2);
+        check("h: mid incoming is negative (moving to a smaller index)",
+              window.testTransitionIncomingOffsetX() < 0 ? 1 : 0, 1);
+        window.testTransitionAt(duration);
+        check("h: doc 0 is the current document", window.testActiveDocumentIndex(), 0);
+
+        // --- (C) interrupt: A->B at ~50 % becomes B->C --------------------------
+        // A = doc 0, B = doc 1, C = doc 0.
+        tabs->setCurrentIndex(1);            // A -> B
+        window.testTransitionAt(duration / 2);                                     // freeze mid-flight
+        check("interrupt: the first leg is in flight",
+              window.testTransitionActive() ? 1 : 0, 1);
+        tabs->setCurrentIndex(0);            // B -> C, mid-flight
+        window.testTransitionAt(duration);                                         // settle the second leg
+        check("interrupt: the current page is C", window.testActiveDocumentIndex(), 0);
+        check("interrupt: the stack current page is C", window.testStackPageKind(), 2);
+        check("interrupt: the tab strip points at C", window.testTabsCurrentIndex(), 0);
+        check("interrupt: the status bar points at C", window.testStatusDocumentIndex(), 0);
+        check("interrupt: both axes are back to 0",
+              (window.testTransitionOutgoingOffsetX() == 0
+               && window.testTransitionOutgoingOffsetY() == 0
+               && window.testTransitionIncomingOffsetX() == 0
+               && window.testTransitionIncomingOffsetY() == 0) ? 1 : 0, 1);
+        check("interrupt: nothing left active", window.testTransitionActive() ? 0 : 1, 1);
+        check("interrupt: overlay hidden", window.testTransitionOverlayVisible() ? 0 : 1, 1);
+        check("interrupt: no stray overlay page", window.testTransitionOverlayChildCount(), 0);
+        check("interrupt: stack holds no duplicate page",
+              window.testStackWidgetCount(), window.testDocumentCount() + 2);   // + home + settings
+
+        // 4K transient memory cost of the frozen frames (informational). The
+        // measured value is device pixels, so it also folds in this machine's DPR.
+        window.resize(3840, 2160);
+        QCoreApplication::processEvents();
+        tabs->setCurrentIndex(1);
+        window.testTransitionAt(duration / 2);
+        const qint64 frameBytes = window.testTransitionFrameBytes();
+        if (QWidget *layer = window.findChild<QWidget *>(QStringLiteral("pageTransitionLayer"))) {
+            out(QStringLiteral("[selftest] 4K 冻结帧：%1 MB / 两帧（叠加层 %2x%3，DPR %4）")
+                    .arg(double(frameBytes) / 1048576.0, 0, 'f', 1)
+                    .arg(layer->width()).arg(layer->height())
+                    .arg(layer->devicePixelRatioF(), 0, 'f', 2));
+        }
+        window.testTransitionAt(duration);
+        window.testForceTransitions(false);
+
+        QFile::remove(secondPath);   // best effort; the document may still hold it
+    }
+
     out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")
                     : QStringLiteral("[selftest] %1 CHECK(S) FAILED").arg(failed));
     return failed == 0 ? 0 : 3;
