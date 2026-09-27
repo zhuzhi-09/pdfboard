@@ -901,6 +901,40 @@ static int runInkSelfTest(const QString &path)
         check("collapse: the chevron keeps its right edge", collapsedRight, expandedRight);
         check("collapse: the bar really shrinks", int(collapsedWidth < expandedWidth), 1);
         bar->setCollapsed(false);
+
+        // Dragging the FOLDED chip then unfolding: the bar must grow leftwards
+        // from the folded right edge, not rightwards from its left edge.
+        bar->setCollapsed(true);
+        bar->moveBy(QPoint(-120, 0));
+        const int foldedDraggedRight = bar->testCollapseButtonRightX();
+        bar->setCollapsed(false);
+        out(QStringLiteral("[selftest] collapse: pin after a folded drag %1 -> %2")
+                .arg(foldedDraggedRight).arg(bar->testCollapseButtonRightX()));
+        check("collapse: unfold after a folded drag keeps the pin",
+              bar->testCollapseButtonRightX(), foldedDraggedRight);
+    }
+
+    // The same invariant on a FRESH canvas (never dragged): expanded -> folded ->
+    // expanded must return the chevron to the SAME spot. This is the "expand"
+    // half of the pin rule - without it the bar re-centres and the pin jumps.
+    {
+        PdfCanvas fresh;
+        fresh.setAttribute(Qt::WA_DontShowOnScreen, true);
+        fresh.resize(1000, 800);
+        fresh.show();
+        QCoreApplication::processEvents();
+        if (InkToolbar *bar = fresh.toolbar()) {
+            const int xExpanded0 = bar->testCollapseButtonRightX();
+            const int wExpanded = bar->width();
+            bar->setCollapsed(true);
+            const int xFolded = bar->testCollapseButtonRightX();
+            bar->setCollapsed(false);
+            const int xExpanded1 = bar->testCollapseButtonRightX();
+            out(QStringLiteral("[selftest] collapse: pin right x expanded %1 -> folded %2 -> expanded %3 (bar %4)")
+                    .arg(xExpanded0).arg(xFolded).arg(xExpanded1).arg(wExpanded));
+            check("collapse: the pin holds while folded", xFolded, xExpanded0);
+            check("collapse: expanding returns the pin", xExpanded1, xExpanded0);
+        }
     }
 
     // Free move (自由移动) mode: a left-button drag pans the view on BOTH axes

@@ -184,10 +184,13 @@ private:
     bool   m_dragged  = false;
     QPoint m_dragOffset;
     QPoint m_userPos;
-    // Width of the EXPANDED bar, cached so the collapsed island can keep the
-    // collapse chevron's right edge where the expanded bar's right edge was
-    // (the island folds leftwards under the pin instead of re-centring).
-    int    m_expandedWidth = 0;
+    // The pin: the island is anchored by its RIGHT edge (where the collapse
+    // chevron sits). BOTH the folded and the expanded bar are placed from this
+    // one value, so folding retracts leftwards and unfolding grows back to the
+    // very same spot - neither re-centres, so the chevron never jumps. A drag
+    // moves the pin (see moveBy); otherwise it defaults to the centred bar's
+    // right edge. -1 = not set yet.
+    int    m_pinRight = -1;
 
     // A press anywhere on the island arms a drag, but it only turns into one
     // after the pointer travels startDragDistance(): a tap must keep clicking

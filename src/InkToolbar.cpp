@@ -1259,6 +1259,8 @@ void InkToolbar::moveBy(const QPoint &delta)
 
     m_userPos = clampToolbarPos(pos() + delta, host->size(), size());
     m_dragged = true;
+    // The pin follows the drag: its right edge is what an unfold anchors to.
+    m_pinRight = m_userPos.x() + size().width();
     move(m_userPos);
     // 开着的面板跟着自己的按钮走
     if (m_palette && m_palette->isVisible())
@@ -1419,22 +1421,18 @@ void InkToolbar::reposition()
     if (size() != want)
         resize(want);
 
-    // Horizontal anchor. The collapse chevron is the island's pin: when the bar
-    // is folded, keep the chevron's RIGHT edge exactly where the expanded bar's
-    // right edge was, so the island retracts leftwards under the pin instead of
-    // re-centring (which made the button look like it never moved). The expanded
-    // width is cached, because while collapsed the layout no longer reports it.
-    const int leftWhenExpanded = m_dragged ? m_userPos.x()
-                                           : (host->width() - m_expandedWidth) / 2;
-    int x;
-    if (m_collapsed && m_expandedWidth > 0) {
-        const int pinnedLeft = leftWhenExpanded + m_expandedWidth - width();
-        x = qBound(0, pinnedLeft, qMax(0, host->width() - width()));
-    } else {
-        m_expandedWidth = width();     // remember the pin for the next fold
-        x = m_dragged ? m_userPos.x() : (host->width() - width()) / 2;
-        x = qBound(0, x, qMax(0, host->width() - width()));
-    }
+    // Horizontal anchor. The collapse chevron is the island's pin: BOTH the
+    // folded and the expanded bar are placed from the SAME right edge, so folding
+    // retracts leftwards and unfolding grows back to the very same spot - neither
+    // re-centres, so the chevron never jumps. A drag moves the pin (see moveBy);
+    // otherwise the pin is the centred bar's right edge and is kept as is across
+    // a fold (a fold or a resize must not shift it).
+    const bool expanded = !m_collapsed;
+    if (!m_dragged && (expanded || m_pinRight < 0))
+        m_pinRight = (host->width() + width()) / 2;
+
+    int x = m_pinRight - width();
+    x = qBound(0, x, qMax(0, host->width() - width()));
     const int y = host->height() - m.barBottom - height() + m.shadowRoom;
     move(x, qMax(0, y));
     raise();
