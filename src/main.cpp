@@ -924,6 +924,16 @@ static int runInkSelfTest(const QString &path)
         fresh.show();
         QCoreApplication::processEvents();
         if (InkToolbar *bar = fresh.toolbar()) {
+            // The island hugs the right edge, it is NOT centred (same inset as
+            // its bottom gap, offset by its own shadow room).
+            const Theme::Metrics im = Theme::metrics(
+                Theme::chromeFont(fresh.font()), Theme::IslandScale,
+                bar->testStyle() == InkToolbar::Style::Compact);
+            const int hostW = fresh.testViewportSize().width();
+            const int expectedRight = hostW - im.barBottom + im.shadowRoom;
+            check("collapse: the island hugs the right edge",
+                  int(qAbs((bar->pos().x() + bar->width()) - expectedRight) <= 2), 1);
+
             const int xExpanded0 = bar->testCollapseButtonRightX();
             const int wExpanded = bar->width();
             bar->setCollapsed(true);
@@ -934,6 +944,11 @@ static int runInkSelfTest(const QString &path)
                     .arg(xExpanded0).arg(xFolded).arg(xExpanded1).arg(wExpanded));
             check("collapse: the pin holds while folded", xFolded, xExpanded0);
             check("collapse: expanding returns the pin", xExpanded1, xExpanded0);
+
+            // Deterministic viewport shot so the right-alignment is eyeballable.
+            if (QDir(QStringLiteral("D:/dev/tmp")).exists())
+                fresh.viewport()->grab().save(
+                    QStringLiteral("D:/dev/tmp/island-rightedge.png"), "PNG");
         }
     }
 

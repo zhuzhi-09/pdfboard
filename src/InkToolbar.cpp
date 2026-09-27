@@ -1421,15 +1421,14 @@ void InkToolbar::reposition()
     if (size() != want)
         resize(want);
 
-    // Horizontal anchor. The collapse chevron is the island's pin: BOTH the
-    // folded and the expanded bar are placed from the SAME right edge, so folding
-    // retracts leftwards and unfolding grows back to the very same spot - neither
-    // re-centres, so the chevron never jumps. A drag moves the pin (see moveBy);
-    // otherwise the pin is the centred bar's right edge and is kept as is across
-    // a fold (a fold or a resize must not shift it).
-    const bool expanded = !m_collapsed;
-    if (!m_dragged && (expanded || m_pinRight < 0))
-        m_pinRight = (host->width() + width()) / 2;
+    // Horizontal anchor. The collapse chevron is the island's pin: the island
+    // hugs the RIGHT edge (inset by the same metric as its bottom gap) and BOTH
+    // the folded and the expanded bar are placed from that same right edge, so
+    // folding retracts leftwards and unfolding grows back to the very same spot -
+    // neither re-centres, so the chevron never jumps. A drag moves the pin (see
+    // moveBy); the widget carries its own shadow room, hence the +shadowRoom.
+    if (!m_dragged)
+        m_pinRight = host->width() - m.barBottom + m.shadowRoom;
 
     int x = m_pinRight - width();
     x = qBound(0, x, qMax(0, host->width() - width()));
