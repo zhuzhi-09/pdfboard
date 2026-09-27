@@ -19,10 +19,13 @@
 // drag) instead of squashing them; both pinned chips stay reachable with zero
 // documents open.
 //
-// The whole strip is painted in one widget - no child buttons - so it stays a
-// single slim row and scrolling is just an offset. Every metric derives from
-// the widget font through Theme::metrics, so the strip follows 150 % / 200 %
-// display scaling and the touch panel's larger hit targets.
+// The strip itself is painted in one widget - the chips are painted boxes, not
+// child buttons - so it stays a single slim row and scrolling is just an
+// offset. ONE host-owned widget may be parked in a fixed slot immediately left
+// of the Settings chip (see setTrailingWidget): the slot is reserved even while
+// that widget is hidden, so the pinned chips never shift sideways. Every metric
+// derives from the widget font through Theme::metrics, so the strip follows
+// 150 % / 200 % display scaling and the touch panel's larger hit targets.
 class DocumentTabs : public QWidget
 {
     Q_OBJECT
@@ -46,6 +49,13 @@ public:
     // is the visible page.
     void setHomeActive(bool on);
     bool isHomeActive() const { return m_homeActive; }
+
+    // Parks ONE host-owned widget in a fixed slot one gap left of the Settings
+    // chip (the zoom control lives there). The widget stays the host's: the host
+    // owns the pointer, the signals and the visibility. The slot is reserved
+    // even while the widget is hidden, so the pinned chips can never shift
+    // sideways when a document is opened or closed. Pass nullptr to release it.
+    void setTrailingWidget(QWidget *w);
 
     QSize sizeHint() const override;
     QSize minimumSizeHint() const override;
@@ -76,6 +86,8 @@ private:
     };
 
     void relayout();                    // widths, elision, scroll clamp
+    int  trailingSlotWidth() const;     // sizeHint width, 0 while unset
+    void layoutTrailingWidget();        // centre it inside the reserved slot
     int  maxScroll() const;
     void setScroll(int value);
     void ensureChipVisible(int index);
@@ -118,6 +130,8 @@ private:
     QRect m_homeRect;           // pinned house (主页) chip (leading)
     QRect m_addRect;
     QRect m_settingsRect;       // pinned zone between the chips and "+"
+    QRect m_slotRect;           // fixed host-widget slot, left of Settings
     bool m_settingsActive = false;
     bool m_homeActive = false;
+    QWidget *m_trailingWidget = nullptr;   // host-owned, may be hidden
 };

@@ -98,8 +98,14 @@ QPalette darkAppPalette()
     return pal;
 }
 
-// The status bar as a quiet strip of information pills instead of the default
-// Qt chrome. Its content is unchanged: 页码 / 渲染 / 笔画 / 内存.
+// The status bar as a quiet line of muted text instead of the default Qt
+// chrome. Its content is unchanged: 页码 / 渲染 / 笔画 / 内存.
+// The labels carry NO pill any more - no background, no corner radius, no
+// padding: the pills were nested chrome that alone kept the strip ~16 px taller
+// than its text. What separates the values is a horizontal gap, which
+// QStatusBar already provides as its own 6 px item spacing (set in
+// QStatusBar::reformat()), so dropping the CSS padding also means the widest
+// pinned texts can never be elided inside their fixed width.
 QString statusSheet()
 {
     const Theme::Palette &c = Theme::light();
@@ -109,18 +115,10 @@ QString statusSheet()
                " border-top: 1px solid %2;"
                " color: %3; }"
                "QStatusBar::item { border: none; }"
-               "QStatusBar QLabel {"
-               " color: %3;"
-               " background: %4;"
-               " border-radius: %5;"
-               " padding: %6 %7; }")
+               "QStatusBar QLabel { color: %3; }")
         .arg(Theme::rgba(c.surface))
         .arg(Theme::rgba(c.divider))
-        .arg(Theme::rgba(c.textMuted))
-        .arg(Theme::rgba(c.chipTint))
-        .arg(Theme::px(Theme::RadiusPill))
-        .arg(Theme::px(Theme::Space1))
-        .arg(Theme::px(Theme::Space3 - 2));
+        .arg(Theme::rgba(c.textMuted));
 }
 
 // True when the mime data carries at least one local PDF, `.dpz` bundle or
@@ -362,6 +360,13 @@ MainWindow::MainWindow(QWidget *parent)
     m_renderLabel->setFont(statusFont);
     m_inkLabel->setFont(statusFont);
     m_memLabel->setFont(statusFont);
+    // Fixed VERTICAL policy: each label is exactly one text line tall. The strip
+    // is plain text now, but the policy stays so nothing in the status bar can
+    // ever stretch the muted labels into taller slabs (that is what the pills
+    // used to do when the zoom bar strutted the strip).
+    const QSizePolicy statusChipPolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
+    for (QLabel *chip : { m_pageLabel, m_renderLabel, m_inkLabel, m_memLabel })
+        chip->setSizePolicy(statusChipPolicy);
     statusBar()->setStyleSheet(statusSheet());
     statusBar()->setSizeGripEnabled(false);
     // Every left-hand status element is pinned to its widest possible text. Those
@@ -380,11 +385,14 @@ MainWindow::MainWindow(QWidget *parent)
     statusBar()->addWidget(m_inkLabel);
     statusBar()->addWidget(m_memLabel);
 
-    // Word-like zoom control at the far right of the status bar. It never invents a
-    // zoom value: the active canvas reports its own zoom (pinch, Ctrl+wheel,
-    // shortcuts) and the control just displays it. Hidden on the home / settings
-    // pages by updateZoomBar().
-    m_zoomBar = new ZoomBar(statusBar());
+    // Word-like zoom control, docked in the tab row's fixed slot immediately
+    // left of 设置 (DocumentTabs::setTrailingWidget) so the bottom strip stays a
+    // single line of text. It never invents a zoom value: the active canvas
+    // reports its own zoom (pinch, Ctrl+wheel, shortcuts) and the control just
+    // displays it. Hidden on the home / settings pages by updateZoomBar(); the
+    // slot stays reserved either way, so 设置 / 打开 never move.
+    m_zoomBar = new ZoomBar(m_tabs);
+    m_tabs->setTrailingWidget(m_zoomBar);
 
     // Fullscreen needs a visible way out on EVERY page: the island carries the fullscreen
     // button, but it is hidden on the home and settings pages, so a teacher who went
@@ -433,7 +441,6 @@ MainWindow::MainWindow(QWidget *parent)
             m_active->setFitWidth(true);
     });
     m_zoomBar->setVisible(false);
-    statusBar()->addPermanentWidget(m_zoomBar);
 
     // No document is open at startup: show the home page (neutral status bar,
     // app-name title, no active canvas).

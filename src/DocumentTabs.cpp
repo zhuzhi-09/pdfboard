@@ -70,13 +70,19 @@ DocumentTabs::DocumentTabs(QWidget *parent)
 
 QSize DocumentTabs::sizeHint() const
 {
-    return QSize(m_homeW + m_gap + m_settingsW + m_addW + int(Theme::Space6 * 6),
+    // The trailing slot is part of the strip's preferred width even while its
+    // widget is hidden - the chips must never move sideways on show/hide.
+    const int slot = trailingSlotWidth();
+    return QSize(m_homeW + m_gap + (slot > 0 ? slot + m_gap : 0)
+                     + m_settingsW + m_addW + int(Theme::Space6 * 6),
                  m_chipH + 2 * m_stripPad);
 }
 
 QSize DocumentTabs::minimumSizeHint() const
 {
-    return QSize(m_homeW + m_gap + m_settingsW + m_addW + Theme::Space6,
+    const int slot = trailingSlotWidth();
+    return QSize(m_homeW + m_gap + (slot > 0 ? slot + m_gap : 0)
+                     + m_settingsW + m_addW + Theme::Space6,
                  m_chipH + 2 * m_stripPad);
 }
 
@@ -185,6 +191,36 @@ void DocumentTabs::setHomeActive(bool on)
     update();
 }
 
+void DocumentTabs::setTrailingWidget(QWidget *w)
+{
+    if (m_trailingWidget == w)
+        return;
+    m_trailingWidget = w;
+    if (m_trailingWidget && m_trailingWidget->parentWidget() != this)
+        m_trailingWidget->setParent(this);
+    relayout();
+    updateGeometry();   // sizeHint() / minimumSizeHint() just changed
+    update();
+}
+
+// sizeHint(), not width(): the slot must be reserved while the widget is hidden
+// (no document open), or the pinned chips would jump when a document opens.
+int DocumentTabs::trailingSlotWidth() const
+{
+    return m_trailingWidget ? m_trailingWidget->sizeHint().width() : 0;
+}
+
+void DocumentTabs::layoutTrailingWidget()
+{
+    if (!m_trailingWidget)
+        return;
+    const QSize hint = m_trailingWidget->sizeHint();
+    const int h = qMin(hint.height(), m_slotRect.height());
+    m_trailingWidget->setGeometry(m_slotRect.x(),
+                                  m_slotRect.y() + (m_slotRect.height() - h) / 2,
+                                  m_slotRect.width(), h);
+}
+
 void DocumentTabs::relayout()
 {
     const QFontMetrics fm(font());
@@ -225,8 +261,25 @@ void DocumentTabs::relayout()
     const int settingsW = qMin(m_settingsW, qMax(0, m_addRect.left() - m_gap));
     m_settingsRect = QRect(m_addRect.left() - settingsW, 0, settingsW, height());
 
+    // The trailing slot sits one gap left of the Settings zone and is reserved
+    // as soon as a widget is registered - even while that widget is hidden - so
+    // 设置 / 打开 and the scrolling chips never shift sideways when a document
+    // is opened or closed. On a pathologically narrow window the slot yields
+    // before the pinned chips do.
+    const int slotWant = trailingSlotWidth();
+    if (slotWant > 0) {
+        const int slotAvail = qMax(0, m_settingsRect.left() - m_gap
+                                        - (m_homeRect.right() + 1 + m_gap));
+        const int slotW = qMin(slotWant, slotAvail);
+        m_slotRect = QRect(m_settingsRect.left() - m_gap - slotW, 0, slotW, height());
+    } else {
+        m_slotRect = QRect();
+    }
+
     m_chipsLeft = m_homeRect.right() + 1 + m_gap;
-    m_chipsRight = qMax(m_chipsLeft, m_settingsRect.left() - m_gap);
+    const int chipsRight = (m_slotRect.width() > 0) ? m_slotRect.left()
+                                                   : m_settingsRect.left();
+    m_chipsRight = qMax(m_chipsLeft, chipsRight - m_gap);
     const int avail = qMax(0, m_chipsRight - m_chipsLeft);
     m_content = content;
     m_scroll = qBound(0, m_scroll, qMax(0, m_content - avail));
@@ -246,6 +299,9 @@ void DocumentTabs::relayout()
         m_chips.append(chip);
         x += item.chipW + m_gap;
     }
+
+    // Give the host widget its fixed slot after every geometry change.
+    layoutTrailingWidget();
 }
 
 int DocumentTabs::maxScroll() const

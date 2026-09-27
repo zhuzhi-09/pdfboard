@@ -11,7 +11,13 @@
 
 namespace {
 
-// 80 % of Theme's touch target: this bar shares the one-line status strip.
+// 80 % of Theme's touch target: the bar now lives in the DocumentTabs row, in
+// the fixed slot left of 设置, and 80 % is exactly the tab chips' own height
+// (DocumentTabs derives its chip height from the same metric), so the control
+// matches the row it shares. The smaller factor it had while it lived in the
+// status bar existed only to stop propping that strip open - that strip no
+// longer hosts this bar. zoomSheet() derives its border radius, knob and groove
+// inset from this same side.
 int stepButtonSize(const Theme::Metrics &m)
 {
     return int(m.touch * 0.8);
@@ -90,8 +96,9 @@ ZoomBar::ZoomBar(QWidget *parent)
 {
     setObjectName(QStringLiteral("zoomBar"));
     setAccessibleName(QStringLiteral("缩放"));
-    // The status bar labels' type scale: this bar is chrome, not paper.
-    setFont(Theme::scaledFont(font(), 0.95, QFont::Medium));
+    // The bar inherits the host row's chrome type scale (DocumentTabs ships at
+    // 0.95 x Medium). Re-applying 0.95 here would compound to ~0.90 now that the
+    // bar lives inside that already-scaled row instead of the status bar.
     setSizePolicy(QSizePolicy::Preferred, QSizePolicy::Fixed);
 
     const Theme::Metrics m = Theme::metrics(font());
