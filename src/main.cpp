@@ -3,6 +3,7 @@
 #include "AppLog.h"
 #include "AppSettings.h"
 #include "CrashLog.h"
+#include "DocumentTabs.h"
 #include "HomePage.h"
 #include "ImageImport.h"
 #include "InkDirty.h"
@@ -1212,6 +1213,155 @@ static void captureUiReviewImages()
     }
 }
 
+// Headless tab-strip scroll self test (run from --selftest-ui).
+//
+// The DocumentTabs header claims an overflowing strip scrolls horizontally
+// (wheel / drag) instead of squashing its chips, and that the pinned
+// 主页/设置/打开 chips live OUTSIDE the scrolling window. This builds a
+// deliberately overflowing strip (12 tabs in a narrow bar) and asserts it:
+// there is a real scroll range, the last tab is reachable at maxScroll(), every
+// tab can be brought into view, the pinned chips never move sideways, and a
+// horizontal drag past kDragSlop scrolls without selecting or closing.
+static int runTabStripSelfTest()
+{
+    int failed = 0;
+    auto check = [&failed](const char *what, int got, int want) {
+        const bool ok = (got == want);
+        if (!ok)
+            ++failed;
+        out(QStringLiteral("[selftest] %1: got %2 want %3 -> %4")
+                .arg(QString::fromLatin1(what), -28)
+                .arg(got).arg(want)
+                .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+    };
+
+    DocumentTabs tabs;
+    tabs.setAttribute(Qt::WA_DontShowOnScreen, true);
+    tabs.resize(560, 64);
+    tabs.show();
+    QCoreApplication::processEvents();
+    tabs.resize(560, 64);                 // belt and braces: lay out at the final size
+    QCoreApplication::processEvents();
+
+    for (int i = 0; i < 12; ++i)
+        tabs.addTab(QStringLiteral("第%1章-一份名字长到足以溢出的文档.pdf").arg(i + 1));
+    tabs.setCurrentIndex(0);
+    tabs.testSetScroll(0);
+
+    const int visW = tabs.testChipsRight() - tabs.testChipsLeft();
+    const int maxS = tabs.testMaxScroll();
+    out(QStringLiteral("[selftest] 标签栏：%1 个标签 | 内容宽 %2 | 可视宽 %3 (x %4..%5) | maxScroll %6")
+            .arg(tabs.count())
+            .arg(tabs.testContent())
+            .arg(visW)
+            .arg(tabs.testChipsLeft())
+            .arg(tabs.testChipsRight())
+            .arg(maxS));
+
+    check("tabs: content overflows", tabs.testContent() > visW ? 1 : 0, 1);
+    check("tabs: maxScroll > 0", maxS > 0 ? 1 : 0, 1);
+
+    // Scrolled to the very end, the last chip must sit inside the window.
+    tabs.testSetScroll(maxS);
+    check("tabs: scroll clamps at max", tabs.testScroll(), maxS);
+    const QRect last = tabs.testChipRect(tabs.count() - 1);
+    out(QStringLiteral("[selftest] 标签栏：末个 chip left %1 right %2 | 可视 [%3, %4] | 余量 左 %5 右 %6")
+            .arg(last.left()).arg(last.right())
+            .arg(tabs.testChipsLeft()).arg(tabs.testChipsRight())
+            .arg(last.left() - tabs.testChipsLeft())
+            .arg(tabs.testChipsRight() - last.right()));
+    check("tabs: last chip reachable",
+          (last.left() >= tabs.testChipsLeft() && last.right() <= tabs.testChipsRight()) ? 1 : 0, 1);
+
+    // Every chip can be scrolled into view, starting each time from the far end.
+    int unreachable = 0;
+    for (int i = 0; i < tabs.count(); ++i) {
+        tabs.testSetScroll(maxS);
+        tabs.testEnsureChipVisible(i);
+        const QRect r = tabs.testChipRect(i);
+        if (r.left() < tabs.testChipsLeft() || r.right() > tabs.testChipsRight()) {
+            ++unreachable;
+            out(QStringLiteral("[selftest] 标签栏：chip %1 不可达 x %2..%3（scroll %4）")
+                    .arg(i).arg(r.left()).arg(r.right()).arg(tabs.testScroll()));
+        }
+    }
+    check("tabs: every chip reachable", unreachable, 0);
+
+    // The pinned 主页 / 设置 / 打开 rects do not move with the scroll.
+    tabs.testSetScroll(0);
+    const QRect home0 = tabs.testHomeRect();
+    const QRect set0 = tabs.testSettingsRect();
+    const QRect add0 = tabs.testAddRect();
+    tabs.testSetScroll(maxS / 2);
+    const QRect homeMid = tabs.testHomeRect();
+    const QRect setMid = tabs.testSettingsRect();
+    const QRect addMid = tabs.testAddRect();
+    tabs.testSetScroll(maxS);
+    out(QStringLiteral("[selftest] 标签栏：主页 x %1 w %2 | 设置 x %3 w %4 | 打开 x %5 w %6（滚动 0 / %7 / %8 下同）")
+            .arg(home0.x()).arg(home0.width())
+            .arg(set0.x()).arg(set0.width())
+            .arg(add0.x()).arg(add0.width())
+            .arg(maxS / 2).arg(maxS));
+    check("tabs: home chip pinned", (home0 == homeMid && home0 == tabs.testHomeRect()) ? 1 : 0, 1);
+    check("tabs: settings chip pinned", (set0 == setMid && set0 == tabs.testSettingsRect()) ? 1 : 0, 1);
+    check("tabs: open chip pinned", (add0 == addMid && add0 == tabs.testAddRect()) ? 1 : 0, 1);
+
+    int selected = 0;
+    int closed = 0;
+    QObject::connect(&tabs, &DocumentTabs::currentChanged, [&selected](int) { ++selected; });
+    QObject::connect(&tabs, &DocumentTabs::closeRequested, [&closed](int) { ++closed; });
+
+    const int slop = tabs.testDragSlop();
+
+    // A drag PAST kDragSlop scrolls; it must not select or close. The press is
+    // on chip 0 while chip 5 is current, so a mistaken click WOULD be visible.
+    tabs.setCurrentIndex(5);
+    tabs.testSetScroll(0);
+    selected = 0;
+    const QPoint chip0 = tabs.testChipRect(0).center();
+    const int scrollBefore = tabs.testScroll();
+    tabs.testPressAt(chip0);
+    tabs.testMoveAt(chip0 - QPoint(slop + 8, 0));
+    tabs.testReleaseAt(chip0 - QPoint(slop + 8, 0));
+    out(QStringLiteral("[selftest] 标签栏：拖动 %1px（>kDragSlop %2）scroll %3 -> %4 | 选中信号 %5 | 关闭信号 %6")
+            .arg(slop + 8).arg(slop).arg(scrollBefore).arg(tabs.testScroll())
+            .arg(selected).arg(closed));
+    check("tabs: drag must scroll", tabs.testScroll() > scrollBefore ? 1 : 0, 1);
+    check("tabs: drag is not a select", selected, 0);
+    check("tabs: drag is not a close", closed, 0);
+
+    // A move within kDragSlop is still a tap: the chip is selected.
+    tabs.testSetScroll(0);
+    selected = 0;
+    const QPoint tap = tabs.testChipRect(0).center();
+    tabs.testPressAt(tap);
+    tabs.testMoveAt(tap + QPoint(slop, 0));       // exactly kDragSlop: not past it
+    tabs.testReleaseAt(tap + QPoint(slop, 0));
+    out(QStringLiteral("[selftest] 标签栏：点按位移 %1px（=kDragSlop %2）选中信号 %3，当前标签 %4")
+            .arg(slop).arg(slop).arg(selected).arg(tabs.currentIndex()));
+    check("tabs: tap at slop still selects", selected, 1);
+    check("tabs: tap selected chip 0", tabs.currentIndex(), 0);
+
+    // The close "x": a drag from it scrolls rather than closing; a tap closes.
+    tabs.testSetScroll(0);
+    closed = 0;
+    const QPoint closeDrag = tabs.testCloseRect(0).center();
+    tabs.testPressAt(closeDrag);
+    tabs.testMoveAt(closeDrag - QPoint(slop + 8, 0));
+    tabs.testReleaseAt(closeDrag - QPoint(slop + 8, 0));
+    check("tabs: drag on close is not a close", closed, 0);
+
+    tabs.testSetScroll(0);
+    closed = 0;
+    const QPoint closeTap = tabs.testCloseRect(0).center();
+    tabs.testPressAt(closeTap);
+    tabs.testReleaseAt(closeTap);
+    out(QStringLiteral("[selftest] 标签栏：点按关闭 x 触发关闭信号 %1").arg(closed));
+    check("tabs: tap on close closes", closed, 1);
+
+    return failed;
+}
+
 // Headless UI-geometry self test:  pdfboard.exe --selftest-ui
 // Pure maths, no widgets: the island metrics must shrink to 80% (font and
 // floors together), and the drag clamp must keep the bar inside the viewport
@@ -1245,6 +1395,8 @@ static int runUiSelfTest()
     check("clamp: host smaller -> 0,0",
           (InkToolbar::clampToolbarPos(QPoint(50, 50), QSize(800, 600), QSize(900, 700))
                == QPoint(0, 0)) ? 1 : 0, 1);
+
+    failed += runTabStripSelfTest();
 
     captureUiReviewImages();
 

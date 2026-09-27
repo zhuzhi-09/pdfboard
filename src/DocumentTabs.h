@@ -1,5 +1,6 @@
 #pragma once
 
+#include <QPoint>
 #include <QRect>
 #include <QString>
 #include <QStringList>
@@ -59,6 +60,28 @@ public:
 
     QSize sizeHint() const override;
     QSize minimumSizeHint() const override;
+
+    // --- headless self-test hooks (see main.cpp runTabStripSelfTest) --------
+    // The chips are painted regions of this one widget, so the scroll geometry
+    // is only observable through these. They let the self-test prove that an
+    // overflowing strip really reaches every chip and that the pinned chips
+    // never move sideways when it scrolls.
+    int   testScroll() const { return m_scroll; }
+    int   testMaxScroll() const { return maxScroll(); }
+    int   testContent() const { return m_content; }
+    int   testChipsLeft() const { return m_chipsLeft; }
+    int   testChipsRight() const { return m_chipsRight; }
+    int   testDragSlop() const;
+    QRect testChipRect(int index) const { return m_chips.at(index).rect; }
+    QRect testCloseRect(int index) const { return m_chips.at(index).closeRect; }
+    QRect testHomeRect() const { return m_homeRect; }
+    QRect testSettingsRect() const { return m_settingsRect; }
+    QRect testAddRect() const { return m_addRect; }
+    void  testSetScroll(int value) { setScroll(value); }
+    void  testEnsureChipVisible(int index);   // ensureChipVisible + relayout
+    void  testPressAt(const QPoint &pos);
+    void  testMoveAt(const QPoint &pos);
+    void  testReleaseAt(const QPoint &pos);
 
 signals:
     void currentChanged(int index);

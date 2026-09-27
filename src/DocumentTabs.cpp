@@ -661,3 +661,41 @@ void DocumentTabs::leaveEvent(QEvent *e)
     m_hoverHome = false;
     update();
 }
+
+// ---------------------------------------------------------------------------
+// Headless self-test hooks (see main.cpp runTabStripSelfTest)
+// ---------------------------------------------------------------------------
+
+int DocumentTabs::testDragSlop() const
+{
+    return kDragSlop;
+}
+
+void DocumentTabs::testEnsureChipVisible(int index)
+{
+    // Mirrors setCurrentIndex(): nudge the scroll towards the chip, then run a
+    // full relayout so the clamped scroll and the chip rects are consistent.
+    ensureChipVisible(index);
+    relayout();
+}
+
+void DocumentTabs::testPressAt(const QPoint &pos)
+{
+    QMouseEvent e(QEvent::MouseButtonPress, QPointF(pos), QPointF(pos),
+                  Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    mousePressEvent(&e);
+}
+
+void DocumentTabs::testMoveAt(const QPoint &pos)
+{
+    QMouseEvent e(QEvent::MouseMove, QPointF(pos), QPointF(pos),
+                  Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+    mouseMoveEvent(&e);
+}
+
+void DocumentTabs::testReleaseAt(const QPoint &pos)
+{
+    QMouseEvent e(QEvent::MouseButtonRelease, QPointF(pos), QPointF(pos),
+                  Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+    mouseReleaseEvent(&e);
+}
