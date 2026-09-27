@@ -15,6 +15,7 @@ class QFrame;
 class QGraphicsDropShadowEffect;
 class QMouseEvent;
 class QToolButton;
+class QVariantAnimation;
 class PageGrid;
 class PenPalette;
 class EraserPalette;
@@ -28,6 +29,15 @@ class EraserPalette;
 // palette above the bar. When collapsed, only the chevron button stays visible
 // so the toolbar can always be brought back - clicking that chevron toggles
 // the collapse directly, there is no menu in between.
+//
+// Fold / unfold is a DRAWER: the chevron keeps its right edge (the pin) and the
+// island's width animates around it, so the content looks like it slides out to
+// the right when folding and is revealed from the left when unfolding. The
+// content is clipped by the island's own bounds, not squashed - while the
+// animation runs the chip sits outside the outer layout at its natural width,
+// right edge under the pin, and the body stays visible the whole time. A drag
+// re-homes the pin; the default is the CENTRED bar's right edge, never an
+// automatic bottom-right dock.
 //
 // Look: a light rounded chip with a soft shadow, every control showing a hand
 // drawn vector icon over its label, and a filled accent pill marking the
@@ -92,6 +102,10 @@ public:
     // 折叠按钮（铆钉）右缘的屏幕 x：收起时它必须与展开时一致（工具岛向左收起，
     // 按钮不跳）。
     int   testCollapseButtonRightX() const;
+    // 抽屉动画（自测用）：当前这段动画的时长（毫秒），以及把动画钉在 [0, 时长]
+    // 内的 ms 毫秒处并立即应用该帧 —— 不跑事件循环、不 sleep，采样完全确定。
+    int   testDrawerDurationMs() const;
+    void  testDrawerAt(int ms);
 
 public slots:
     void setCollapsed(bool on);
@@ -130,6 +144,26 @@ private:
     void resetPress();             // drops the drag candidate / pressed child
     void refreshIcons();           // (re)build the button glyphs, incl. the pen badge
     void syncFromCanvas();
+    // 三层嵌套布局（岛 / 芯片 / 内容体）的 invalidate + activate：任何一条链没
+    // 刷新，sizeHint 都会拿旧的宽度（历史 bug：收起后条形仍按展开宽摆放）。
+    void refreshLayoutChain();
+    // 量"收起态"的自然宽：临时藏起 body 与分隔线问同一条布局链，量完原样还原
+    //（同步完成，中间不画帧）。收起动画的终点就是这条宽度。
+    int  measureCollapsedWidth();
+    // 量"展开态"的自然宽：确保 body/分隔线可见后问布局链。动画途中反向时，
+    // 芯片挂在布局外，两条测量都会改用芯片自己的 sizeHint + 投影余量。
+    int  measureExpandedWidth();
+    // 抽屉动画的一帧：只动宽度与 x（x 由 m_pinRight - width 导出，所以铆钉右缘
+    // 一动不动）；y 归 reposition()。
+    void applyDrawerWidth(int wide);
+    int  drawerWidthAtProgress(qreal progress) const;
+    // 动画期间把芯片从外层布局里取出来/放回去：布局会钳制超宽子件，取出来才能
+    // 保持自然宽、让左溢部分被岛裁剪（"抽屉"的观感就来自这里）。
+    void takeChipForDrawer();
+    void returnChipFromDrawer();
+    // 抽屉动画收尾（自然结束与自测定位到末帧共用）：落位到目标宽、按状态显隐
+    // body/分隔线、刷新宽度缓存。
+    void settleDrawer();
     // 面板定位：锚在 `anchorButton` 上方并钳进页面区域；笔和橡皮共用同一条路径。
     void positionPaletteAbove(QWidget *anchorButton, QWidget *card);
     void hidePalettes();           // 收起两块面板（笔调色板 / 橡皮大小）
@@ -178,6 +212,27 @@ private:
     bool m_fullscreenActive = false;
     Style m_style = Style::Compact;   // factory default: the slim glyph-only row
 
+    // The fold / unfold drawer. Only the WIDTH is animated; x follows from
+    // m_pinRight - width (so the chevron's right edge cannot move) and y stays
+    // owned by reposition(). While it runs, the body stays visible and the chip
+    // (out of the layout, see m_drawerChipWidth) protrudes to the left, where
+    // the island's own bounds clip it - that reads as "slides out to the right
+    // / in from the left".
+    QVariantAnimation *m_drawerAnim = nullptr;
+    bool m_drawerActive = false;      // owns width + x while the drawer runs
+    int  m_drawerFrom = 0;            // this leg's starting width
+    int  m_drawerTo = 0;              // this leg's target width
+    // While the drawer runs the chip is OUT of the outer layout (a QBoxLayout
+    // clamps an over-wide child back inside the island, squashing it - see
+    // QWidgetItem::setGeometry) and is placed by hand at its natural width with
+    // its right edge under the pin. 0 = chip is owned by the layout.
+    int  m_drawerChipWidth = 0;
+    // Natural widths of the two rest states. The default pin is derived from
+    // the EXPANDED one (the centred bar's right edge), so it must be cached
+    // while folded - the live width() is the small one there.
+    int  m_expandedWidth = -1;
+    int  m_collapsedWidth = -1;
+
     // Drag state. m_userPos and m_dragged are session-only: the island returns
     // to its default spot on the next launch.
     bool   m_dragging = false;
@@ -188,8 +243,9 @@ private:
     // chevron sits). BOTH the folded and the expanded bar are placed from this
     // one value, so folding retracts leftwards and unfolding grows back to the
     // very same spot - neither re-centres, so the chevron never jumps. A drag
-    // moves the pin (see moveBy); otherwise it defaults to the centred bar's
-    // right edge. -1 = not set yet.
+    // moves the pin (see moveBy) and reposition() then never touches it again;
+    // otherwise it is the CENTRED expanded bar's right edge (user: 不要改为怎样
+    // 都自动靠右下). -1 = not set yet.
     int    m_pinRight = -1;
 
     // A press anywhere on the island arms a drag, but it only turns into one

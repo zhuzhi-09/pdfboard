@@ -9,6 +9,7 @@
 #include <QAbstractButton>
 #include <QApplication>
 #include <QButtonGroup>
+#include <QEasingCurve>
 #include <QEvent>
 #include <QKeyEvent>
 #include <QFontMetrics>
@@ -25,9 +26,15 @@
 #include <QStyle>
 #include <QToolButton>
 #include <QVBoxLayout>
+#include <QVariantAnimation>
 #include <QtMath>
 
 namespace {
+
+// 抽屉动画：收起 / 展开的基准时长。中途反向时按剩余距离等比缩短（速度一致，
+// 老师在大屏上连点两下不会看到忽快忽慢）。
+constexpr int kDrawerDurationMs = 200;
+constexpr int kDrawerMinDurationMs = 80;
 
 // ---------------------------------------------------------------------------
 // Pen palette contents: 6 colours x 3 widths.
@@ -702,6 +709,11 @@ void InkToolbar::buildUi()
     outer->setContentsMargins(m.shadowRoom, m.shadowRoom, m.shadowRoom, m.shadowRoom);
     outer->setSpacing(0);
 
+    // 抽屉动画的舞台：内容（芯片）在岛里右对齐，岛缩窄时它不压缩，多出来的
+    // 左侧部分被岛自身的边界裁掉 —— 视觉上就是"向左展开 / 向右收起"。因此
+    // 岛需要一个显式的小下限，resize() 才真的能缩到比内容最小宽还窄。
+    setMinimumWidth(m.shadowRoom * 2 + m.divider);
+
     m_chip = new QFrame(this);
     m_chip->setObjectName(QStringLiteral("inkChip"));
     m_chip->setAttribute(Qt::WA_StyledBackground, true);
@@ -714,6 +726,9 @@ void InkToolbar::buildUi()
     m_glow->setColor(shadow);
     m_chip->setGraphicsEffect(m_glow);
     outer->addWidget(m_chip);
+    // 静止态芯片钉在岛的右侧（动画期间芯片被临时取出布局手动摆位，见
+    // takeChipForDrawer：布局会把超宽子件钳回岛内压扁，取出来才能保持自然宽）。
+    outer->setAlignment(m_chip, Qt::AlignRight);
 
     auto *chipRow = new QHBoxLayout(m_chip);
     chipRow->setContentsMargins(m.chipPad, m.chipPad, m.chipPad, m.chipPad);
@@ -906,6 +921,14 @@ void InkToolbar::buildUi()
     for (QWidget *child : findChildren<QWidget *>())
         child->installEventFilter(this);
 
+    // 收起 / 展开的抽屉动画：值 = 宽度（像素），每一帧只改宽度和 x ——
+    // x = m_pinRight - width，所以铆钉（折叠按钮）的右缘逐帧钉死不动。
+    m_drawerAnim = new QVariantAnimation(this);
+    m_drawerAnim->setEasingCurve(QEasingCurve::OutCubic);
+    connect(m_drawerAnim, &QVariantAnimation::valueChanged, this,
+            [this](const QVariant &value) { applyDrawerWidth(value.toInt()); });
+    connect(m_drawerAnim, &QAbstractAnimation::finished, this, &InkToolbar::settleDrawer);
+
     applyButtonStyle();
     refreshIcons();
 }
@@ -933,6 +956,9 @@ void InkToolbar::setStyle(Style s)
 {
     if (m_style == s)
         return;
+    // 风格切换落在动画中间会量到旧度量：先让抽屉落位，再换样式。
+    if (m_drawerActive)
+        settleDrawer();
     m_style = s;
     m_metrics = Theme::metrics(Theme::chromeFont(m_baseFont), Theme::IslandScale,
                                m_style == Style::Compact);
@@ -965,6 +991,32 @@ int InkToolbar::testCollapseButtonRightX() const
     // Screen x of the chevron's right edge: the value that must stay fixed
     // across a fold (the island shrinks away under the pin, not around it).
     return m_moreButton->mapToGlobal(QPoint(m_moreButton->width(), 0)).x();
+}
+
+int InkToolbar::testDrawerDurationMs() const
+{
+    return m_drawerAnim ? m_drawerAnim->duration() : 0;
+}
+
+void InkToolbar::testDrawerAt(int ms)
+{
+    if (!m_drawerAnim || !m_drawerActive)
+        return;   // 没有进行中的抽屉动画：岛保持原样，钩子无事可做
+
+    const int duration = qMax(1, m_drawerAnim->duration());
+    const int at = qBound(0, ms, duration);
+
+    // 停表：动画的计时器不得在断言期间把岛推进（自测不跑事件循环、不 sleep）。
+    if (m_drawerAnim->state() != QAbstractAnimation::Stopped)
+        m_drawerAnim->pause();
+    m_drawerAnim->setCurrentTime(at);
+
+    // 显式应用这一帧：setCurrentTime 对停止中的动画不保证送值，这里统一按
+    // 同一套缓动与端点落到几何上，任何状态下采样结果一致。
+    applyDrawerWidth(drawerWidthAtProgress(qreal(at) / qreal(duration)));
+
+    if (at >= duration)
+        settleDrawer();   // 与动画自然结束走同一条收尾路径
 }
 
 QWidget *InkToolbar::testEraserPalette() const
@@ -1205,24 +1257,71 @@ void InkToolbar::setCollapsed(bool on)
         return;
 
     m_collapsed = on;
-    if (on)
+    if (on) {
         hidePalettes();
-    if (on)
         dismissPageGrid();
-    if (m_body)
-        m_body->setVisible(!on);
-    if (m_moreSep)
-        m_moreSep->setVisible(!on);
+    }
     if (m_moreButton) {
         m_moreButton->setToolTip(on ? QStringLiteral("展开工具栏") : QStringLiteral("收起工具栏"));
         m_moreButton->setAccessibleName(on ? QStringLiteral("展开工具栏")
                                            : QStringLiteral("收起工具栏"));
     }
     refreshIcons();     // the chevron flips direction with the state
-    if (layout())
-        layout()->activate();
 
-    reposition();
+    if (!m_drawerAnim) {   // 防御：动画对象缺席时退回硬切换（正常路径不会发生）
+        if (m_body)
+            m_body->setVisible(!on);
+        if (m_moreSep)
+            m_moreSep->setVisible(!on);
+        refreshLayoutChain();
+        reposition();
+        emit hiddenChanged(m_collapsed);
+        return;
+    }
+
+    // 抽屉动画：宽度从"现在"出发，中途再点就从当前宽度平滑反向；右缘不动。
+    m_drawerAnim->stop();
+    m_drawerFrom = width();
+    if (on) {
+        // 收起：先量出收起态的自然宽（量完原样还原），动画期间 body 保持可见，
+        // 由岛边界把它裁掉；动画结束才真正隐藏（见 settleDrawer）。
+        m_collapsedWidth = measureCollapsedWidth();
+        m_drawerTo = (m_collapsedWidth > 0) ? m_collapsedWidth : m_drawerFrom;
+        if (m_body)
+            m_body->setVisible(true);
+        if (m_moreSep)
+            m_moreSep->setVisible(true);
+        refreshLayoutChain();
+    } else {
+        // 展开：先把 body/分隔线放出来（此刻就被裁着，读起来是从左侧展开），
+        // 再量出展开态的自然宽作为动画终点。
+        const int wide = measureExpandedWidth();
+        if (wide > 0)
+            m_expandedWidth = wide;
+        m_drawerTo = (m_expandedWidth > 0) ? m_expandedWidth : m_drawerFrom;
+    }
+
+    const int distance = qAbs(m_drawerTo - m_drawerFrom);
+    if (distance <= 0) {
+        settleDrawer();
+        emit hiddenChanged(m_collapsed);
+        return;
+    }
+
+    // 中途反向时按剩余距离等比缩短时长：整体速度一致，连点两下不会忽快忽慢。
+    const int span = qAbs((m_expandedWidth > 0 && m_collapsedWidth > 0)
+                              ? (m_expandedWidth - m_collapsedWidth) : distance);
+    int duration = kDrawerDurationMs;
+    if (span > 0 && distance < span)
+        duration = qBound(kDrawerMinDurationMs, kDrawerDurationMs * distance / span,
+                          kDrawerDurationMs);
+
+    m_drawerActive = true;
+    takeChipForDrawer();   // 芯片自然宽 + 手动摆位，布局不能把它压扁
+    m_drawerAnim->setDuration(duration);
+    m_drawerAnim->setStartValue(m_drawerFrom);
+    m_drawerAnim->setEndValue(m_drawerTo);
+    m_drawerAnim->start();
     emit hiddenChanged(m_collapsed);
 }
 
@@ -1256,6 +1355,10 @@ void InkToolbar::moveBy(const QPoint &delta)
     QWidget *host = parentWidget();
     if (!host)
         return;
+
+    // 动画期间拖岛：先落位到目标宽，再按落位后的尺寸算拖动，拖动结果才精确。
+    if (m_drawerActive)
+        settleDrawer();
 
     m_userPos = clampToolbarPos(pos() + delta, host->size(), size());
     m_dragged = true;
@@ -1394,18 +1497,11 @@ void InkToolbar::mouseReleaseEvent(QMouseEvent *e)
     QWidget::mouseReleaseEvent(e);
 }
 
-void InkToolbar::reposition()
+// 三层嵌套布局（岛 / 芯片 / 内容体）一起 invalidate + activate。只刷新顶层不够：
+// 一次 hide()/show() 会 post LayoutRequest，嵌套的芯片与 body 布局还会拿旧尺度
+// 答一帧，正是当年"收起后条形仍按展开宽摆放（按钮被挤扁）"的根因。
+void InkToolbar::refreshLayoutChain()
 {
-    QWidget *host = parentWidget();
-    if (!host)
-        return;
-
-    // The hint must be fresh: the chip's height depends on the current font
-    // metrics, and collapsing hides the body. Invalidating only the top layout
-    // is not enough - a hide() posts a LayoutRequest, so the nested chip and
-    // body layouts would still answer with their old size for one event loop
-    // turn, which is exactly what used to leave the bar full width (and its
-    // buttons squeezed) after a collapse.
     QLayout *chain[3] = { layout(),
                           m_chip ? m_chip->layout() : nullptr,
                           m_body ? m_body->layout() : nullptr };
@@ -1415,25 +1511,170 @@ void InkToolbar::reposition()
         lay->invalidate();
         lay->activate();
     }
+}
 
-    const Theme::Metrics m = m_metrics;
+int InkToolbar::measureCollapsedWidth()
+{
+    // 收起态的自然宽 = 藏掉 body 与分隔线后布局链自己算出的宽度。藏/显在同一个
+    // 函数里同步完成，中间不画帧，所以不会有可见的闪烁。
+    const bool bodyVisible = m_body && m_body->isVisibleTo(this);
+    const bool sepVisible = m_moreSep && m_moreSep->isVisibleTo(this);
+    if (m_body)
+        m_body->setVisible(false);
+    if (m_moreSep)
+        m_moreSep->setVisible(false);
+    refreshLayoutChain();
+    // 动画途中反向时芯片挂在布局外，岛的 sizeHint 只剩边距：这时用芯片自己的
+    // 自然宽 + 两侧投影余量来量（两个来源在静止态是同一个数）。
+    const int wide = (m_chip && m_drawerChipWidth > 0)
+                         ? m_chip->sizeHint().width() + 2 * m_metrics.shadowRoom
+                         : sizeHint().width();
+    if (m_body)
+        m_body->setVisible(bodyVisible);
+    if (m_moreSep)
+        m_moreSep->setVisible(sepVisible);
+    refreshLayoutChain();
+    return wide;
+}
+
+int InkToolbar::measureExpandedWidth()
+{
+    // 展开态的自然宽：body/分隔线可见时的宽度（途中反向时同样要绕开布局外的
+    // 芯片问题）。
+    if (m_body)
+        m_body->setVisible(true);
+    if (m_moreSep)
+        m_moreSep->setVisible(true);
+    refreshLayoutChain();
+    if (m_chip && m_drawerChipWidth > 0)
+        return m_chip->sizeHint().width() + 2 * m_metrics.shadowRoom;
+    return sizeHint().width();
+}
+
+int InkToolbar::drawerWidthAtProgress(qreal progress) const
+{
+    const QEasingCurve easing(QEasingCurve::OutCubic);
+    const qreal eased = easing.valueForProgress(qBound<qreal>(0.0, progress, 1.0));
+    return qRound(qreal(m_drawerFrom) + (qreal(m_drawerTo) - qreal(m_drawerFrom)) * eased);
+}
+
+void InkToolbar::takeChipForDrawer()
+{
+    if (!m_chip)
+        return;
+    m_drawerChipWidth = m_chip->sizeHint().width();
+    if (QLayout *outer = layout())
+        outer->removeWidget(m_chip);   // 芯片还在，只是这期间不归布局管
+}
+
+void InkToolbar::returnChipFromDrawer()
+{
+    if (!m_chip)
+        return;
+    if (QLayout *outer = layout()) {
+        if (outer->indexOf(m_chip) < 0) {
+            outer->addWidget(m_chip);
+            outer->setAlignment(m_chip, Qt::AlignRight);
+        }
+    }
+    m_drawerChipWidth = 0;
+}
+
+void InkToolbar::applyDrawerWidth(int wide)
+{
+    QWidget *host = parentWidget();
+    if (!host)
+        return;
+
+    const int w = qMax(1, wide);
+    // x 完全由锚导出：宽度动多少，x 就反向动多少 —— 铆钉的右缘逐帧不动。
+    const int x = qBound(0, m_pinRight - w, qMax(0, host->width() - w));
+    const int y = host->height() - m_metrics.barBottom - height() + m_metrics.shadowRoom;
+    if (width() != w)
+        resize(w, height());     // resizeEvent -> reposition（动画期间只跟锚点与 y）
+    if (m_chip && m_drawerChipWidth > 0) {
+        // 芯片保持自然宽、右缘贴着岛的右缘：左溢的部分被岛自己的边界裁剪。
+        // 收起 = 越裁越多（内容"吞"向铆钉），展开 = 越露越多（从左侧抽出来）。
+        const int chipH = qMax(1, height() - 2 * m_metrics.shadowRoom);
+        m_chip->setGeometry(w - m_metrics.shadowRoom - m_drawerChipWidth,
+                            m_metrics.shadowRoom, m_drawerChipWidth, chipH);
+    }
+    move(x, qMax(0, y));
+    raise();
+}
+
+void InkToolbar::settleDrawer()
+{
+    if (m_drawerAnim && m_drawerAnim->state() != QAbstractAnimation::Stopped)
+        m_drawerAnim->stop();
+    m_drawerActive = false;
+    returnChipFromDrawer();   // 芯片交还外层布局（动画期间是手动摆位的）
+
+    // 收起：内容已经整体缩回，这时才真正隐藏 body/分隔线；芯片按收起的最小宽
+    // 重新求解，左右圆角恢复完整。展开：body 在动画期间本来就可见，不用动。
+    if (m_collapsed) {
+        if (m_body)
+            m_body->setVisible(false);
+        if (m_moreSep)
+            m_moreSep->setVisible(false);
+    }
+    refreshLayoutChain();
     const QSize want = sizeHint();
+    if (want.width() > 0) {
+        if (m_collapsed)
+            m_collapsedWidth = want.width();
+        else
+            m_expandedWidth = want.width();
+    }
     if (size() != want)
         resize(want);
+    reposition();
+}
 
-    // Horizontal anchor. The collapse chevron is the island's pin: the island
-    // hugs the RIGHT edge (inset by the same metric as its bottom gap) and BOTH
-    // the folded and the expanded bar are placed from that same right edge, so
-    // folding retracts leftwards and unfolding grows back to the very same spot -
-    // neither re-centres, so the chevron never jumps. A drag moves the pin (see
-    // moveBy); the widget carries its own shadow room, hence the +shadowRoom.
-    if (!m_dragged)
-        m_pinRight = host->width() - m.barBottom + m.shadowRoom;
+void InkToolbar::reposition()
+{
+    QWidget *host = parentWidget();
+    if (!host)
+        return;
 
-    int x = m_pinRight - width();
-    x = qBound(0, x, qMax(0, host->width() - width()));
-    const int y = host->height() - m.barBottom - height() + m.shadowRoom;
-    move(x, qMax(0, y));
+    if (m_drawerActive) {
+        // 抽屉动画期间宽度与 x 归动画所有：这里只保证锚点（宿主可能变了）与 y
+        // 正确，绝不 resize/move 回"自然宽"，否则会和动画抢方向盘。
+        if (!m_dragged) {
+            const int base = (m_expandedWidth > 0) ? m_expandedWidth : width();
+            m_pinRight = (host->width() - base) / 2 + base;
+        }
+        const int x = qBound(0, m_pinRight - width(), qMax(0, host->width() - width()));
+        const int y = host->height() - m_metrics.barBottom - height() + m_metrics.shadowRoom;
+        move(x, qMax(0, y));
+    } else {
+        refreshLayoutChain();
+        const QSize want = sizeHint();
+        // 记住两种状态的自然宽：默认锚点要的是"展开条"的右缘，而收起态也得有
+        // 它（缓存不能只看当前宽度）。
+        if (want.width() > 0) {
+            if (m_collapsed)
+                m_collapsedWidth = want.width();
+            else
+                m_expandedWidth = want.width();
+        }
+        if (size() != want)
+            resize(want);
+
+        // 水平锚点。铆钉（折叠按钮）就是岛的锚：收起与展开都从同一条右缘摆放，
+        // 收起向左收回、展开长回原位，谁都不重新居中，铆钉不跳。默认锚点 =
+        //「居中展开条」的右缘（用户明确：不要怎样都自动靠右下）；拖动会移动锚点
+        //（见 moveBy），而且在那之后 reposition() 永不重算它 —— 移到哪是哪里。
+        if (!m_dragged) {
+            const int base = (m_expandedWidth > 0) ? m_expandedWidth : width();
+            m_pinRight = (host->width() - base) / 2 + base;
+        }
+
+        int x = m_pinRight - width();
+        x = qBound(0, x, qMax(0, host->width() - width()));
+        const int y = host->height() - m_metrics.barBottom - height() + m_metrics.shadowRoom;
+        move(x, qMax(0, y));
+    }
     raise();
 
     if (m_palette && m_palette->isVisible())

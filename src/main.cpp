@@ -889,34 +889,54 @@ static int runInkSelfTest(const QString &path)
     // Collapse (the chevron is the island's pin): folding must retract the bar
     // leftwards and keep the chevron's RIGHT edge exactly where it was, instead
     // of re-centring the shrunken chip (which left the pin looking unmoved).
+    // Fold / unfold is now a drawer animation; the samples below drive it
+    // deterministically through the test hook (no event loop, no sleeps).
     if (InkToolbar *bar = canvas.toolbar()) {
         bar->setCollapsed(false);
         const int expandedRight = bar->testCollapseButtonRightX();
         const int expandedWidth = bar->width();
         bar->setCollapsed(true);
+        const int drawerMs = bar->testDrawerDurationMs();
+        bar->testDrawerAt(drawerMs);          // 把收起动画钉到末帧并收尾
         const int collapsedRight = bar->testCollapseButtonRightX();
         const int collapsedWidth = bar->width();
-        out(QStringLiteral("[selftest] collapse: chevron right x %1 -> %2, bar width %3 -> %4")
-                .arg(expandedRight).arg(collapsedRight).arg(expandedWidth).arg(collapsedWidth));
+        out(QStringLiteral("[selftest] collapse: chevron right x %1 -> %2, bar width %3 -> %4 (drawer %5 ms)")
+                .arg(expandedRight).arg(collapsedRight).arg(expandedWidth).arg(collapsedWidth)
+                .arg(drawerMs));
         check("collapse: the chevron keeps its right edge", collapsedRight, expandedRight);
         check("collapse: the bar really shrinks", int(collapsedWidth < expandedWidth), 1);
         bar->setCollapsed(false);
+        bar->testDrawerAt(bar->testDrawerDurationMs());   // 展开回到静止态
 
         // Dragging the FOLDED chip then unfolding: the bar must grow leftwards
         // from the folded right edge, not rightwards from its left edge.
         bar->setCollapsed(true);
+        bar->testDrawerAt(bar->testDrawerDurationMs());
         bar->moveBy(QPoint(-120, 0));
         const int foldedDraggedRight = bar->testCollapseButtonRightX();
         bar->setCollapsed(false);
+        bar->testDrawerAt(bar->testDrawerDurationMs());
         out(QStringLiteral("[selftest] collapse: pin after a folded drag %1 -> %2")
                 .arg(foldedDraggedRight).arg(bar->testCollapseButtonRightX()));
         check("collapse: unfold after a folded drag keeps the pin",
               bar->testCollapseButtonRightX(), foldedDraggedRight);
+
+        // (a) A dragged island is NOT re-homed: the very same reposition() path a
+        // page switch / host resize takes must leave its x exactly as the user
+        // left it (用户：移到哪是哪里 / 拖到哪里就在那边展开).
+        bar->moveBy(QPoint(-57, 0));
+        const QPoint draggedAt = bar->pos();
+        bar->reposition();
+        out(QStringLiteral("[selftest] collapse: dragged island x %1 -> %2 (y %3 -> %4)")
+                .arg(draggedAt.x()).arg(bar->pos().x()).arg(draggedAt.y()).arg(bar->pos().y()));
+        check("collapse: a dragged island is not re-homed", bar->pos().x(), draggedAt.x());
     }
 
-    // The same invariant on a FRESH canvas (never dragged): expanded -> folded ->
-    // expanded must return the chevron to the SAME spot. This is the "expand"
-    // half of the pin rule - without it the bar re-centres and the pin jumps.
+    // Default anchor on a FRESH canvas (never dragged): the island sits at the
+    // CENTRED bar's right edge (用户: 不要改为怎样都自动靠右下 -> 撤销贴右缘默认),
+    // and the same invariant survives the animated fold: expanded -> folded ->
+    // expanded returns the chevron to the SAME spot, with the pin sampled DURING
+    // the animation (start / middle / end) staying motionless.
     {
         PdfCanvas fresh;
         fresh.setAttribute(Qt::WA_DontShowOnScreen, true);
@@ -924,31 +944,78 @@ static int runInkSelfTest(const QString &path)
         fresh.show();
         QCoreApplication::processEvents();
         if (InkToolbar *bar = fresh.toolbar()) {
-            // The island hugs the right edge, it is NOT centred (same inset as
-            // its bottom gap, offset by its own shadow room).
-            const Theme::Metrics im = Theme::metrics(
-                Theme::chromeFont(fresh.font()), Theme::IslandScale,
-                bar->testStyle() == InkToolbar::Style::Compact);
             const int hostW = fresh.testViewportSize().width();
-            const int expectedRight = hostW - im.barBottom + im.shadowRoom;
-            check("collapse: the island hugs the right edge",
-                  int(qAbs((bar->pos().x() + bar->width()) - expectedRight) <= 2), 1);
+            const int barW = bar->width();
+            const int expectedRight = (hostW - barW) / 2 + barW;
+            const int measuredRight = bar->pos().x() + bar->width();
+            out(QStringLiteral("[selftest] collapse: default right x expected %1, measured %2 (host %3, bar %4)")
+                    .arg(expectedRight).arg(measuredRight).arg(hostW).arg(barW));
+            check("collapse: default is the centred bar",
+                  int(qAbs(measuredRight - expectedRight) <= 2), 1);
 
+            // (b) The pin holds DURING the animation: sample the chevron's right
+            // edge at the animation's start / middle / end (driven through the
+            // deterministic hook - no event loop, no sleeps), and require the
+            // width to have moved monotonically between the two ends.
             const int xExpanded0 = bar->testCollapseButtonRightX();
             const int wExpanded = bar->width();
             bar->setCollapsed(true);
-            const int xFolded = bar->testCollapseButtonRightX();
+            const int drawerMs = bar->testDrawerDurationMs();
+            bar->testDrawerAt(0);
+            const int xStart = bar->testCollapseButtonRightX();
+            const int wStart = bar->width();
+            bar->testDrawerAt(drawerMs / 2);
+            const int xMid = bar->testCollapseButtonRightX();
+            const int wMid = bar->width();
+            // 人眼验收：动画中帧的截屏 —— 内容被岛的左边界裁掉（抽屉观感），
+            // 按钮本身不该被压扁。
+            if (QDir(QStringLiteral("D:/dev/tmp")).exists())
+                bar->grab().save(QStringLiteral("D:/dev/tmp/island-drawer-mid.png"), "PNG");
+            bar->testDrawerAt(drawerMs);
+            const int xEnd = bar->testCollapseButtonRightX();
+            const int wEnd = bar->width();
+            out(QStringLiteral("[selftest] collapse: drawer %1 ms - pin %2 / %3 / %4, width %5 -> %6 -> %7")
+                    .arg(drawerMs).arg(xStart).arg(xMid).arg(xEnd)
+                    .arg(wStart).arg(wMid).arg(wEnd));
+            check("collapse: the pin holds during the animation",
+                  (xStart == xExpanded0 && xMid == xExpanded0 && xEnd == xExpanded0) ? 1 : 0, 1);
+            check("collapse: the drawer width moves monotonically",
+                  (wStart >= wMid && wMid >= wEnd && wEnd < wStart) ? 1 : 0, 1);
+            check("collapse: the pin holds while folded", xEnd, xExpanded0);
+
             bar->setCollapsed(false);
+            const int drawerMsExpand = bar->testDrawerDurationMs();
+            bar->testDrawerAt(drawerMsExpand);
             const int xExpanded1 = bar->testCollapseButtonRightX();
             out(QStringLiteral("[selftest] collapse: pin right x expanded %1 -> folded %2 -> expanded %3 (bar %4)")
-                    .arg(xExpanded0).arg(xFolded).arg(xExpanded1).arg(wExpanded));
-            check("collapse: the pin holds while folded", xFolded, xExpanded0);
+                    .arg(xExpanded0).arg(xEnd).arg(xExpanded1).arg(wExpanded));
             check("collapse: expanding returns the pin", xExpanded1, xExpanded0);
 
-            // Deterministic viewport shot so the right-alignment is eyeballable.
+            // (c) Interrupting mid-flight reverses from the CURRENT width (the
+            // teacher taps the chevron twice): the second leg must start where
+            // the first one was frozen, keep the pin, and land on the expanded
+            // width - all sampled through the same deterministic hook.
+            bar->setCollapsed(true);
+            const int turnMs = bar->testDrawerDurationMs();
+            bar->testDrawerAt(turnMs / 2);
+            const int xTurn = bar->testCollapseButtonRightX();
+            const int wTurn = bar->width();
+            bar->setCollapsed(false);                    // reverse mid-animation
+            const int backMs = bar->testDrawerDurationMs();
+            bar->testDrawerAt(0);
+            const int wBack = bar->width();
+            bar->testDrawerAt(backMs);
+            const int xBack = bar->testCollapseButtonRightX();
+            out(QStringLiteral("[selftest] collapse: reversal from width %1 -> %2 (pin %3 -> %4, leg %5 ms)")
+                    .arg(wTurn).arg(wBack).arg(xTurn).arg(xBack).arg(backMs));
+            check("collapse: a reversal continues from the current width", wBack, wTurn);
+            check("collapse: the reversal reaches the expanded width", bar->width(), wExpanded);
+            check("collapse: the pin holds through a reversal", xBack, xExpanded0);
+
+            // Deterministic viewport shot so the centred default is eyeballable.
             if (QDir(QStringLiteral("D:/dev/tmp")).exists())
                 fresh.viewport()->grab().save(
-                    QStringLiteral("D:/dev/tmp/island-rightedge.png"), "PNG");
+                    QStringLiteral("D:/dev/tmp/island-default.png"), "PNG");
         }
     }
 
