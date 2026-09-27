@@ -958,6 +958,15 @@ bool InkToolbar::testLabelButtonsIconOnly() const
     return true;
 }
 
+int InkToolbar::testCollapseButtonRightX() const
+{
+    if (!m_moreButton)
+        return 0;
+    // Screen x of the chevron's right edge: the value that must stay fixed
+    // across a fold (the island shrinks away under the pin, not around it).
+    return m_moreButton->mapToGlobal(QPoint(m_moreButton->width(), 0)).x();
+}
+
 QWidget *InkToolbar::testEraserPalette() const
 {
     return m_eraserPalette;
@@ -1410,14 +1419,24 @@ void InkToolbar::reposition()
     if (size() != want)
         resize(want);
 
-    if (m_dragged) {
-        // Once dragged, stay where the user put it, clamped to the viewport.
-        move(clampToolbarPos(m_userPos, host->size(), size()));
+    // Horizontal anchor. The collapse chevron is the island's pin: when the bar
+    // is folded, keep the chevron's RIGHT edge exactly where the expanded bar's
+    // right edge was, so the island retracts leftwards under the pin instead of
+    // re-centring (which made the button look like it never moved). The expanded
+    // width is cached, because while collapsed the layout no longer reports it.
+    const int leftWhenExpanded = m_dragged ? m_userPos.x()
+                                           : (host->width() - m_expandedWidth) / 2;
+    int x;
+    if (m_collapsed && m_expandedWidth > 0) {
+        const int pinnedLeft = leftWhenExpanded + m_expandedWidth - width();
+        x = qBound(0, pinnedLeft, qMax(0, host->width() - width()));
     } else {
-        const int x = (host->width() - width()) / 2;
-        const int y = host->height() - m.barBottom - height() + m.shadowRoom;
-        move(qMax(0, x), qMax(0, y));
+        m_expandedWidth = width();     // remember the pin for the next fold
+        x = m_dragged ? m_userPos.x() : (host->width() - width()) / 2;
+        x = qBound(0, x, qMax(0, host->width() - width()));
     }
+    const int y = host->height() - m.barBottom - height() + m.shadowRoom;
+    move(x, qMax(0, y));
     raise();
 
     if (m_palette && m_palette->isVisible())

@@ -886,6 +886,23 @@ static int runInkSelfTest(const QString &path)
         }
     }
 
+    // Collapse (the chevron is the island's pin): folding must retract the bar
+    // leftwards and keep the chevron's RIGHT edge exactly where it was, instead
+    // of re-centring the shrunken chip (which left the pin looking unmoved).
+    if (InkToolbar *bar = canvas.toolbar()) {
+        bar->setCollapsed(false);
+        const int expandedRight = bar->testCollapseButtonRightX();
+        const int expandedWidth = bar->width();
+        bar->setCollapsed(true);
+        const int collapsedRight = bar->testCollapseButtonRightX();
+        const int collapsedWidth = bar->width();
+        out(QStringLiteral("[selftest] collapse: chevron right x %1 -> %2, bar width %3 -> %4")
+                .arg(expandedRight).arg(collapsedRight).arg(expandedWidth).arg(collapsedWidth));
+        check("collapse: the chevron keeps its right edge", collapsedRight, expandedRight);
+        check("collapse: the bar really shrinks", int(collapsedWidth < expandedWidth), 1);
+        bar->setCollapsed(false);
+    }
+
     // Free move (自由移动) mode: a left-button drag pans the view on BOTH axes
     // and must stay inert for ink and for the toolbar island.
     {

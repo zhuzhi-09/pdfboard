@@ -89,6 +89,9 @@ public:
     int   testButtonHeight() const { return m_metrics.buttonHeight; }
     bool  testLabelButtonsIconOnly() const;      // all labelled buttons icon-only?
     int   testLabelButtonCount() const { return int(m_labelButtons.size()); }
+    // 折叠按钮（铆钉）右缘的屏幕 x：收起时它必须与展开时一致（工具岛向左收起，
+    // 按钮不跳）。
+    int   testCollapseButtonRightX() const;
 
 public slots:
     void setCollapsed(bool on);
@@ -181,6 +184,10 @@ private:
     bool   m_dragged  = false;
     QPoint m_dragOffset;
     QPoint m_userPos;
+    // Width of the EXPANDED bar, cached so the collapsed island can keep the
+    // collapse chevron's right edge where the expanded bar's right edge was
+    // (the island folds leftwards under the pin instead of re-centring).
+    int    m_expandedWidth = 0;
 
     // A press anywhere on the island arms a drag, but it only turns into one
     // after the pointer travels startDragDistance(): a tap must keep clicking
