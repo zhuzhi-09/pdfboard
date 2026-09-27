@@ -16,6 +16,8 @@
 #include <QFrame>
 #include <QMouseEvent>
 #include <QGraphicsDropShadowEffect>
+#include <QGraphicsOpacityEffect>
+#include <QPropertyAnimation>
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QPainter>
@@ -929,6 +931,20 @@ void InkToolbar::buildUi()
             [this](const QVariant &value) { applyDrawerWidth(value.toInt()); });
     connect(m_drawerAnim, &QAbstractAnimation::finished, this, &InkToolbar::settleDrawer);
 
+    // 闲置淡出：效果器挂在「岛」自身（不是芯片，也不是窗口）—— 岛是画布的子
+    // 控件，setWindowOpacity() 对子控件无效，所以必须用 QGraphicsOpacityEffect；
+    // 它只改绘制合成，不改几何，因此淡到 0.40 时按钮的命中判定不受任何影响。
+    // 恢复态把效果器关掉（静止不花钱），真正淡出时才打开。
+    m_idleEffect = new QGraphicsOpacityEffect(this);
+    m_idleEffect->setOpacity(1.0);
+    m_idleEffect->setEnabled(false);
+    setGraphicsEffect(m_idleEffect);
+
+    m_idleAnim = new QPropertyAnimation(m_idleEffect, "opacity", this);
+    m_idleAnim->setEasingCurve(QEasingCurve::OutCubic);
+    m_idleAnim->setDuration(kIdleFadeMs);
+    connect(m_idleAnim, &QAbstractAnimation::finished, this, &InkToolbar::settleIdle);
+
     applyButtonStyle();
     refreshIcons();
 }
@@ -1022,6 +1038,91 @@ void InkToolbar::testDrawerAt(int ms)
 QWidget *InkToolbar::testEraserPalette() const
 {
     return m_eraserPalette;
+}
+
+// --- 闲置淡出 -------------------------------------------------------------
+
+bool InkToolbar::hasOpenOverlay() const
+{
+    if (m_palette && m_palette->isVisible())
+        return true;
+    if (m_eraserPalette && m_eraserPalette->isVisible())
+        return true;
+    if (m_pageGrid && m_pageGrid->isOpen())
+        return true;
+    return false;
+}
+
+int InkToolbar::testIdleFadeDurationMs() const
+{
+    return m_idleAnim ? m_idleAnim->duration() : 0;
+}
+
+qreal InkToolbar::testIdleOpacity() const
+{
+    return m_idleEffect ? m_idleEffect->opacity() : 1.0;
+}
+
+bool InkToolbar::testIdleEffectEnabled() const
+{
+    return m_idleEffect && m_idleEffect->isEnabled();
+}
+
+void InkToolbar::setIdleFaded(bool on)
+{
+    if (!m_idleAnim || !m_idleEffect)
+        return;                       // 防御：效果器缺席（正常路径不会发生）
+    if (m_idleFaded == on)
+        return;                       // 目标未变：不重启动画（每次输入都会调它，必须便宜）
+
+    m_idleFaded = on;
+    // 动画期间效果器必须启用；恢复到 1.0 也等落定后再关（见 settleIdle）。
+    m_idleEffect->setEnabled(true);
+    m_idleAnim->stop();
+    m_idleAnim->setDuration(kIdleFadeMs);
+    m_idleAnim->setStartValue(m_idleEffect->opacity());   // 从当前帧出发，可打断
+    m_idleAnim->setEndValue(on ? kIdleOpacity : 1.0);
+    m_idleAnim->start();
+}
+
+void InkToolbar::applyIdleFrame(qreal progress)
+{
+    if (!m_idleEffect || !m_idleAnim)
+        return;
+    const QEasingCurve easing(QEasingCurve::OutCubic);
+    const qreal eased = easing.valueForProgress(qBound<qreal>(0.0, progress, 1.0));
+    const qreal from = m_idleAnim->startValue().toReal();
+    const qreal to   = m_idleAnim->endValue().toReal();
+    m_idleEffect->setOpacity(from + (to - from) * eased);
+}
+
+void InkToolbar::settleIdle()
+{
+    if (m_idleAnim && m_idleAnim->state() != QAbstractAnimation::Stopped)
+        m_idleAnim->stop();
+    if (!m_idleEffect)
+        return;
+    m_idleEffect->setOpacity(m_idleFaded ? kIdleOpacity : 1.0);
+    // 淡出态保持启用（真的在变透明）；恢复态关掉 —— 静止不花合成钱。
+    m_idleEffect->setEnabled(m_idleFaded);
+}
+
+void InkToolbar::testIdleAt(int ms)
+{
+    if (!m_idleAnim || !m_idleEffect)
+        return;   // 没有淡出动画：岛保持原样，钩子无事可做
+
+    const int duration = qMax(1, m_idleAnim->duration());
+    const int at = qBound(0, ms, duration);
+
+    // 停表：动画的计时器不得在断言期间把岛推进（自测不跑事件循环、不 sleep）。
+    if (m_idleAnim->state() != QAbstractAnimation::Stopped)
+        m_idleAnim->pause();
+    m_idleAnim->setCurrentTime(at);
+    applyIdleFrame(qreal(at) / qreal(duration));
+
+    if (at >= duration)
+        settleIdle();   // 与动画自然结束走同一条收尾路径
 }
 
 void InkToolbar::refreshIcons()

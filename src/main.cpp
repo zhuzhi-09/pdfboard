@@ -31,6 +31,7 @@
 #include <QOperatingSystemVersion>
 #include <QPushButton>
 #include <QSlider>
+#include <QStackedWidget>
 #include <QMouseEvent>
 #include <QImageReader>
 #include <QSslSocket>
@@ -522,6 +523,166 @@ static int runSmokeSelfTest(const QString &path)
         window.testForceTransitions(false);
 
         QFile::remove(secondPath);   // best effort; the document may still hold it
+    }
+
+    // --- 工具岛闲置淡出 ---------------------------------------------------------
+    // 口径：5 秒内没有任何用户输入 -> 工具岛淡到「透明度 60%」= 不透明度 0.40；
+    // 任何输入立刻回到「透明度 0%」= 1.0。两段各约 250ms、缓出。
+    // 全部用钩子把定时器 / 动画钉到确定状态：不跑事件循环、不 sleep。
+    {
+        // 落在确定的文档页：走真实标签栏回到 doc 0，并取"当前页那份画布"的工具岛
+        //（多文档时 findChild<PdfCanvas*>() 可能拿到隐藏的那份）。
+        window.resize(1280, 800);
+        if (DocumentTabs *tabs = window.findChild<DocumentTabs *>())
+            tabs->setCurrentIndex(0);
+        QCoreApplication::processEvents();
+
+        QStackedWidget *stack = window.findChild<QStackedWidget *>();
+        PdfCanvas *doc = stack ? qobject_cast<PdfCanvas *>(stack->currentWidget()) : nullptr;
+        InkToolbar *island = doc ? doc->toolbar() : nullptr;
+        check("idle: the current page is a document", doc ? 1 : 0, 1);
+        check("idle: a document toolbar exists", island ? 1 : 0, 1);
+        check("idle: the island is visible", island && island->isVisible() ? 1 : 0, 1);
+
+        if (island) {
+            // 起点：明确是恢复态（不透明度 1.0、效果器关）。
+            island->setIdleFaded(false);
+            island->testIdleAt(island->testIdleFadeDurationMs());
+            check("idle: the resting opacity is 1.0",
+                  qRound(island->testIdleOpacity() * 100.0), 100);
+
+            // (d) 常量本身：超时 5000ms、动画时长实测值、目标不透明度 0.40。
+            out(QStringLiteral("[selftest] 闲置淡出常量：超时 %1 ms | 动画时长 %2 ms | 目标不透明度 %3（透明度 %4%）")
+                    .arg(island->testIdleTimeoutMs())
+                    .arg(island->testIdleFadeDurationMs())
+                    .arg(InkToolbar::kIdleOpacity, 0, 'f', 2)
+                    .arg(qRound((1.0 - InkToolbar::kIdleOpacity) * 100.0)));
+            check("idle: the timeout constant is 5000 ms", island->testIdleTimeoutMs(), 5000);
+            check("idle: the fade animation is 250 ms", island->testIdleFadeDurationMs(), 250);
+            check("idle: the window uses the same timeout constant",
+                  window.testIdleTimerIntervalMs(), InkToolbar::kIdleTimeoutMs);
+            check("idle: the target opacity is 0.40",
+                  qRound(InkToolbar::kIdleOpacity * 100.0), 40);
+
+            // 命中图在淡出前后必须一致（效果器只改绘制，不改 hit-test）。
+            QToolButton *moveBtn = nullptr;
+            for (QToolButton *b : island->findChildren<QToolButton *>())
+                if (b->text() == QStringLiteral("自由移动"))
+                    moveBtn = b;
+            check("idle: the move button is found", moveBtn ? 1 : 0, 1);
+            const QPoint hitPt = moveBtn ? moveBtn->rect().center() : QPoint();
+            QWidget *hitAtRest = moveBtn ? island->childAt(hitPt) : nullptr;
+
+            // (a) 空闲超时 -> 目标 0.40、效果器已启用（成对的上半）。
+            check("idle: no overlay open to start", island->hasOpenOverlay() ? 1 : 0, 0);
+            window.testFireIdleTimeout();
+            check("idle: the timeout targets the faded state",
+                  island->testIdleFaded() ? 1 : 0, 1);
+            island->testIdleAt(island->testIdleFadeDurationMs());
+            check("idle: the timeout fades to opacity 0.40",
+                  qRound(island->testIdleOpacity() * 100.0), 40);
+            check("idle: the opacity effect is enabled while faded",
+                  island->testIdleEffectEnabled() ? 1 : 0, 1);
+            out(QStringLiteral("[selftest] 空闲超时：目标不透明度 %1（透明度 %2%），效果器 %3")
+                    .arg(island->testIdleOpacity(), 0, 'f', 2)
+                    .arg(qRound((1.0 - island->testIdleOpacity()) * 100.0))
+                    .arg(island->testIdleEffectEnabled() ? QStringLiteral("已启用")
+                                                         : QStringLiteral("未启用")));
+
+            // 每一个已打开文档的工具岛都要生效（多文档）。
+            int fadedBars = 0;
+            const QList<InkToolbar *> allBars = window.findChildren<InkToolbar *>();
+            for (InkToolbar *b : allBars)
+                if (b->testIdleFaded())
+                    ++fadedBars;
+            out(QStringLiteral("[selftest] 多文档：%1 个岛中 %2 个淡出")
+                    .arg(allBars.size()).arg(fadedBars));
+            check("idle: every open document's island fades",
+                  fadedBars, window.testDocumentCount());
+
+            // (e) 淡出期间点按钮仍然命中：命中图不变，且按钮真的触发。
+            if (moveBtn) {
+                QWidget *hitFaded = island->childAt(hitPt);
+                out(QStringLiteral("[selftest] 淡出中点按钮：命中控件 %1 -> %2（%3）")
+                        .arg(hitAtRest ? hitAtRest->metaObject()->className() : "null")
+                        .arg(hitFaded ? hitFaded->metaObject()->className() : "null")
+                        .arg(hitFaded == moveBtn ? QStringLiteral("仍是该按钮")
+                                                 : QStringLiteral("不是该按钮")));
+                check("idle: the hit-test is unchanged while faded",
+                      (hitAtRest && hitAtRest == hitFaded) ? 1 : 0, 1);
+                // 真的点一下（合成按下 + 抬起），证明效果器没影响命中判定。
+                const QPointF local(hitPt);
+                const QPointF global(moveBtn->mapToGlobal(hitPt));
+                QMouseEvent press(QEvent::MouseButtonPress, local, global, Qt::LeftButton,
+                                  Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(moveBtn, &press);
+                QMouseEvent release(QEvent::MouseButtonRelease, local, global, Qt::LeftButton,
+                                    Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(moveBtn, &release);
+                check("idle: the button still fires while faded",
+                      doc->tool() == PdfCanvas::InkTool::Move ? 1 : 0, 1);
+                doc->setTool(PdfCanvas::InkTool::Pen);   // 复原工具
+            }
+
+            // (b) 重新淡出，做恢复的成对下半：任意一次输入 -> 回 1.0、定时器重新计时。
+            window.testFireIdleTimeout();
+            island->testIdleAt(island->testIdleFadeDurationMs());
+            check("idle: faded again for the restore pair",
+                  qRound(island->testIdleOpacity() * 100.0), 40);
+            const int armsBefore = window.testIdleArmCount();
+            {
+                // 合成一次鼠标按下 / 抬起，发到窗口 -> 走真实的 QApplication 事件过滤器。
+                const QPointF at(5.0, 5.0);
+                const QPointF global = window.mapToGlobal(at.toPoint());
+                QMouseEvent press(QEvent::MouseButtonPress, at, global, Qt::LeftButton,
+                                  Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(&window, &press);
+                QMouseEvent release(QEvent::MouseButtonRelease, at, global, Qt::LeftButton,
+                                    Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(&window, &release);
+            }
+            check("idle: any input targets the visible state again",
+                  island->testIdleFaded() ? 0 : 1, 1);
+            check("idle: the input restarts the 5 s timer",
+                  window.testIdleArmCount(), armsBefore + 1);
+            check("idle: the timer is running after the input",
+                  window.testIdleTimerActive() ? 1 : 0, 1);
+            island->testIdleAt(island->testIdleFadeDurationMs());
+            check("idle: the input restores opacity to 1.0",
+                  qRound(island->testIdleOpacity() * 100.0), 100);
+            check("idle: the effect is off at rest (cheap)",
+                  island->testIdleEffectEnabled() ? 0 : 1, 1);
+            out(QStringLiteral("[selftest] 输入恢复：不透明度 %1，效果器 %2，定时器 %3，计数 %4->%5")
+                    .arg(island->testIdleOpacity(), 0, 'f', 2)
+                    .arg(island->testIdleEffectEnabled() ? QStringLiteral("启用")
+                                                         : QStringLiteral("关闭"))
+                    .arg(window.testIdleTimerActive() ? QStringLiteral("已重新计时")
+                                                      : QStringLiteral("未计时"))
+                    .arg(armsBefore).arg(window.testIdleArmCount()));
+
+            // (c) 浮层守卫：笔色调板开着时即使超时也不淡出；关掉后超时才会淡出。
+            island->showPenPalette();
+            check("idle: the pen palette is open", island->hasOpenOverlay() ? 1 : 0, 1);
+            window.testFireIdleTimeout();
+            check("idle: no fade while the palette is open",
+                  island->testIdleFaded() ? 0 : 1, 1);
+            check("idle: stays fully opaque while the palette is open",
+                  qRound(island->testIdleOpacity() * 100.0), 100);
+            island->showPenPalette();               // 再点一次收起
+            check("idle: the palette is closed again", island->hasOpenOverlay() ? 0 : 1, 1);
+            window.testFireIdleTimeout();
+            check("idle: fades once the overlay is closed",
+                  island->testIdleFaded() ? 1 : 0, 1);
+            island->testIdleAt(island->testIdleFadeDurationMs());
+            check("idle: and reaches 0.40 after the overlay closes",
+                  qRound(island->testIdleOpacity() * 100.0), 40);
+            out(QStringLiteral("[selftest] 浮层守卫：开着时超时不淡出（不透明度 100）| 关掉后超时淡出到 %1")
+                    .arg(island->testIdleOpacity(), 0, 'f', 2));
+
+            // 收尾：恢复静止态，别把淡出留给后面的断言。
+            island->setIdleFaded(false);
+            island->testIdleAt(island->testIdleFadeDurationMs());
+        }
     }
 
     out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")

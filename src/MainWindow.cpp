@@ -41,6 +41,7 @@
 #include <QLinearGradient>
 #include <QMessageBox>
 #include <QMimeData>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPalette>
 #include <QPixmap>
@@ -594,6 +595,17 @@ MainWindow::MainWindow(QWidget *parent)
     memTimer->start();
     updateMemLabel();
 
+    // 「工具岛闲置淡出」：一个 5 秒单次定时器 + 一个 QApplication 级事件过滤器。
+    // 过滤器挂在应用对象上，所以画布 / 工具岛 / 标签栏 / 状态栏任意位置的输入都会
+    // 经过这里（见 eventFilter / noteUserActivity）。间隔与目标不透明度是工具岛的
+    // 命名常量（单一来源）。
+    m_idleTimer = new QTimer(this);
+    m_idleTimer->setSingleShot(true);
+    m_idleTimer->setInterval(InkToolbar::kIdleTimeoutMs);
+    connect(m_idleTimer, &QTimer::timeout, this, &MainWindow::onIdleTimeout);
+    if (qApp)
+        qApp->installEventFilter(this);
+
     // Size to the work area (excludes the taskbar) so the floating toolbar at
     // the bottom of the viewport is never hidden behind it.
     QScreen *scr = screen();
@@ -645,6 +657,95 @@ PdfCanvas *MainWindow::createCanvas()
         connect(bar, &InkToolbar::fullscreenRequested, this, &MainWindow::onFullscreen);
     }
     return canvas;
+}
+
+// --- 「工具岛闲置淡出」----------------------------------------------------
+//
+// 探测很便宜：一个 QApplication 级事件过滤器，只按事件类型判断"这是不是用户
+// 输入"，命中就恢复所有岛并重启 5 秒单次定时器。每个事件里不做任何重活。
+//
+// 纯 hover（没有按键的鼠标移动）刻意不算动作：教室大屏是触控，鼠标随手一碰 /
+// 微动就会不断刷新计时器，那样工具岛将永远不淡出。按住键的拖动算输入。
+bool MainWindow::eventFilter(QObject *watched, QEvent *event)
+{
+    switch (event->type()) {
+    case QEvent::MouseButtonPress:
+    case QEvent::MouseButtonDblClick:
+    case QEvent::Wheel:
+    case QEvent::KeyPress:
+    case QEvent::TouchBegin:
+    case QEvent::TouchUpdate:
+    case QEvent::TouchEnd:
+    case QEvent::TabletPress:
+    case QEvent::TabletMove:
+    case QEvent::TabletRelease:
+        noteUserActivity();
+        break;
+    case QEvent::MouseMove:
+        // 只有按住键的移动才算"拖动"；空手移动是 hover，按上面的口径排除。
+        if (static_cast<QMouseEvent *>(event)->buttons() != Qt::NoButton)
+            noteUserActivity();
+        break;
+    default:
+        break;
+    }
+    return QMainWindow::eventFilter(watched, event);
+}
+
+void MainWindow::noteUserActivity()
+{
+    // 任何输入立刻恢复：setIdleFaded(false) 对已恢复的岛是空操作，所以循环调用
+    // 很便宜（文档数很小）。然后重新计满 5 秒。
+    for (PdfCanvas *canvas : m_canvases) {
+        if (InkToolbar *bar = canvas->toolbar())
+            bar->setIdleFaded(false);
+    }
+    armIdleTimer();
+}
+
+void MainWindow::armIdleTimer()
+{
+    if (!m_idleTimer)
+        return;
+    if (m_canvases.isEmpty()) {
+        m_idleTimer->stop();   // 没有文档就没有工具岛，不必空转
+        return;
+    }
+    m_idleTimer->start(InkToolbar::kIdleTimeoutMs);   // 单次：每次都重新计时
+    ++m_idleArms;
+}
+
+void MainWindow::onIdleTimeout()
+{
+    bool anyOverlayOpen = false;
+    for (PdfCanvas *canvas : m_canvases) {
+        InkToolbar *bar = canvas->toolbar();
+        if (!bar)
+            continue;
+        if (bar->hasOpenOverlay()) {
+            // 老师正在选颜色 / 翻页：这一轮不淡出，浮层关了之后下一轮再说。
+            anyOverlayOpen = true;
+            continue;
+        }
+        bar->setIdleFaded(true);
+    }
+    if (anyOverlayOpen)
+        m_idleTimer->start(InkToolbar::kIdleTimeoutMs);   // 冻结：稍后再看
+}
+
+void MainWindow::testFireIdleTimeout()
+{
+    onIdleTimeout();          // 与真实 timeout 完全同一条处理路径
+}
+
+bool MainWindow::testIdleTimerActive() const
+{
+    return m_idleTimer && m_idleTimer->isActive();
+}
+
+int MainWindow::testIdleTimerIntervalMs() const
+{
+    return InkToolbar::kIdleTimeoutMs;
 }
 
 void MainWindow::onOpen()
@@ -1100,6 +1201,9 @@ void MainWindow::openPath(const QString &path)
     const int index = int(m_canvases.size()) - 1;
     m_tabs->setCurrentIndex(index);              // emits -> activates the tab
     onTabCurrentChanged(index);                  // idempotent safety net
+
+    // 有工具岛可淡出了：立刻开始计 5 秒（此后每次输入都会重新计时）。
+    armIdleTimer();
 
     if (restoredWorkingCopy)
         statusBar()->showMessage(QStringLiteral("已恢复上次未另存的批注"), 5000);

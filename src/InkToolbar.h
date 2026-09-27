@@ -13,7 +13,9 @@
 class PdfCanvas;
 class QFrame;
 class QGraphicsDropShadowEffect;
+class QGraphicsOpacityEffect;
 class QMouseEvent;
+class QPropertyAnimation;
 class QToolButton;
 class QVariantAnimation;
 class PageGrid;
@@ -107,6 +109,36 @@ public:
     int   testDrawerDurationMs() const;
     void  testDrawerAt(int ms);
 
+    // --- 「工具岛闲置淡出」--------------------------------------------------
+    // 5 秒内没有任何用户输入 -> 工具岛淡到「透明度 60%」= 不透明度 0.40；
+    // 任何输入立刻回到「透明度 0%」= 不透明度 1.0。两段各约 250ms、缓出。
+    // 输入探测与 5 秒计时不在这里：MainWindow 装一个 QApplication 级事件过滤器
+    // 统一探测，命中后对所有文档的工具岛调用 setIdleFaded()（见 MainWindow）。
+    //
+    // 为什么用 QGraphicsOpacityEffect + QPropertyAnimation：工具岛是画布的
+    // 子控件，setWindowOpacity() 只对顶层窗口有效（对子控件无效）。效果器挂在
+    // 岛自身（不是芯片）上，只改绘制合成，不改几何。
+    //
+    // 可调参数（单一来源，主机与自测都从这里取）。调参只改这三行。
+    static constexpr int   kIdleTimeoutMs = 5000;   // 无输入多久后淡出
+    static constexpr int   kIdleFadeMs    = 250;    // 淡出 / 恢复的动画时长
+    static constexpr qreal kIdleOpacity   = 0.40;   // 透明度 60% = 不透明度 0.40
+
+    // 淡出目标状态。同一状态重复调用是空操作（每次输入都会调它，必须便宜）。
+    void setIdleFaded(bool on);
+    // 浮层（笔色调板 / 橡皮大小面板 / 页面缩略图）开着时为 true：那时不淡出，
+    // 老师正在选颜色 / 翻页。
+    bool hasOpenOverlay() const;
+
+    int   testIdleTimeoutMs() const { return kIdleTimeoutMs; }
+    int   testIdleFadeDurationMs() const;
+    qreal testIdleOpacity() const;
+    bool  testIdleEffectEnabled() const;
+    bool  testIdleFaded() const { return m_idleFaded; }
+    // 把淡出动画钉到 [0, 时长] 内的 ms 毫秒处并立即应用该帧 —— 不跑事件循环、
+    // 不 sleep，采样完全确定（与 testDrawerAt 同一套路）。
+    void  testIdleAt(int ms);
+
 public slots:
     void setCollapsed(bool on);
     void toggleCollapsed();
@@ -164,6 +196,10 @@ private:
     // 抽屉动画收尾（自然结束与自测定位到末帧共用）：落位到目标宽、按状态显隐
     // body/分隔线、刷新宽度缓存。
     void settleDrawer();
+    // 闲置淡出：把动画钉到某一帧时显式应用的不透明度，以及收尾（淡出态保持
+    // 效果器启用、恢复态关掉效果器让静止态零开销）。
+    void applyIdleFrame(qreal progress);
+    void settleIdle();
     // 面板定位：锚在 `anchorButton` 上方并钳进页面区域；笔和橡皮共用同一条路径。
     void positionPaletteAbove(QWidget *anchorButton, QWidget *card);
     void hidePalettes();           // 收起两块面板（笔调色板 / 橡皮大小）
@@ -254,4 +290,10 @@ private:
     bool     m_pressArmed = false;
     QPoint   m_pressPos;
     QWidget *m_pressChild = nullptr;
+
+    // 闲置淡出。效果器挂在岛自身（只改绘制，不改 hit-test）；恢复态时把它
+    // 关掉，静止不花钱。m_idleFaded 是目标状态。
+    QGraphicsOpacityEffect *m_idleEffect = nullptr;
+    QPropertyAnimation     *m_idleAnim   = nullptr;
+    bool                    m_idleFaded  = false;
 };

@@ -17,6 +17,7 @@ class QKeyEvent;
 class QLabel;
 class QPushButton;
 class QStackedWidget;
+class QTimer;
 class QVariantAnimation;
 class PageTransitionLayer;   // the frozen-frame overlay (defined in MainWindow.cpp)
 
@@ -60,6 +61,17 @@ public:
     // 无屏自测里强制走动画路径（真实入口在窗口不可见 / WA_DontShowOnScreen 时直接落位）。
     void   testForceTransitions(bool on) { m_transForceAnim = on; }
 
+    // --- 「工具岛闲置淡出」自测钩子 -----------------------------------------
+    // 把 5 秒单次定时器直接推进到"到点"这一次确定状态：调用与真实 timeout
+    // 完全同一条处理路径，不 sleep、不跑够毫秒。输入探测走真实的 QApplication
+    // 事件过滤器（自测发合成事件即可触发）。
+    void testFireIdleTimeout();
+    bool testIdleTimerActive() const;
+    int  testIdleTimerIntervalMs() const;
+    // 每次真正 start() 5 秒计时就 +1：输入前后比较它，可确定地断言"输入确实重新计时"
+    //（不靠真实毫秒数）。
+    int  testIdleArmCount() const { return m_idleArms; }
+
     // 当前页 / 文档接线，供动画断言核对"落到哪一页、状态栏跟的是谁"。
     int   testStackPageKind() const;          // 0 主页 / 1 设置 / 2 文档 / -1 无
     int   testDocumentCount() const { return int(m_canvases.size()); }
@@ -80,6 +92,9 @@ protected:
     // Closing the window asks about every dirty document; a single 取消
     // aborts the whole close.
     void closeEvent(QCloseEvent *event) override;
+    // QApplication 级事件过滤器：只按事件类型探测"用户是否有输入"，命中就重置
+    // 5 秒单次定时器（见 noteUserActivity）。每个事件里不做重活。
+    bool eventFilter(QObject *watched, QEvent *event) override;
 
 private slots:
     void onOpen();
@@ -174,6 +189,13 @@ private:
     void       promptUpdate(const UpdateChecker::UpdateInfo &info);
     void       openUpdateSettings();        // settings page, update card in view
 
+    // --- 「工具岛闲置淡出」（5 秒无输入 -> 透明度 60%）------------------------
+    // 输入探测只有一条路径：QApplication 级事件过滤器按事件类型判定，命中就调
+    // noteUserActivity()（恢复所有岛 + 重新计时）。计时是单个 5 秒单次定时器。
+    void       noteUserActivity();   // 任何输入：恢复所有岛 + 重新计时
+    void       armIdleTimer();       // 重启 5 秒单次计时（无文档则停表）
+    void       onIdleTimeout();      // 到点：把所有未开浮层的岛淡到 0.40
+
     QStackedWidget *m_stack = nullptr;      // one PdfCanvas per open document
     DocumentTabs   *m_tabs  = nullptr;      // the docked strip under the pages
 
@@ -215,6 +237,10 @@ private:
     UpdateChecker::Client *m_updateClient = nullptr;
     QString                m_updateAnnouncedVersion;  // per session
     qint64                 m_lastUpdateCheckMs = 0;   // throttles file-open checks
+
+    // 「工具岛闲置淡出」：单个 5 秒单次定时器，任何输入都重启它（见 noteUserActivity）。
+    QTimer                *m_idleTimer = nullptr;
+    int                    m_idleArms  = 0;   // 计时真正被 start() 的次数（自测观察用）
 
     // The page-switch transition. ONE driver for every switch; the two frozen
     // frames are the only transient memory (see the comment on
