@@ -135,25 +135,21 @@ private:
     QPlainTextEdit *m_updateNotes  = nullptr;   // release notes (changelog)
     QFrame         *m_updateCard   = nullptr;   // brought into view on demand
     QPushButton  *m_updateGh       = nullptr;
-    QPushButton  *m_updateMirror   = nullptr;
     QPushButton  *m_updateSite     = nullptr;
     QPushButton  *m_updatePortableGh     = nullptr;
-    QPushButton  *m_updatePortableMirror = nullptr;
 
-    // Last successful check per channel (0 = GitHub, 1 = fallback server): only
-    // the fields the panel needs, so no request is repeated.
-    QString m_updateSetupUrl[2];
-    QString m_updateSetupSha[2];
-    QString m_updatePortableUrl[2];
-    QString m_updatePageUrl[2];
-    bool    m_updateChecked[2] = { false, false };
+    // Last successful GitHub check (there is only one source now): only the fields
+    // the panel needs, so no request is repeated.
+    QString m_updateSetupUrl;
+    QString m_updateSetupSha;
+    QString m_updatePortableUrl;
+    QString m_updatePageUrl;
+    bool    m_updateChecked = false;
     bool    m_updateChecking = false;
     bool    m_updateCheckForInstall = false;
-    int     m_updateCheckChannel = 0;
-    int     m_updateQueuedChannel = -1;
     bool    m_updateDownloading = false;
     bool    m_updateHelperFailed = false;
-    QString m_updateOnline[2];      // version each channel last announced
+    QString m_updateOnline;      // version the last check announced
 
 private slots:
     void onUpdateChecked(const UpdateChecker::UpdateInfo &info);
@@ -164,14 +160,14 @@ private slots:
     void onUpdateSetupUnverified(const QString &pageUrl);
 
 private:
-    void beginUpdateInstall(int channel);
-    void startUpdateCheck(int channel, bool forInstall);
-    void startUpdateDownload(int channel);
+    void beginUpdateInstall();
+    void startUpdateCheck(bool forInstall);
+    void startUpdateDownload();
     void finishUpdateBusy();
     void setUpdateState(const QString &text);
     void setUpdateNotes(const QString &notes);
     void refreshUpdateVersionLine();
-    void openPortablePage(int channel);
+    void openPortablePage();
 
     int           m_maxColumn = 0;
 };

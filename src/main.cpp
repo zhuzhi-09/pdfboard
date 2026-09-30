@@ -2486,8 +2486,8 @@ static int runDocxSelfTest()
 }
 
 // Headless self test:  pdfboard.exe --selftest-update
-// No network: the channel payloads are parsed from fixtures, so the numeric
-// version comparison and both parsers can be locked without a server.
+// No network: the GitHub payload is parsed from a fixture, so the numeric version
+// comparison and the parser can be locked without a server.
 static int runUpdateSelfTest()
 {
     int failed = 0;
@@ -2515,37 +2515,6 @@ static int runUpdateSelfTest()
                                                       QStringLiteral("1.4.1")), -1);
     check("version: padded equal", compareVersion(QStringLiteral("1.4.0"),
                                                   QStringLiteral("1.4")), 0);
-
-    // The accelerator URL form: every public gh-proxy takes "<base>/<absolute url>",
-    // and no base is ever invented for a URL that already carries a host.
-    check("accel: prefixes the absolute url",
-          UpdateChecker::acceleratedUrl(
-              QStringLiteral("https://gh-proxy.com"),
-              QStringLiteral("https://github.com/o/r/releases/download/v1/x.exe"))
-                  == QStringLiteral("https://gh-proxy.com/https://github.com/o/r/releases/download/v1/x.exe")
-              ? 1 : 0, 1);
-    check("accel: tolerates a trailing slash",
-          UpdateChecker::acceleratedUrl(QStringLiteral("https://gh-proxy.org/"),
-                                        QStringLiteral("https://api.github.com/x"))
-                  == QStringLiteral("https://gh-proxy.org/https://api.github.com/x") ? 1 : 0, 1);
-    check("accel: empty input is empty",
-          (UpdateChecker::acceleratedUrl(QString(), QStringLiteral("https://x/y")).isEmpty()
-           && UpdateChecker::acceleratedUrl(QStringLiteral("https://h"), QString()).isEmpty())
-              ? 1 : 0, 1);
-
-    // The hash gate. Two spellings of one digest agree; a missing digest never agrees
-    // with anything - otherwise a proxy that simply drops the field would switch
-    // verification off.
-    check("digest: prefix and case ignored",
-          UpdateChecker::digestsAgree(QStringLiteral("sha256:AABBCC"),
-                                      QStringLiteral("aabbcc")) ? 1 : 0, 1);
-    check("digest: different hashes disagree",
-          UpdateChecker::digestsAgree(QStringLiteral("aabbcc"),
-                                      QStringLiteral("aabbcd")) ? 0 : 1, 1);
-    check("digest: empty never agrees",
-          UpdateChecker::digestsAgree(QString(), QStringLiteral("aabbcc")) ? 0 : 1, 1);
-    check("digest: two empties never agree",
-          UpdateChecker::digestsAgree(QString(), QString()) ? 0 : 1, 1);
 
     const QByteArray ghWithDigest = QByteArrayLiteral(R"({
         "tag_name":"v1.5.0","body":"notes","html_url":"https://github.com/r/rel",
@@ -3942,8 +3911,10 @@ int main(int argc, char **argv)
     // not at init).
     QCoreApplication::setAttribute(Qt::AA_CompressHighFrequencyEvents, false);
     // School networks often only reach the internet through a proxy the OS is
-    // configured with. Qt does not use it unless asked, which would make every
-    // update check fail on exactly the machines that need the accelerator.
+    // configured with. Qt does not use it unless asked - and since the update
+    // check now talks to GitHub only (no third-party accelerator, see 2.75 in
+    // docs/03), honouring the system proxy is the ONLY fallback left: without it a
+    // classroom machine that needs a proxy would fail every update check silently.
     QNetworkProxyFactory::setUseSystemConfiguration(true);
 
     // Record which app-local runtime the package shipped: startup.log then names the exact CRT

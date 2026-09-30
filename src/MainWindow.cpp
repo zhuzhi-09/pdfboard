@@ -916,7 +916,7 @@ void MainWindow::checkForUpdates(bool fromFileOpen)
         return;
     m_lastUpdateCheckMs = now;
     AppSettings::setLastUpdateCheckMs(now, nullptr);
-    m_updateClient->check(UpdateChecker::Channel::GitHub);
+    m_updateClient->check();
 }
 
 // "发现新版本" conversation. The changelog is right here, and accepting goes to the

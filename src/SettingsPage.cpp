@@ -59,6 +59,12 @@ const char *kMitLicenseText =
     "OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE "
     "SOFTWARE.";
 
+// The GitHub release page a human opens from the update card. GitHub is the only
+// source now (see 2.75 in docs/03): no third-party accelerator, no asset direct
+// link - "用浏览器下载安装包" always lands here.
+const char *kReleasesLatest =
+    "https://github.com/zhuzhi-09/pdfboard/releases/latest";
+
 // 关于 shows the version baked into the executable's own version resource
 // (assets/app.rc), so the installer, the file properties and this page can
 // never disagree about what is running.
@@ -864,15 +870,10 @@ void SettingsPage::buildUi()
         ButtonRow installButtons = makeButtonRow(buttonsRow, font());
         m_updateGh = addRowButton(installButtons, font(),
                                   QStringLiteral("GitHub 下载并安装"), RowButton::Primary);
-        m_updateMirror = addRowButton(installButtons, font(),
-                                      QStringLiteral("加速通道 下载并安装"));
-        m_updateMirror->setToolTip(QStringLiteral(
-            "经公共 GitHub 加速通道下载（教室网络通常打不开 github.com）；"
-            "安装包仍会做 sha256 校验"));
         m_updateSite = addRowButton(installButtons, font(),
                                     QStringLiteral("用浏览器下载安装包"));
         m_updateSite->setToolTip(QStringLiteral(
-            "交给浏览器通过加速通道下载，适合软件内下载失败时"));
+            "打开 GitHub 的 releases/latest 页面，适合软件内下载失败时"));
         buttonsLayout->addWidget(installButtons.box, 0, Qt::AlignVCenter);
         buttonsLayout->addStretch(1);
         update.col->addWidget(buttonsRow);
@@ -881,8 +882,6 @@ void SettingsPage::buildUi()
     {
         ButtonRow portable = makeButtonRow(update.frame, font());
         m_updatePortableGh = addRowButton(portable, font(), QStringLiteral("GitHub 便携版"));
-        m_updatePortableMirror =
-            addRowButton(portable, font(), QStringLiteral("加速通道便携版"));
         update.col->addWidget(makeTextRow(
             update.frame, QStringLiteral("便携版"),
             QStringLiteral("压缩包交给浏览器下载，解压后覆盖即可，不运行安装程序。"),
@@ -931,25 +930,20 @@ void SettingsPage::buildUi()
     connect(m_updateClient, &UpdateChecker::Client::setupReady, this, &SettingsPage::onUpdateSetupReady);
     connect(m_updateClient, &UpdateChecker::Client::setupUnverified, this,
             &SettingsPage::onUpdateSetupUnverified);
-    connect(m_updateGh, &QPushButton::clicked, this, [this] { beginUpdateInstall(0); });
-    connect(m_updateMirror, &QPushButton::clicked, this, [this] { beginUpdateInstall(1); });
+    connect(m_updateGh, &QPushButton::clicked, this, [this] { beginUpdateInstall(); });
     connect(m_updateSite, &QPushButton::clicked, this, [this] {
-        // A gh-proxy answers 403 for HTML pages, so "open it in the browser" hands
-        // over the ASSET link: the browser then downloads through the accelerator.
-        QString url = m_updatePageUrl[1];
-        if (url.isEmpty())
-            url = QStringLiteral("https://github.com/zhuzhi-09/pdfboard/releases/latest");
-        UpdateChecker::Client::openInBrowser(url);
+        // The browser gets GitHub's releases/latest page - never an asset direct
+        // link and never a third-party proxy.
+        UpdateChecker::Client::openInBrowser(QString::fromLatin1(kReleasesLatest));
     });
-    connect(m_updatePortableGh, &QPushButton::clicked, this, [this] { openPortablePage(0); });
-    connect(m_updatePortableMirror, &QPushButton::clicked, this, [this] { openPortablePage(1); });
+    connect(m_updatePortableGh, &QPushButton::clicked, this, [this] { openPortablePage(); });
 
     if (!UpdateChecker::isInstalledCopy()) {
         // A portable copy is updated by replacing files; running a setup would
         // install a second, unrelated copy.
-        for (QPushButton *button : { m_updateGh, m_updateMirror }) {
-            button->setEnabled(false);
-            button->setToolTip(QStringLiteral("便携版：请用下面的便携版链接覆盖更新"));
+        if (m_updateGh) {
+            m_updateGh->setEnabled(false);
+            m_updateGh->setToolTip(QStringLiteral("便携版：请用下面的便携版链接覆盖更新"));
         }
         m_updateNote->setText(QStringLiteral("便携版：请用下面的便携版链接下载后覆盖，无需安装。"));
     } else {
@@ -964,7 +958,7 @@ void SettingsPage::buildUi()
         const qint64 now = QDateTime::currentMSecsSinceEpoch();
         if (last <= 0 || now - last > qint64(24 * 60 * 60 * 1000)) {
             AppSettings::setLastUpdateCheckMs(now, nullptr);
-            startUpdateCheck(0, false);
+            startUpdateCheck(false);
         }
     }
 
@@ -1109,13 +1103,12 @@ void SettingsPage::setUpdateInfo(const UpdateChecker::UpdateInfo &info)
     if (!info.valid)
         return;
     if (!info.version.isEmpty()) {
-        const int channel = 0;                     // GitHub is the primary source
-        m_updateChecked[channel] = true;
-        m_updateSetupUrl[channel] = info.setupUrl;
-        m_updateSetupSha[channel] = info.setupSha256;
-        m_updatePortableUrl[channel] = info.portableUrl;
-        m_updatePageUrl[channel] = info.pageUrl;
-        m_updateOnline[channel] = info.version;
+        m_updateChecked = true;
+        m_updateSetupUrl = info.setupUrl;
+        m_updateSetupSha = info.setupSha256;
+        m_updatePortableUrl = info.portableUrl;
+        m_updatePageUrl = info.pageUrl;
+        m_updateOnline = info.version;
         refreshUpdateVersionLine();
     }
     setUpdateNotes(info.notes);
@@ -1153,8 +1146,8 @@ void SettingsPage::refreshUpdateVersionLine()
     if (!m_updateVersion)
         return;
     QString text = QStringLiteral("当前版本 %1").arg(UpdateChecker::currentVersion());
-    if (!m_updateOnline[0].isEmpty())
-        text += QStringLiteral(" · 线上最新 %1").arg(m_updateOnline[0]);
+    if (!m_updateOnline.isEmpty())
+        text += QStringLiteral(" · 线上最新 %1").arg(m_updateOnline);
     m_updateVersion->setText(text);
 }
 
@@ -1168,20 +1161,15 @@ void SettingsPage::finishUpdateBusy()
         m_updateProgress->setRange(0, 100);
         m_updateProgress->setValue(0);
     }
-    if (UpdateChecker::isInstalledCopy()) {
-        if (m_updateGh)
-            m_updateGh->setEnabled(true);
-        if (m_updateMirror)
-            m_updateMirror->setEnabled(true);
-    }
+    if (UpdateChecker::isInstalledCopy() && m_updateGh)
+        m_updateGh->setEnabled(true);
 }
 
-void SettingsPage::startUpdateCheck(int channel, bool forInstall)
+void SettingsPage::startUpdateCheck(bool forInstall)
 {
     if (!m_updateClient)
         return;
     m_updateChecking = true;
-    m_updateCheckChannel = channel;
     m_updateCheckForInstall = forInstall;
     if (forInstall) {
         setUpdateState(QStringLiteral("正在检查更新…"));
@@ -1189,35 +1177,28 @@ void SettingsPage::startUpdateCheck(int channel, bool forInstall)
             m_updateProgress->setRange(0, 0);        // indeterminate while checking
             m_updateProgress->setVisible(true);
         }
-        if (UpdateChecker::isInstalledCopy()) {
-            if (m_updateGh)
-                m_updateGh->setEnabled(false);
-            if (m_updateMirror)
-                m_updateMirror->setEnabled(false);
-        }
+        if (UpdateChecker::isInstalledCopy() && m_updateGh)
+            m_updateGh->setEnabled(false);
     }
-    m_updateClient->check(static_cast<UpdateChecker::Channel>(channel));
+    m_updateClient->check();
 }
 
-void SettingsPage::beginUpdateInstall(int channel)
+void SettingsPage::beginUpdateInstall()
 {
     if (m_updateDownloading || !m_updateClient)
         return;
-    if (m_updateChecked[channel]) {
-        startUpdateDownload(channel);
+    if (m_updateChecked) {
+        startUpdateDownload();
         return;
     }
     if (m_updateChecking) {
-        if (m_updateCheckChannel == channel)
-            m_updateCheckForInstall = true;          // upgrade the quiet check
-        else
-            m_updateQueuedChannel = channel;         // run once this one finishes
+        m_updateCheckForInstall = true;              // upgrade the quiet check
         return;
     }
-    startUpdateCheck(channel, true);
+    startUpdateCheck(true);
 }
 
-void SettingsPage::startUpdateDownload(int channel)
+void SettingsPage::startUpdateDownload()
 {
     m_updateChecking = false;
     m_updateCheckForInstall = false;
@@ -1229,44 +1210,37 @@ void SettingsPage::startUpdateDownload(int channel)
     }
     UpdateChecker::UpdateInfo info;
     info.valid = true;
-    info.version = m_updateOnline[channel];
-    info.setupUrl = m_updateSetupUrl[channel];
-    info.setupSha256 = m_updateSetupSha[channel];
-    info.pageUrl = m_updatePageUrl[channel];
-    m_updateClient->downloadSetup(static_cast<UpdateChecker::Channel>(channel), info);
+    info.version = m_updateOnline;
+    info.setupUrl = m_updateSetupUrl;
+    info.setupSha256 = m_updateSetupSha;
+    info.pageUrl = m_updatePageUrl;
+    m_updateClient->downloadSetup(info);
 }
 
 void SettingsPage::onUpdateChecked(const UpdateChecker::UpdateInfo &info)
 {
-    const int channel = m_updateCheckChannel;
     const bool forInstall = m_updateCheckForInstall;
     m_updateChecking = false;
     m_updateCheckForInstall = false;
 
     if (info.valid) {
-        m_updateChecked[channel] = true;
-        m_updateSetupUrl[channel] = info.setupUrl;
-        m_updateSetupSha[channel] = info.setupSha256;
-        m_updatePortableUrl[channel] = info.portableUrl;
-        m_updatePageUrl[channel] = info.pageUrl;
-        m_updateOnline[channel] = info.version;
+        m_updateChecked = true;
+        m_updateSetupUrl = info.setupUrl;
+        m_updateSetupSha = info.setupSha256;
+        m_updatePortableUrl = info.portableUrl;
+        m_updatePageUrl = info.pageUrl;
+        m_updateOnline = info.version;
         if (!info.version.isEmpty())
             refreshUpdateVersionLine();
     }
 
     if (forInstall) {
         if (info.valid) {
-            startUpdateDownload(channel);
+            startUpdateDownload();
             return;                                  // the download owns the busy state
         }
         finishUpdateBusy();
         setUpdateState(QStringLiteral("检查更新失败，请稍后再试。"));
-    }
-
-    if (m_updateQueuedChannel >= 0 && !m_updateDownloading) {
-        const int queued = m_updateQueuedChannel;
-        m_updateQueuedChannel = -1;
-        startUpdateCheck(queued, true);
     }
 }
 
@@ -1284,11 +1258,6 @@ void SettingsPage::onUpdateFailed(const QString &reason)
         if (forInstall) {
             finishUpdateBusy();
             setUpdateState(QStringLiteral("更新失败：%1").arg(reason));
-        }
-        if (m_updateQueuedChannel >= 0) {
-            const int queued = m_updateQueuedChannel;
-            m_updateQueuedChannel = -1;
-            startUpdateCheck(queued, true);
         }
         return;
     }
@@ -1331,20 +1300,17 @@ void SettingsPage::onUpdateSetupReady(const QString &path)
 void SettingsPage::onUpdateSetupUnverified(const QString &pageUrl)
 {
     finishUpdateBusy();
-    setUpdateState(QStringLiteral("该渠道未提供校验值，已改为打开下载页"));
+    setUpdateState(QStringLiteral("该来源未提供校验值，已改为打开下载页"));
     UpdateChecker::Client::openInBrowser(pageUrl);
 }
 
-void SettingsPage::openPortablePage(int channel)
+void SettingsPage::openPortablePage()
 {
-    QString url = m_updatePortableUrl[channel];
-    if (url.isEmpty()) {
-        url = channel == 0
-                  ? (m_updatePageUrl[0].isEmpty()
-                         ? QStringLiteral("https://github.com/zhuzhi-09/pdfboard/releases/latest")
-                         : m_updatePageUrl[0])
-                  : QStringLiteral("https://github.com/zhuzhi-09/pdfboard/releases/latest");
-    }
+    QString url = m_updatePortableUrl;
+    if (url.isEmpty())
+        url = m_updatePageUrl;
+    if (url.isEmpty())
+        url = QString::fromLatin1(kReleasesLatest);
     UpdateChecker::Client::openInBrowser(url);
 }
 
