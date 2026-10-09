@@ -1,9 +1,11 @@
 #pragma once
 
 #include <QColor>
+#include <QEasingCurve>
 #include <QFont>
 #include <QFontMetricsF>
 #include <QGuiApplication>
+#include <QPointF>
 #include <QString>
 #include <QStyleHints>
 #include <QtGlobal>
@@ -25,12 +27,56 @@ namespace Theme {
 // Palette
 // ---------------------------------------------------------------------------
 
+// Material Design 3 colour roles plus the legacy names the chrome was written
+// against. The roles are the source of truth; every legacy field is DERIVED
+// from them in finishPalette(), so a call site that still says `accent` or
+// `surfaceHover` already paints with the MD3 scheme.
+//
+// The two schemes are the MD3 "fidelity" variant (spec 2021) generated with
+// material-color-utilities from the brand seed #1A73E8: fidelity keeps the
+// seed's chroma, so the primary stays a clear blue on a washed-out classroom
+// projector instead of the greyish blue the tonal-spot variant produces.
 struct Palette {
+    // ---- MD3 colour roles -------------------------------------------------
+    QColor primary;
+    QColor onPrimary;
+    QColor primaryContainer;
+    QColor onPrimaryContainer;
+    QColor secondary;
+    QColor onSecondary;
+    QColor secondaryContainer;      // active indicator, tonal buttons, selected chips
+    QColor onSecondaryContainer;
+    QColor tertiary;
+    QColor onTertiary;
+    QColor tertiaryContainer;
+    QColor onTertiaryContainer;
+    QColor error;
+    QColor onError;
+    QColor errorContainer;
+    QColor onErrorContainer;
+
+    QColor surfaceDim;
+    QColor surfaceBright;
+    QColor surfaceContainerLowest;
+    QColor surfaceContainerLow;
+    QColor surfaceContainer;
+    QColor surfaceContainerHigh;
+    QColor surfaceContainerHighest;
+    QColor onSurface;
+    QColor onSurfaceVariant;
+    QColor outline;
+    QColor outlineVariant;
+    QColor inverseSurface;
+    QColor inverseOnSurface;
+    QColor inversePrimary;
+    QColor scrim;
+
+    // ---- Legacy names (derived, see finishPalette) ------------------------
     // Brand / selection.
-    QColor accent;
-    QColor accentHover;
-    QColor accentSoft;      // translucent accent wash
-    QColor onAccent;        // icon + text drawn on top of the accent
+    QColor accent;          // = primary
+    QColor accentHover;     // = primary + onPrimary hover layer
+    QColor accentSoft;      // translucent primary wash (selection, focus ring)
+    QColor onAccent;        // = onPrimary
 
     // Canvas ("paper on a desk").
     QColor desk;            // the flat plane the pages rest on
@@ -40,77 +86,166 @@ struct Palette {
     QColor pageShadow;      // base colour; the alpha comes from PageShadow
 
     // Floating chrome.
-    QColor surface;
-    QColor surfaceEdge;
-    QColor surfaceHover;
-    QColor surfacePressed;
-    QColor chipTint;        // inset pill (page counter, status chips)
+    QColor surface;         // the container colour of floating chrome
+    QColor surfaceEdge;     // = outlineVariant
+    QColor surfaceHover;    // onSurface hover state layer (8 %)
+    QColor surfacePressed;  // onSurface pressed state layer (10 %)
+    QColor chipTint;        // inset pill (page counter, status chips, off tracks)
 
     // Text.
-    QColor text;
-    QColor textMuted;
-    QColor textDisabled;
-    QColor divider;
+    QColor text;            // = onSurface
+    QColor textMuted;       // = onSurfaceVariant
+    QColor textDisabled;    // onSurface at 38 %
+    QColor divider;         // = outlineVariant
 
     // Drop shadow of the floating chrome.
     QColor shadow;
 };
 
+// ---------------------------------------------------------------------------
+// State layers
+// ---------------------------------------------------------------------------
+
+// MD3 state-layer opacities: an interactive element shows its state by laying
+// its CONTENT colour over its container at this opacity.
+namespace State {
+constexpr qreal Hover             = 0.08;
+constexpr qreal Focus             = 0.10;
+constexpr qreal Pressed           = 0.10;
+constexpr qreal Dragged           = 0.16;
+constexpr qreal DisabledContent   = 0.38;
+constexpr qreal DisabledContainer = 0.12;
+}   // namespace State
+
+// `c` with its alpha replaced by `opacity` (0..1).
+inline QColor withAlpha(QColor c, qreal opacity)
+{
+    c.setAlphaF(float(qBound<qreal>(0.0, opacity, 1.0)));
+    return c;
+}
+
+// `layer` composited over the opaque `base` at `opacity`: the flattened colour
+// of a container under a state layer. Opaque, so it is cheap to paint and can
+// be used where a translucent fill would let the page show through.
+inline QColor stateLayer(const QColor &base, const QColor &layer, qreal opacity)
+{
+    const qreal a = qBound<qreal>(0.0, opacity, 1.0);
+    return QColor::fromRgbF(float(base.redF()   * (1.0 - a) + layer.redF()   * a),
+                            float(base.greenF() * (1.0 - a) + layer.greenF() * a),
+                            float(base.blueF()  * (1.0 - a) + layer.blueF()  * a),
+                            base.alphaF());
+}
+
+// Fills every legacy field from the MD3 roles. `dark` only picks the
+// scheme-specific desk / chrome container steps.
+inline void finishPalette(Palette &c, bool dark)
+{
+    c.accent      = c.primary;
+    c.accentHover = stateLayer(c.primary, c.onPrimary, State::Hover);
+    c.accentSoft  = withAlpha(c.primary, dark ? 0.18 : 0.12);
+    c.onAccent    = c.onPrimary;
+
+    // The desk is a mid container step; floating chrome sits one step brighter
+    // (light) or higher (dark) so it reads as a separate surface without
+    // relying on a heavy shadow - MD3 expresses elevation with tone.
+    c.desk      = dark ? c.surfaceDim             : c.surfaceContainer;
+    c.deskShade = dark ? c.surfaceContainerLowest : c.surfaceContainerHighest;
+    c.surface   = dark ? c.surfaceContainerHigh   : c.surfaceContainerLow;
+
+    c.paper      = QColor(0xFF, 0xFF, 0xFF);   // pages stay paper white in both modes
+    c.pageEdge   = dark ? c.outlineVariant : withAlpha(c.onSurface, 0.14);
+    c.pageShadow = QColor(0x00, 0x00, 0x00);
+
+    c.surfaceEdge    = c.outlineVariant;
+    c.surfaceHover   = withAlpha(c.onSurface, State::Hover);
+    c.surfacePressed = withAlpha(c.onSurface, State::Pressed);
+    c.chipTint       = c.surfaceContainerHighest;
+
+    c.text         = c.onSurface;
+    c.textMuted    = c.onSurfaceVariant;
+    c.textDisabled = withAlpha(c.onSurface, State::DisabledContent);
+    c.divider      = c.outlineVariant;
+
+    c.shadow = QColor(0x00, 0x00, 0x00);
+}
+
 inline Palette makeLightPalette()
 {
     Palette c;
-    c.accent         = QColor(0x1A, 0x73, 0xE8);
-    c.accentHover    = QColor(0x15, 0x63, 0xC8);
-    c.accentSoft     = QColor(0x1A, 0x73, 0xE8, 0x22);
-    c.onAccent       = QColor(0xFF, 0xFF, 0xFF);
+    c.primary                 = QColor(0x00, 0x5B, 0xBF);
+    c.onPrimary               = QColor(0xFF, 0xFF, 0xFF);
+    c.primaryContainer        = QColor(0x1A, 0x73, 0xE8);
+    c.onPrimaryContainer      = QColor(0xFF, 0xFF, 0xFF);
+    c.secondary               = QColor(0x47, 0x5E, 0x8C);
+    c.onSecondary             = QColor(0xFF, 0xFF, 0xFF);
+    c.secondaryContainer      = QColor(0xB2, 0xC9, 0xFE);
+    c.onSecondaryContainer    = QColor(0x3D, 0x54, 0x81);
+    c.tertiary                = QColor(0x9E, 0x43, 0x00);
+    c.onTertiary              = QColor(0xFF, 0xFF, 0xFF);
+    c.tertiaryContainer       = QColor(0xC5, 0x55, 0x00);
+    c.onTertiaryContainer     = QColor(0x0E, 0x02, 0x00);
+    c.error                   = QColor(0xBA, 0x1A, 0x1A);
+    c.onError                 = QColor(0xFF, 0xFF, 0xFF);
+    c.errorContainer          = QColor(0xFF, 0xDA, 0xD6);
+    c.onErrorContainer        = QColor(0x93, 0x00, 0x0A);
 
-    c.desk           = QColor(0xEB, 0xED, 0xF2);
-    c.deskShade      = QColor(0xDF, 0xE3, 0xEA);
-    c.paper          = QColor(0xFF, 0xFF, 0xFF);
-    c.pageEdge       = QColor(0x10, 0x18, 0x28, 0x24);
-    c.pageShadow     = QColor(0x10, 0x18, 0x28);
+    c.surfaceDim              = QColor(0xD8, 0xD9, 0xE3);
+    c.surfaceBright           = QColor(0xF9, 0xF9, 0xFF);
+    c.surfaceContainerLowest  = QColor(0xFF, 0xFF, 0xFF);
+    c.surfaceContainerLow     = QColor(0xF2, 0xF3, 0xFD);
+    c.surfaceContainer        = QColor(0xEC, 0xED, 0xF7);
+    c.surfaceContainerHigh    = QColor(0xE6, 0xE8, 0xF2);
+    c.surfaceContainerHighest = QColor(0xE0, 0xE2, 0xEC);
+    c.onSurface               = QColor(0x19, 0x1C, 0x23);
+    c.onSurfaceVariant        = QColor(0x41, 0x47, 0x54);
+    c.outline                 = QColor(0x72, 0x77, 0x85);
+    c.outlineVariant          = QColor(0xC1, 0xC6, 0xD6);
+    c.inverseSurface          = QColor(0x2D, 0x30, 0x38);
+    c.inverseOnSurface        = QColor(0xEF, 0xF0, 0xFA);
+    c.inversePrimary          = QColor(0xAD, 0xC7, 0xFF);
+    c.scrim                   = QColor(0x00, 0x00, 0x00);
 
-    c.surface        = QColor(0xFC, 0xFC, 0xFD);
-    c.surfaceEdge    = QColor(0x10, 0x18, 0x28, 0x20);
-    c.surfaceHover   = QColor(0x10, 0x18, 0x28, 0x14);
-    c.surfacePressed = QColor(0x10, 0x18, 0x28, 0x26);
-    c.chipTint       = QColor(0x10, 0x18, 0x28, 0x0F);
-
-    c.text           = QColor(0x1F, 0x24, 0x30);
-    c.textMuted      = QColor(0x5C, 0x66, 0x75);
-    c.textDisabled   = QColor(0x1F, 0x24, 0x30, 0x48);
-    c.divider        = QColor(0x10, 0x18, 0x28, 0x18);
-
-    c.shadow         = QColor(0x10, 0x18, 0x28);
+    finishPalette(c, false);
     return c;
 }
 
 inline Palette makeDarkPalette()
 {
     Palette c;
-    c.accent         = QColor(0x4C, 0x95, 0xFF);
-    c.accentHover    = QColor(0x6B, 0xA8, 0xFF);
-    c.accentSoft     = QColor(0x4C, 0x95, 0xFF, 0x2E);
-    c.onAccent       = QColor(0xFF, 0xFF, 0xFF);
+    c.primary                 = QColor(0xAD, 0xC7, 0xFF);
+    c.onPrimary               = QColor(0x00, 0x2E, 0x68);
+    c.primaryContainer        = QColor(0x1A, 0x73, 0xE8);
+    c.onPrimaryContainer      = QColor(0xFF, 0xFF, 0xFF);
+    c.secondary               = QColor(0xAF, 0xC7, 0xFB);
+    c.onSecondary             = QColor(0x15, 0x30, 0x5B);
+    c.secondaryContainer      = QColor(0x2E, 0x46, 0x73);
+    c.onSecondaryContainer    = QColor(0xD6, 0xE2, 0xFF);   // lifted from 9EB5E8 for projector contrast
+    c.tertiary                = QColor(0xFF, 0xB6, 0x91);
+    c.onTertiary              = QColor(0x55, 0x21, 0x00);
+    c.tertiaryContainer       = QColor(0xC5, 0x55, 0x00);
+    c.onTertiaryContainer     = QColor(0x0E, 0x02, 0x00);
+    c.error                   = QColor(0xFF, 0xB4, 0xAB);
+    c.onError                 = QColor(0x69, 0x00, 0x05);
+    c.errorContainer          = QColor(0x93, 0x00, 0x0A);
+    c.onErrorContainer        = QColor(0xFF, 0xDA, 0xD6);
 
-    c.desk           = QColor(0x1B, 0x1B, 0x1F);
-    c.deskShade      = QColor(0x14, 0x14, 0x17);
-    c.paper          = QColor(0xFF, 0xFF, 0xFF);
-    c.pageEdge       = QColor(0x3A, 0x3A, 0x42);
-    c.pageShadow     = QColor(0x00, 0x00, 0x00);
+    c.surfaceDim              = QColor(0x10, 0x13, 0x1A);
+    c.surfaceBright           = QColor(0x36, 0x39, 0x41);
+    c.surfaceContainerLowest  = QColor(0x0B, 0x0E, 0x15);
+    c.surfaceContainerLow     = QColor(0x19, 0x1C, 0x23);
+    c.surfaceContainer        = QColor(0x1D, 0x20, 0x27);
+    c.surfaceContainerHigh    = QColor(0x27, 0x2A, 0x31);
+    c.surfaceContainerHighest = QColor(0x32, 0x35, 0x3C);
+    c.onSurface               = QColor(0xE0, 0xE2, 0xEC);
+    c.onSurfaceVariant        = QColor(0xC1, 0xC6, 0xD6);
+    c.outline                 = QColor(0x8B, 0x90, 0x9F);
+    c.outlineVariant          = QColor(0x41, 0x47, 0x54);
+    c.inverseSurface          = QColor(0xE0, 0xE2, 0xEC);
+    c.inverseOnSurface        = QColor(0x2D, 0x30, 0x38);
+    c.inversePrimary          = QColor(0x00, 0x5B, 0xC0);
+    c.scrim                   = QColor(0x00, 0x00, 0x00);
 
-    c.surface        = QColor(0x2C, 0x2C, 0x31);
-    c.surfaceEdge    = QColor(0x3A, 0x3A, 0x42);
-    c.surfaceHover   = QColor(0x38, 0x38, 0x3F);
-    c.surfacePressed = QColor(0x44, 0x44, 0x4C);
-    c.chipTint       = QColor(0x4C, 0x95, 0xFF, 0x1F);
-
-    c.text           = QColor(0xE8, 0xE8, 0xEC);
-    c.textMuted      = QColor(0xA0, 0xA0, 0xAA);
-    c.textDisabled   = QColor(0x6A, 0x6A, 0x74);
-    c.divider        = QColor(0x3A, 0x3A, 0x42);
-
-    c.shadow         = QColor(0x00, 0x00, 0x00);
+    finishPalette(c, true);
     return c;
 }
 
@@ -219,6 +354,97 @@ enum Radius {
     RadiusPopover = 18,    // pen palette card
     RadiusChip    = 22,    // island chip
 };
+
+// MD3 shape scale (logical px at 100 %). "Full" is not a number: a fully
+// rounded shape uses half of its own height, see shapeFull().
+enum Shape {
+    ShapeNone        = 0,
+    ShapeExtraSmall  = 4,
+    ShapeSmall       = 8,
+    ShapeMedium      = 12,
+    ShapeLarge       = 16,
+    ShapeExtraLarge  = 28,
+};
+
+inline int shapeFull(int height) { return height / 2; }
+
+// ---------------------------------------------------------------------------
+// Motion
+// ---------------------------------------------------------------------------
+
+// MD3 motion tokens. Durations are in milliseconds; the curves are the MD3
+// cubic beziers. Use Motion::duration() rather than the raw value so the
+// "减少动效" switch and the pen-down gate are honoured everywhere.
+//
+// Performance contract (the canvas must never lose a frame to the chrome):
+//  - animate small chrome only (buttons, indicators, popovers) - never the canvas;
+//  - while a stroke is being drawn, chrome animations jump to their end value;
+//  - every animation is a QVariantAnimation / QPropertyAnimation that stops
+//    itself, never a free-running timer.
+namespace Motion {
+
+enum Duration {
+    Short1  = 50,
+    Short2  = 100,
+    Short3  = 150,
+    Short4  = 200,
+    Medium1 = 250,
+    Medium2 = 300,
+    Medium3 = 350,
+    Medium4 = 400,
+    Long1   = 450,
+    Long2   = 500,
+};
+
+enum class Easing {
+    Standard,
+    StandardDecelerate,
+    StandardAccelerate,
+    EmphasizedDecelerate,
+    EmphasizedAccelerate,
+};
+
+inline QEasingCurve curve(Easing e)
+{
+    QPointF c1, c2;
+    switch (e) {
+    case Easing::Standard:             c1 = { 0.20, 0.00 }; c2 = { 0.00, 1.00 }; break;
+    case Easing::StandardDecelerate:   c1 = { 0.00, 0.00 }; c2 = { 0.00, 1.00 }; break;
+    case Easing::StandardAccelerate:   c1 = { 0.30, 0.00 }; c2 = { 1.00, 1.00 }; break;
+    case Easing::EmphasizedDecelerate: c1 = { 0.05, 0.70 }; c2 = { 0.10, 1.00 }; break;
+    case Easing::EmphasizedAccelerate: c1 = { 0.30, 0.00 }; c2 = { 0.80, 0.15 }; break;
+    }
+    QEasingCurve curve(QEasingCurve::BezierSpline);
+    curve.addCubicBezierSegment(c1, c2, QPointF(1.0, 1.0));
+    return curve;
+}
+
+// The user's 减少动效 preference (settings), and a counter the canvas raises
+// while a pen / finger stroke is in progress.
+inline bool g_reduced = false;
+inline int g_inkActive = 0;
+
+inline bool reduced() { return g_reduced; }
+inline void setReduced(bool on) { g_reduced = on; }
+
+// RAII guard the canvas holds for the length of a stroke.
+struct InkGate {
+    InkGate()  { ++g_inkActive; }
+    ~InkGate() { --g_inkActive; }
+    InkGate(const InkGate &) = delete;
+    InkGate &operator=(const InkGate &) = delete;
+};
+
+inline bool inking() { return g_inkActive > 0; }
+
+// The duration an animation should actually run: 0 (jump to the end) when
+// motion is reduced or a stroke is in progress.
+inline int duration(Duration d)
+{
+    return (reduced() || inking()) ? 0 : int(d);
+}
+
+}   // namespace Motion
 
 // ---------------------------------------------------------------------------
 // Font scales (relative to the application font)
