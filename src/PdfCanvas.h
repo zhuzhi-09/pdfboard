@@ -261,6 +261,8 @@ protected:
     void mouseReleaseEvent(QMouseEvent *e) override;
 
 private:
+    // The only writer of m_drawing: keeps Theme::Motion's pen-down gate balanced.
+    void setDrawing(bool on);
     struct PageGeom {
         qreal y = 0;    // top edge in content coordinates
         qreal w = 0;    // display width

@@ -427,13 +427,11 @@ inline int g_inkActive = 0;
 inline bool reduced() { return g_reduced; }
 inline void setReduced(bool on) { g_reduced = on; }
 
-// RAII guard the canvas holds for the length of a stroke.
-struct InkGate {
-    InkGate()  { ++g_inkActive; }
-    ~InkGate() { --g_inkActive; }
-    InkGate(const InkGate &) = delete;
-    InkGate &operator=(const InkGate &) = delete;
-};
+// The canvas reports each stroke's start and end exactly once (on the
+// transition of its own drawing flag), so several open documents can share
+// the counter.
+inline void inkBegan() { ++g_inkActive; }
+inline void inkEnded() { g_inkActive = qMax(0, g_inkActive - 1); }
 
 inline bool inking() { return g_inkActive > 0; }
 
@@ -458,6 +456,11 @@ constexpr qreal FontCaption = 0.86;   // section captions, status bar
 // ---------------------------------------------------------------------------
 // Shadow specs
 // ---------------------------------------------------------------------------
+
+// Alpha (0..255) of the soft drop shadow under floating chrome (island,
+// palettes, page grid). MD3 carries elevation mostly in the container tone, so
+// the shadow only has to lift the chrome off a white page - kept light.
+constexpr int ChromeShadowAlpha = 0x30;
 
 // A page lift is faked with a few stacked translucent rounded rectangles: one
 // per layer, each a little larger and further down than the previous one. It is

@@ -21,6 +21,7 @@ class QVariantAnimation;
 class PageGrid;
 class PenPalette;
 class EraserPalette;
+class ToolIndicator;
 
 // Classroom-whiteboard style floating toolbar that hovers over the page area.
 //
@@ -235,6 +236,8 @@ private:
     QToolButton *m_moreButton  = nullptr;   // the collapse / expand chevron
     PenPalette  *m_palette     = nullptr;
     EraserPalette *m_eraserPalette = nullptr;   // 橡皮按钮上的大小面板
+    ToolIndicator *m_toolIndicator = nullptr;   // MD3 active indicator under the current tool
+    QToolButton   *m_indicatorTarget = nullptr; // the tool button the indicator follows
     PageGrid    *m_pageGrid    = nullptr;
 
     // Glyph of every icon button, so the icons can be rebuilt (DPI change or a

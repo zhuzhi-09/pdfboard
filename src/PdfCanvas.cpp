@@ -300,7 +300,23 @@ PdfCanvas::PdfCanvas(QWidget *parent)
     m_toolbar = new InkToolbar(this);
 }
 
-PdfCanvas::~PdfCanvas() = default;
+PdfCanvas::~PdfCanvas()
+{
+    setDrawing(false);   // a tab closed mid-stroke must release the motion gate
+}
+
+// Every write of m_drawing goes through here, so the chrome's motion gate
+// (Theme::Motion::inking) sees exactly one begin and one end per stroke.
+void PdfCanvas::setDrawing(bool on)
+{
+    if (m_drawing == on)
+        return;
+    m_drawing = on;
+    if (on)
+        Theme::Motion::inkBegan();
+    else
+        Theme::Motion::inkEnded();
+}
 
 void PdfCanvas::applyTheme()
 {
@@ -1193,7 +1209,7 @@ int PdfCanvas::pageAtViewportPos(const QPointF &viewportPos) const
 
 void PdfCanvas::cancelGesture()
 {
-    m_drawing     = false;
+    setDrawing(false);
     m_erasing     = false;
     m_erasePushed = false;
     m_hasLastErasePos = false;
@@ -1705,7 +1721,7 @@ void PdfCanvas::beginInputAt(const QPointF &viewportPos, bool asEraser)
         return;
     }
 
-    m_drawing  = true;
+    setDrawing(true);
     m_drawPage = page;
     m_current  = Stroke{};
     m_current.color = m_penColor;
@@ -1782,7 +1798,7 @@ void PdfCanvas::endInput()
     }
     if (!m_drawing)
         return;
-    m_drawing = false;
+    setDrawing(false);
     if (!m_current.pts.isEmpty() && m_drawPage >= 0) {
         // Discard taps/noise: a stroke shorter than ~3 device px is not what a
         // teacher drew on purpose, and it is exactly what a stray finger leaves

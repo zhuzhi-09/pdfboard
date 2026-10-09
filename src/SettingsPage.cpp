@@ -25,7 +25,9 @@
 #include <QResizeEvent>
 #include <QSignalBlocker>
 #include <QStyle>
+#include <QShowEvent>
 #include <QUrl>
+#include <QVariantAnimation>
 #include <QVBoxLayout>
 
 #include <windows.h>
@@ -86,10 +88,16 @@ QString appVersion()
         .arg(HIWORD(info->dwFileVersionLS));
 }
 
-// The auto-start control: a WinUI-style toggle switch painted with the Theme
-// tokens. Doing it by hand - rather than through a style sheet - keeps the app
-// free of image assets, and the metrics follow the font, so the switch grows
-// with the display DPI and the touch panel's hit targets.
+// The on/off control: an MD3 switch painted with the Theme tokens. Doing it by
+// hand - rather than through a style sheet - keeps the app free of image
+// assets, and the metrics follow the font, so the switch grows with the
+// display DPI and the touch panel's hit targets.
+//
+// MD3 anatomy (32 x 52 at 100 %): off = surfaceContainerHighest track with a
+// 2 px outline and a small outline-coloured handle; on = primary track with a
+// large onPrimary handle; pressed = the handle grows to its full size. The
+// handle slides and grows with the MD3 standard curve - one small widget, so
+// the animation costs a few tiny repaints and stops by itself.
 class ToggleSwitch : public QAbstractButton
 {
 public:
@@ -100,12 +108,36 @@ public:
         setCursor(Qt::PointingHandCursor);
         setFocusPolicy(Qt::StrongFocus);
         setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        setAttribute(Qt::WA_Hover, true);
+
+        m_anim = new QVariantAnimation(this);
+        m_anim->setEasingCurve(Theme::Motion::curve(Theme::Motion::Easing::Standard));
+        connect(m_anim, &QVariantAnimation::valueChanged, this, [this](const QVariant &v) {
+            m_pos = v.toReal();
+            update();
+        });
+        // Programmatic setChecked (loading the stored setting) fires toggled
+        // too; it animates the same short way, which is harmless.
+        connect(this, &QAbstractButton::toggled, this, [this](bool on) {
+            const qreal target = on ? 1.0 : 0.0;
+            const int ms = Theme::Motion::duration(Theme::Motion::Medium1);
+            m_anim->stop();
+            if (ms <= 0 || !isVisible()) {
+                m_pos = target;
+                update();
+                return;
+            }
+            m_anim->setDuration(ms);
+            m_anim->setStartValue(m_pos);
+            m_anim->setEndValue(target);
+            m_anim->start();
+        });
     }
 
     QSize sizeHint() const override
     {
         const int h = trackHeight();
-        return QSize(int(h * 1.9), h);
+        return QSize(int(h * 52.0 / 32.0 + 0.5), h);
     }
 
 protected:
@@ -113,37 +145,69 @@ protected:
     {
         const Theme::Palette &pal = Theme::light();
         const QSize hint = sizeHint();
-        const int h = hint.height();
+        const qreal h = hint.height();
+        const qreal unit = h / 32.0;                 // 1 MD3 dp at this size
         const QRectF track((width() - hint.width()) / 2.0, (height() - h) / 2.0,
                            hint.width(), h);
-        const qreal margin = h * 0.12;
-        const qreal knob = h - 2.0 * margin;
         const qreal radius = h / 2.0;
-        const bool on = isChecked();
+        const bool enabled = isEnabled();
+        const qreal t = m_pos;                       // 0 = off, 1 = on
 
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing, true);
 
-        if (hasFocus()) {
-            p.setPen(QPen(pal.accentSoft, 2.0));
-            p.setBrush(Qt::NoBrush);
-            p.drawRoundedRect(track.adjusted(-2.0, -2.0, 2.0, 2.0),
-                              radius + 2.0, radius + 2.0);
+        // Track: blend between the off and on containers while sliding.
+        const QColor offTrack = pal.surfaceContainerHighest;
+        const QColor onTrack  = pal.primary;
+        QColor trackFill = Theme::stateLayer(offTrack, onTrack, t);
+        if (!enabled)
+            trackFill = Theme::withAlpha(t > 0.5 ? pal.onSurface : offTrack,
+                                         t > 0.5 ? Theme::State::DisabledContainer : 1.0);
+        const qreal border = 2.0 * unit * (1.0 - t);
+        p.setPen(border > 0.05 ? QPen(enabled ? pal.outline
+                                              : Theme::withAlpha(pal.onSurface,
+                                                                 Theme::State::DisabledContainer),
+                                      border)
+                               : QPen(Qt::NoPen));
+        p.setBrush(trackFill);
+        const qreal inset = border / 2.0;
+        p.drawRoundedRect(track.adjusted(inset, inset, -inset, -inset),
+                          radius - inset, radius - inset);
+
+        // Handle: 16 dp off, 24 dp on, 28 dp while pressed.
+        qreal handle = (16.0 + 8.0 * t) * unit;
+        if (isDown())
+            handle = 28.0 * unit;
+        const qreal travelLeft  = track.left() + 16.0 * unit;     // centre when off
+        const qreal travelRight = track.right() - 16.0 * unit;    // centre when on
+        const QPointF centre(travelLeft + (travelRight - travelLeft) * t,
+                             track.center().y());
+
+        // Hover / focus / press state layer: a 40 dp disc behind the handle.
+        if (enabled && (underMouse() || hasFocus() || isDown())) {
+            const qreal opacity = isDown() ? Theme::State::Pressed
+                                : hasFocus() ? Theme::State::Focus
+                                             : Theme::State::Hover;
+            const QColor layer = t > 0.5 ? pal.primary : pal.onSurface;
+            p.setPen(Qt::NoPen);
+            p.setBrush(Theme::withAlpha(layer, opacity));
+            p.drawEllipse(centre, 20.0 * unit, 20.0 * unit);
         }
 
-        // Off: an inset chip; on: the accent fill. Hover tightens the fill.
-        p.setBrush(on ? (underMouse() ? pal.accentHover : pal.accent)
-                      : (underMouse() ? pal.surfacePressed : pal.chipTint));
-        p.setPen(on ? QPen(Qt::NoPen)
-                    : QPen(pal.surfaceEdge, qMax<qreal>(1.0, h * 0.06)));
-        p.drawRoundedRect(track, radius, radius);
-
-        const QPointF centre(on ? track.right() - margin - knob / 2.0
-                                : track.left() + margin + knob / 2.0,
-                             track.center().y());
+        QColor handleFill = Theme::stateLayer(pal.outline, pal.onPrimary, t);
+        if (!enabled)
+            handleFill = t > 0.5 ? pal.surface
+                                 : Theme::withAlpha(pal.onSurface, Theme::State::DisabledContent);
         p.setPen(Qt::NoPen);
-        p.setBrush(pal.onAccent);
-        p.drawEllipse(centre, knob / 2.0, knob / 2.0);
+        p.setBrush(handleFill);
+        p.drawEllipse(centre, handle / 2.0, handle / 2.0);
+    }
+
+    void showEvent(QShowEvent *e) override
+    {
+        QAbstractButton::showEvent(e);
+        m_anim->stop();
+        m_pos = isChecked() ? 1.0 : 0.0;   // never replay a slide that happened while hidden
     }
 
     void enterEvent(QEnterEvent *e) override
@@ -162,9 +226,75 @@ private:
     int trackHeight() const
     {
         const Theme::Metrics m = Theme::metrics(font());
-        return qMax(int(m.touch * 0.52), qMax(20, fontMetrics().height()));
+        return qMax(int(m.touch * 0.62), qMax(24, fontMetrics().height()));
     }
+
+    QVariantAnimation *m_anim = nullptr;
+    qreal m_pos = 0.0;
 };
+
+// MD3 common buttons, all fully rounded at the touch height:
+//   plain QPushButton          -> Outlined button (outline border, primary label)
+//   #settingsPrimary           -> Filled button  (primary / onPrimary)
+//   #settingsSegment           -> one segment of an MD3 segmented button: outlined,
+//                                 the checked one filled with secondaryContainer
+// Hover / press are the MD3 state layers flattened onto the container, so a
+// button never turns see-through over the card.
+QString buttonSheet(const Theme::Palette &c, const Theme::Metrics &m)
+{
+    const QString radius = Theme::px(Theme::shapeFull(m.touch));
+    const QColor card = c.surface;
+
+    return QStringLiteral(
+               "QPushButton {"
+               " color: %1;"
+               " background: transparent;"
+               " border: 1px solid %2;"
+               " border-radius: %3;"
+               " padding: %4 %5; }"
+               "QPushButton:hover { background: %6; }"
+               "QPushButton:pressed { background: %7; }"
+               "QPushButton:disabled { color: %8; border: 1px solid %9; }")
+               .arg(Theme::rgba(c.primary))
+               .arg(Theme::rgba(c.outline))
+               .arg(radius)
+               .arg(Theme::px(m.padY))
+               .arg(Theme::px(Theme::Space5))           // MD3: 24 dp side padding
+               .arg(Theme::rgba(Theme::stateLayer(card, c.primary, Theme::State::Hover)))
+               .arg(Theme::rgba(Theme::stateLayer(card, c.primary, Theme::State::Pressed)))
+               .arg(Theme::rgba(c.textDisabled))
+               .arg(Theme::rgba(Theme::withAlpha(c.onSurface, Theme::State::DisabledContainer)))
+        + QStringLiteral(
+               "QPushButton#settingsPrimary {"
+               " color: %1; background: %2; border: none; }"
+               "QPushButton#settingsPrimary:hover { background: %3; }"
+               "QPushButton#settingsPrimary:pressed { background: %4; }"
+               "QPushButton#settingsPrimary:disabled { color: %5; background: %6; }")
+               .arg(Theme::rgba(c.onPrimary))
+               .arg(Theme::rgba(c.primary))
+               .arg(Theme::rgba(Theme::stateLayer(c.primary, c.onPrimary, Theme::State::Hover)))
+               .arg(Theme::rgba(Theme::stateLayer(c.primary, c.onPrimary, Theme::State::Pressed)))
+               .arg(Theme::rgba(c.textDisabled))
+               .arg(Theme::rgba(Theme::withAlpha(c.onSurface, Theme::State::DisabledContainer)))
+        + QStringLiteral(
+               "QPushButton#settingsSegment { color: %1; }"
+               "QPushButton#settingsSegment:hover { background: %2; }"
+               "QPushButton#settingsSegment:pressed { background: %3; }"
+               "QPushButton#settingsSegment:checked {"
+               " color: %4; background: %5; border: 1px solid %6; }"
+               "QPushButton#settingsSegment:checked:hover { background: %7; }"
+               "QPushButton#settingsSegment:checked:pressed { background: %8; }")
+               .arg(Theme::rgba(c.onSurface))
+               .arg(Theme::rgba(Theme::stateLayer(card, c.onSurface, Theme::State::Hover)))
+               .arg(Theme::rgba(Theme::stateLayer(card, c.onSurface, Theme::State::Pressed)))
+               .arg(Theme::rgba(c.onSecondaryContainer))
+               .arg(Theme::rgba(c.secondaryContainer))
+               .arg(Theme::rgba(c.outline))
+               .arg(Theme::rgba(Theme::stateLayer(c.secondaryContainer, c.onSecondaryContainer,
+                                                  Theme::State::Hover)))
+               .arg(Theme::rgba(Theme::stateLayer(c.secondaryContainer, c.onSecondaryContainer,
+                                                  Theme::State::Pressed)));
+}
 
 // The sheet of the page body. Applied to the scrolling body (never to the page
 // root) so the guidance message box spawned from here keeps its native look.
@@ -183,53 +313,16 @@ QString pageSheet(const QFont &font)
                " background: %3;"
                " border: 1px solid %4;"
                " border-radius: %5; }"
-               "QFrame#settingsRowLine { background: %6; border: none; }"
-               "QPushButton {"
-               " color: %1;"
-               " background: %7;"
-               " border: 1px solid %4;"
-               " border-radius: %8;"
-               " padding: %9 %10; }"
-               "QPushButton:hover { background: %11; }"
-               "QPushButton:pressed { background: %12; }"
-               // A disabled button (no backup to restore, no log file to open)
-               // keeps its surface but greys out, so the state is visible.
-               "QPushButton:disabled { color: %16; }"
-               "QPushButton#settingsPrimary {"
-               " color: %13;"
-               " background: %14;"
-               " border: none; }"
-               "QPushButton#settingsPrimary:hover { background: %15; }"
-               // The 外观 segmented control: the checked segment is the accent
-               // pill, so the active mode reads at a glance in both themes.
-               "QPushButton#settingsSegment:checked {"
-               " color: %13;"
-               " background: %14;"
-               " border: 1px solid %14; }"
-               "QPushButton#settingsSegment:checked:hover {"
-               " background: %15;"
-               " border: 1px solid %15; }"
-               "QPushButton#settingsSegment:checked:pressed {"
-               " background: %15;"
-               " border: 1px solid %15; }")
+               "QFrame#settingsRowLine { background: %6; border: none; }")
         .arg(Theme::rgba(c.text))
         .arg(Theme::rgba(c.textMuted))
         // Cards are a surface, not paper: paper stays white in dark mode too
         // (it is the PDF page), and a white card on a dark page looks broken.
         .arg(Theme::rgba(c.surface))
         .arg(Theme::rgba(c.surfaceEdge))
-        .arg(Theme::px(qMax(Theme::Space2 + 2, m.radiusButton - Theme::Space1)))
+        .arg(Theme::px(Theme::ShapeMedium))      // MD3 card shape
         .arg(Theme::rgba(c.divider))
-        .arg(Theme::rgba(c.chipTint))
-        .arg(Theme::px(m.radiusButton))
-        .arg(Theme::px(m.padY))
-        .arg(Theme::px(m.padX + Theme::Space1))
-        .arg(Theme::rgba(c.surfaceHover))
-        .arg(Theme::rgba(c.surfacePressed))
-        .arg(Theme::rgba(c.onAccent))
-        .arg(Theme::rgba(c.accent))
-        .arg(Theme::rgba(c.accentHover))
-        .arg(Theme::rgba(c.textDisabled));
+        + buttonSheet(c, m);
 }
 
 // A rounded card with a hairline border. Rows go into `col`; the caller

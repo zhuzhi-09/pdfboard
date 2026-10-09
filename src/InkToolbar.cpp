@@ -22,6 +22,7 @@
 #include <QLabel>
 #include <QPainter>
 #include <QPixmap>
+#include <QPointer>
 #include <QResizeEvent>
 #include <QScreen>
 #include <QShowEvent>
@@ -113,7 +114,10 @@ QString chipSheet(const Theme::Palette &c, const Theme::Metrics &m)
                  " padding: %3 %4 %5 %4; }"
                  "QFrame#inkChip QToolButton:hover { background: %6; }"
                  "QFrame#inkChip QToolButton:pressed { background: %7; }"
-                 "QFrame#inkChip QToolButton:checked { background: %8; color: %9; }")
+                 // The checked tool has no fill of its own: the sliding active
+                 // indicator (ToolIndicator) paints the secondaryContainer pill
+                 // underneath, and the button only switches its content colour.
+                 "QFrame#inkChip QToolButton:checked { background: transparent; color: %8; }")
                  .arg(Theme::rgba(c.text))
                  .arg(Theme::px(m.radiusButton))
                  .arg(Theme::px(m.padY))
@@ -121,8 +125,7 @@ QString chipSheet(const Theme::Palette &c, const Theme::Metrics &m)
                  .arg(Theme::px(m.padY + 2))
                  .arg(Theme::rgba(c.surfaceHover))
                  .arg(Theme::rgba(c.surfacePressed))
-                 .arg(Theme::rgba(c.accent))
-                 .arg(Theme::rgba(c.onAccent));
+                 .arg(Theme::rgba(c.onSecondaryContainer));
 
     sheet += QStringLiteral(
                  "QFrame#inkChip QToolButton:checked:hover { background: %1; }"
@@ -136,7 +139,7 @@ QString chipSheet(const Theme::Palette &c, const Theme::Metrics &m)
                  "QFrame#inkChip QToolButton#inkPage:hover { background: %7; }"
                  "QFrame#inkChip QToolButton#inkPage:pressed { background: %8; }"
                  "QFrame#inkChip QToolButton#inkPage:disabled { color: %2; }")
-                 .arg(Theme::rgba(c.accentHover))
+                 .arg(Theme::rgba(Theme::withAlpha(c.onSecondaryContainer, Theme::State::Hover)))
                  .arg(Theme::rgba(c.textDisabled))
                  .arg(Theme::rgba(c.chipTint))
                  .arg(Theme::rgba(c.text))
@@ -182,8 +185,8 @@ QString paletteSheet(const Theme::Palette &c, const Theme::Metrics &m, const QSt
         .arg(Theme::px(m.padY + 2))
         .arg(Theme::rgba(c.surfaceHover))
         .arg(Theme::rgba(c.surfacePressed))
-        .arg(Theme::rgba(c.accentSoft))
-        .arg(Theme::rgba(c.accent));
+        .arg(Theme::rgba(c.secondaryContainer))
+        .arg(Theme::rgba(c.onSecondaryContainer));
 }
 
 // Stroke sample of the given width, used as the icon of a width button. The
@@ -320,6 +323,98 @@ private:
     QColor m_color;
 };
 
+// MD3 active indicator of the island: a secondaryContainer pill painted UNDER
+// the checked tool button, which itself stays transparent. When the tool
+// changes the pill slides to the new button with the emphasized-decelerate
+// curve; every other geometry change (layout, style switch, drawer, DPI)
+// snaps it into place without an animation.
+//
+// Cost: the pill is a child of the button row, so each frame repaints only the
+// strip it crosses - a few hundred device pixels, never the canvas. While a
+// stroke is in progress Motion::duration() returns 0 and the pill jumps.
+class ToolIndicator : public QWidget
+{
+public:
+    explicit ToolIndicator(QWidget *row)
+        : QWidget(row)
+    {
+        setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        setAttribute(Qt::WA_NoSystemBackground, true);
+        setFocusPolicy(Qt::NoFocus);
+        hide();
+
+        m_anim = new QVariantAnimation(this);
+        m_anim->setEasingCurve(
+            Theme::Motion::curve(Theme::Motion::Easing::EmphasizedDecelerate));
+        connect(m_anim, &QVariantAnimation::valueChanged, this,
+                [this](const QVariant &v) { setGeometry(v.toRect()); });
+    }
+
+    void setRadius(int radius)
+    {
+        m_radius = radius;
+        update();
+    }
+
+    // Starts following `button` (nullptr = no tool selected: hide). `animate`
+    // slides from the current spot; otherwise the pill jumps there.
+    void follow(QWidget *button, bool animate)
+    {
+        if (m_target)
+            m_target->removeEventFilter(this);
+        m_target = button;
+        if (!m_target) {
+            m_anim->stop();
+            hide();
+            return;
+        }
+        m_target->installEventFilter(this);
+
+        const QRect to = m_target->geometry();
+        const int ms = Theme::Motion::duration(Theme::Motion::Medium2);
+        m_anim->stop();
+        if (!animate || ms <= 0 || !isVisible() || geometry().isEmpty()) {
+            setGeometry(to);
+        } else {
+            m_anim->setDuration(ms);
+            m_anim->setStartValue(geometry());
+            m_anim->setEndValue(to);
+            m_anim->start();
+        }
+        show();
+        lower();   // always under the buttons
+    }
+
+protected:
+    bool eventFilter(QObject *watched, QEvent *e) override
+    {
+        if (watched == m_target
+            && (e->type() == QEvent::Move || e->type() == QEvent::Resize)) {
+            // The layout moved the button: settle on it immediately.
+            if (m_anim->state() == QAbstractAnimation::Running)
+                m_anim->setEndValue(m_target->geometry());
+            else
+                setGeometry(m_target->geometry());
+        }
+        return QWidget::eventFilter(watched, e);
+    }
+
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+        p.setPen(Qt::NoPen);
+        p.setBrush(Theme::light().secondaryContainer);
+        const qreal r = qMin<qreal>(m_radius, qMin(width(), height()) / 2.0);
+        p.drawRoundedRect(QRectF(rect()), r, r);
+    }
+
+private:
+    QPointer<QWidget>  m_target;
+    QVariantAnimation *m_anim = nullptr;
+    int                m_radius = 0;
+};
+
 // 浮层卡片的公共骨架：圆角卡片 + 柔和投影 + 跟随主题 + "点外部 / Esc 关闭"。
 // 笔调色板和橡皮大小面板都建在它上面，所以两块卡片看起来、用起来是同一个
 // 东西（同一张 paletteSheet、同一套关闭规则、同一个 DPI 处理）。
@@ -428,7 +523,7 @@ private:
         if (!m_glow)
             return;
         QColor shadow = Theme::light().shadow;
-        shadow.setAlpha(0x46);
+        shadow.setAlpha(Theme::ChromeShadowAlpha);
         m_glow->setColor(shadow);
     }
 
@@ -724,7 +819,7 @@ void InkToolbar::buildUi()
     m_glow->setBlurRadius(m.shadowBlur);
     m_glow->setOffset(0.0, m.shadowOffsetY);
     QColor shadow = pal.shadow;
-    shadow.setAlpha(0x46);
+    shadow.setAlpha(Theme::ChromeShadowAlpha);
     m_glow->setColor(shadow);
     m_chip->setGraphicsEffect(m_glow);
     outer->addWidget(m_chip);
@@ -783,6 +878,11 @@ void InkToolbar::buildUi()
     toolGroup->addButton(m_penButton);
     toolGroup->addButton(m_eraserButton);
     toolGroup->addButton(m_moveButton);
+
+    // The MD3 active indicator lives in the same row as the tool buttons, so it
+    // moves, clips and fades together with them (drawer, idle fade, drag).
+    m_toolIndicator = new ToolIndicator(m_body);
+    m_toolIndicator->setRadius(m.radiusButton);
 
     addSeparator(row);
 
@@ -979,6 +1079,8 @@ void InkToolbar::setStyle(Style s)
     m_metrics = Theme::metrics(Theme::chromeFont(m_baseFont), Theme::IslandScale,
                                m_style == Style::Compact);
     applyButtonStyle();
+    if (m_toolIndicator)
+        m_toolIndicator->setRadius(m_metrics.radiusButton);
     if (layout())
         layout()->activate();
     reposition();       // recompute the chip size and re-centre / re-dock
@@ -1128,7 +1230,7 @@ void InkToolbar::testIdleAt(int ms)
 void InkToolbar::refreshIcons()
 {
     const Theme::Palette &pal = Theme::light();
-    const IconPainter::States states{ pal.text, pal.onAccent, pal.textDisabled };
+    const IconPainter::States states{ pal.text, pal.onSecondaryContainer, pal.textDisabled };
     const QColor pen = m_canvas ? m_canvas->penColor() : pal.accent;
     const qreal dpr = devicePixelRatioF();
 
@@ -1154,7 +1256,7 @@ void InkToolbar::applyTheme()
         m_chip->setStyleSheet(chipSheet(Theme::light(), m_metrics));
     if (m_glow) {
         QColor shadow = Theme::light().shadow;
-        shadow.setAlpha(0x46);
+        shadow.setAlpha(Theme::ChromeShadowAlpha);
         m_glow->setColor(shadow);
     }
     if (m_palette)
@@ -1163,6 +1265,8 @@ void InkToolbar::applyTheme()
         m_eraserPalette->applyTheme();
     if (m_pageGrid)
         m_pageGrid->applyTheme();   // owned by the island, drawn on the canvas
+    if (m_toolIndicator)
+        m_toolIndicator->update();
     refreshIcons();
     update();
 }
@@ -1182,6 +1286,15 @@ void InkToolbar::syncFromCanvas()
         m_eraserButton->setChecked(eraserTool);
     if (m_moveButton->isChecked() != moveTool)
         m_moveButton->setChecked(moveTool);
+
+    // syncFromCanvas runs on every ink change, so only a NEW tool moves the pill.
+    QToolButton *active = penTool ? m_penButton
+                        : eraserTool ? m_eraserButton
+                        : moveTool ? m_moveButton : nullptr;
+    if (m_toolIndicator && active != m_indicatorTarget) {
+        m_indicatorTarget = active;
+        m_toolIndicator->follow(active, true);
+    }
 
     m_undoButton->setEnabled(m_canvas->canUndo());
     m_redoButton->setEnabled(m_canvas->canRedo());
