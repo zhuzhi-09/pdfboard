@@ -84,9 +84,4 @@ bool setPalmEraserEnabled(bool on, QString *errorOut = nullptr);
 int  toolbarStyle();
 bool setToolbarStyle(int style, QString *errorOut = nullptr);
 
-// Timestamp (ms since epoch) of the last quiet update check, so the settings
-// page asks the network at most about once a day.
-qint64 lastUpdateCheckMs();
-bool setLastUpdateCheckMs(qint64 ms, QString *errorOut = nullptr);
-
 }   // namespace AppSettings

@@ -28,14 +28,6 @@
 #include <QUrl>
 #include <QVBoxLayout>
 
-#include "UpdateChecker.h"
-
-#include <QPlainTextEdit>
-
-#include <QCoreApplication>
-#include <QDateTime>
-#include <QProgressBar>
-
 #include <windows.h>
 
 namespace {
@@ -59,9 +51,8 @@ const char *kMitLicenseText =
     "OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE "
     "SOFTWARE.";
 
-// The GitHub release page a human opens from the update card. GitHub is the only
-// source now (see 2.75 in docs/03): no third-party accelerator, no asset direct
-// link - "用浏览器下载安装包" always lands here.
+// The GitHub release page the 更新 card opens in the browser. The app itself
+// never goes online: it only hands this URL to the system browser.
 const char *kReleasesLatest =
     "https://github.com/zhuzhi-09/pdfboard/releases/latest";
 
@@ -193,9 +184,6 @@ QString pageSheet(const QFont &font)
                " border: 1px solid %4;"
                " border-radius: %5; }"
                "QFrame#settingsRowLine { background: %6; border: none; }"
-               "QPlainTextEdit#updateNotes {"
-               " background: %3; border: 1px solid %4; border-radius: %5;"
-               " color: %1; padding: 6px; }"
                "QPushButton {"
                " color: %1;"
                " background: %7;"
@@ -223,16 +211,7 @@ QString pageSheet(const QFont &font)
                " border: 1px solid %15; }"
                "QPushButton#settingsSegment:checked:pressed {"
                " background: %15;"
-               " border: 1px solid %15; }"
-               // The updater's progress bar follows the same tokens, so it also
-               // repaints correctly after a theme switch.
-               "QProgressBar {"
-               " color: %2;"
-               " background: %7;"
-               " border: 1px solid %4;"
-               " border-radius: %8;"
-               " text-align: center; }"
-               "QProgressBar::chunk { background: %14; border-radius: %8; }")
+               " border: 1px solid %15; }")
         .arg(Theme::rgba(c.text))
         .arg(Theme::rgba(c.textMuted))
         // Cards are a surface, not paper: paper stays white in dark mode too
@@ -837,10 +816,11 @@ void SettingsPage::buildUi()
     col->addWidget(about.frame);
 
     // --- 更新 ---------------------------------------------------------------
+    // 软件本身不联网：这里只把下载页交给系统浏览器打开，既不检查也不下载。
     col->addSpacing(Theme::Space3);
     col->addWidget(makeSectionHeader(m_column, QStringLiteral("更新")));
     col->addWidget(makeSectionBody(m_column, QStringLiteral(
-        "安装包下载完成后会先校验 SHA-256，校验通过才会运行安装程序，不合格的文件直接丢弃。")));
+        "本软件不会联网检查或下载更新。获取新版本请点击下方按钮，在浏览器中打开下载页面。")));
 
     const Card update = makeCard(m_column);
     {
@@ -853,114 +833,29 @@ void SettingsPage::buildUi()
         versionTitle->setFont(Theme::chromeFont(versionRow->font()));
         versionCol->addWidget(versionTitle);
 
-        m_updateVersion = new QLabel(versionRow);
-        m_updateVersion->setObjectName(QStringLiteral("settingsRowBody"));
-        m_updateVersion->setFont(Theme::scaledFont(versionRow->font(), 0.95, QFont::Normal));
-        m_updateVersion->setWordWrap(true);
-        versionCol->addWidget(m_updateVersion);
+        auto *versionLabel = new QLabel(
+            QStringLiteral("当前版本 %1").arg(appVersion()), versionRow);
+        versionLabel->setObjectName(QStringLiteral("settingsRowBody"));
+        versionLabel->setFont(Theme::scaledFont(versionRow->font(), 0.95, QFont::Normal));
+        versionLabel->setWordWrap(true);
+        versionCol->addWidget(versionLabel);
         update.col->addWidget(versionRow);
     }
     update.col->addWidget(makeRowSeparator(update.frame));
     {
-        auto *buttonsRow = new QWidget(update.frame);
-        auto *buttonsLayout = new QHBoxLayout(buttonsRow);
-        buttonsLayout->setContentsMargins(Theme::Space4, Theme::Space3, Theme::Space4, Theme::Space3);
-        buttonsLayout->setSpacing(Theme::Space2);
-
-        ButtonRow installButtons = makeButtonRow(buttonsRow, font());
-        m_updateGh = addRowButton(installButtons, font(),
-                                  QStringLiteral("GitHub 下载并安装"), RowButton::Primary);
-        m_updateSite = addRowButton(installButtons, font(),
-                                    QStringLiteral("用浏览器下载安装包"));
-        m_updateSite->setToolTip(QStringLiteral(
-            "打开 GitHub 的 releases/latest 页面，适合软件内下载失败时"));
-        buttonsLayout->addWidget(installButtons.box, 0, Qt::AlignVCenter);
-        buttonsLayout->addStretch(1);
-        update.col->addWidget(buttonsRow);
-    }
-    update.col->addWidget(makeRowSeparator(update.frame));
-    {
-        ButtonRow portable = makeButtonRow(update.frame, font());
-        m_updatePortableGh = addRowButton(portable, font(), QStringLiteral("GitHub 便携版"));
+        ButtonRow download = makeButtonRow(update.frame, font());
+        QPushButton *openPage = addRowButton(
+            download, font(), QStringLiteral("在浏览器中打开下载页面"), RowButton::Primary);
+        connect(openPage, &QPushButton::clicked, this, [] {
+            // The only "network" action left: hand the URL to the system browser.
+            QDesktopServices::openUrl(QUrl(QString::fromLatin1(kReleasesLatest)));
+        });
         update.col->addWidget(makeTextRow(
-            update.frame, QStringLiteral("便携版"),
-            QStringLiteral("压缩包交给浏览器下载，解压后覆盖即可，不运行安装程序。"),
-            portable.box, Theme::Space3, Theme::Space3));
-    }
-    update.col->addWidget(makeRowSeparator(update.frame));
-    {
-        auto *progressRow = new QWidget(update.frame);
-        auto *progressCol = new QVBoxLayout(progressRow);
-        progressCol->setContentsMargins(Theme::Space4, Theme::Space3, Theme::Space4, Theme::Space3);
-        progressCol->setSpacing(Theme::Space2);
-
-        m_updateProgress = new QProgressBar(progressRow);
-        m_updateProgress->setRange(0, 100);
-        m_updateProgress->setValue(0);
-        m_updateProgress->setMinimumHeight(int(m.touch * 0.5));
-        m_updateProgress->setVisible(false);
-        progressCol->addWidget(m_updateProgress);
-
-        m_updateNote = new QLabel(progressRow);
-        m_updateNote->setObjectName(QStringLiteral("settingsRowBody"));
-        m_updateNote->setFont(Theme::scaledFont(progressRow->font(), 0.95, QFont::Normal));
-        m_updateNote->setWordWrap(true);
-    progressCol->addWidget(m_updateNote);
-    update.col->addWidget(progressRow);
-
-    // Release notes (changelog), shown once a check actually returned text - an
-    // older release without notes leaves no empty box behind.
-    update.col->addWidget(makeRowSeparator(update.frame));
-    m_updateNotes = new QPlainTextEdit(update.frame);
-    m_updateNotes->setObjectName(QStringLiteral("updateNotes"));
-    m_updateNotes->setReadOnly(true);
-    m_updateNotes->setFont(Theme::captionFont(update.frame->font()));
-    m_updateNotes->setMinimumHeight(int(m.touch * 2.2));
-    m_updateNotes->setVisible(false);
-    update.col->addWidget(m_updateNotes);
-    m_updateCard = update.frame;
+            update.frame, QStringLiteral("下载"),
+            QStringLiteral("安装版与便携版都在该页面，由浏览器负责下载。"),
+            download.box, Theme::Space3, Theme::Space3));
     }
     col->addWidget(update.frame);
-
-    m_updateClient = new UpdateChecker::Client(this);
-    connect(m_updateClient, &UpdateChecker::Client::checked, this, &SettingsPage::onUpdateChecked);
-    connect(m_updateClient, &UpdateChecker::Client::failed, this, &SettingsPage::onUpdateFailed);
-    connect(m_updateClient, &UpdateChecker::Client::progress, this, &SettingsPage::onUpdateProgress);
-    connect(m_updateClient, &UpdateChecker::Client::stage, this, &SettingsPage::onUpdateStage);
-    connect(m_updateClient, &UpdateChecker::Client::setupReady, this, &SettingsPage::onUpdateSetupReady);
-    connect(m_updateClient, &UpdateChecker::Client::setupUnverified, this,
-            &SettingsPage::onUpdateSetupUnverified);
-    connect(m_updateGh, &QPushButton::clicked, this, [this] { beginUpdateInstall(); });
-    connect(m_updateSite, &QPushButton::clicked, this, [this] {
-        // The browser gets GitHub's releases/latest page - never an asset direct
-        // link and never a third-party proxy.
-        UpdateChecker::Client::openInBrowser(QString::fromLatin1(kReleasesLatest));
-    });
-    connect(m_updatePortableGh, &QPushButton::clicked, this, [this] { openPortablePage(); });
-
-    if (!UpdateChecker::isInstalledCopy()) {
-        // A portable copy is updated by replacing files; running a setup would
-        // install a second, unrelated copy.
-        if (m_updateGh) {
-            m_updateGh->setEnabled(false);
-            m_updateGh->setToolTip(QStringLiteral("便携版：请用下面的便携版链接覆盖更新"));
-        }
-        m_updateNote->setText(QStringLiteral("便携版：请用下面的便携版链接下载后覆盖，无需安装。"));
-    } else {
-        m_updateNote->setText(QStringLiteral("点击上面的按钮即可下载并安装最新版本。"));
-    }
-    refreshUpdateVersionLine();
-
-    {
-        // One quiet check a day, GitHub only: it just fills in 线上最新. Any
-        // failure is ignored - an offline classroom never sees a dialog.
-        const qint64 last = AppSettings::lastUpdateCheckMs();
-        const qint64 now = QDateTime::currentMSecsSinceEpoch();
-        if (last <= 0 || now - last > qint64(24 * 60 * 60 * 1000)) {
-            AppSettings::setLastUpdateCheckMs(now, nullptr);
-            startUpdateCheck(false);
-        }
-    }
 
     col->addStretch(1);
 }
@@ -1088,230 +983,6 @@ void SettingsPage::refreshTheme()
     refreshWordNag();
     refreshThemeNote();
     update();
-}
-
-void SettingsPage::setUpdateState(const QString &text)
-{
-    if (m_updateNote)
-        m_updateNote->setText(text);
-}
-
-// Called by MainWindow when its own (launch / file-open) check found something,
-// so the card shows the same news without a second request.
-void SettingsPage::setUpdateInfo(const UpdateChecker::UpdateInfo &info)
-{
-    if (!info.valid)
-        return;
-    if (!info.version.isEmpty()) {
-        m_updateChecked = true;
-        m_updateSetupUrl = info.setupUrl;
-        m_updateSetupSha = info.setupSha256;
-        m_updatePortableUrl = info.portableUrl;
-        m_updatePageUrl = info.pageUrl;
-        m_updateOnline = info.version;
-        refreshUpdateVersionLine();
-    }
-    setUpdateNotes(info.notes);
-}
-
-void SettingsPage::focusUpdateSection()
-{
-    if (m_updateCard)
-        ensureWidgetVisible(m_updateCard, 0, 0);
-}
-
-void SettingsPage::setUpdateNotes(const QString &notes)
-{
-    if (!m_updateNotes)
-        return;
-    const QString text = notes.trimmed();
-    m_updateNotes->setPlainText(text.isEmpty()
-                                    ? QStringLiteral("本次更新未提供更新日志。")
-                                    : text);
-    m_updateNotes->setVisible(true);
-}
-
-QString SettingsPage::testUpdateNotes() const
-{
-    return m_updateNotes ? m_updateNotes->toPlainText() : QString();
-}
-
-bool SettingsPage::testUpdateNotesShown() const
-{
-    return m_updateNotes && m_updateNotes->isVisible();
-}
-
-void SettingsPage::refreshUpdateVersionLine()
-{
-    if (!m_updateVersion)
-        return;
-    QString text = QStringLiteral("当前版本 %1").arg(UpdateChecker::currentVersion());
-    if (!m_updateOnline.isEmpty())
-        text += QStringLiteral(" · 线上最新 %1").arg(m_updateOnline);
-    m_updateVersion->setText(text);
-}
-
-void SettingsPage::finishUpdateBusy()
-{
-    m_updateDownloading = false;
-    m_updateChecking = false;
-    m_updateCheckForInstall = false;
-    if (m_updateProgress) {
-        m_updateProgress->setVisible(false);
-        m_updateProgress->setRange(0, 100);
-        m_updateProgress->setValue(0);
-    }
-    if (UpdateChecker::isInstalledCopy() && m_updateGh)
-        m_updateGh->setEnabled(true);
-}
-
-void SettingsPage::startUpdateCheck(bool forInstall)
-{
-    if (!m_updateClient)
-        return;
-    m_updateChecking = true;
-    m_updateCheckForInstall = forInstall;
-    if (forInstall) {
-        setUpdateState(QStringLiteral("正在检查更新…"));
-        if (m_updateProgress) {
-            m_updateProgress->setRange(0, 0);        // indeterminate while checking
-            m_updateProgress->setVisible(true);
-        }
-        if (UpdateChecker::isInstalledCopy() && m_updateGh)
-            m_updateGh->setEnabled(false);
-    }
-    m_updateClient->check();
-}
-
-void SettingsPage::beginUpdateInstall()
-{
-    if (m_updateDownloading || !m_updateClient)
-        return;
-    if (m_updateChecked) {
-        startUpdateDownload();
-        return;
-    }
-    if (m_updateChecking) {
-        m_updateCheckForInstall = true;              // upgrade the quiet check
-        return;
-    }
-    startUpdateCheck(true);
-}
-
-void SettingsPage::startUpdateDownload()
-{
-    m_updateChecking = false;
-    m_updateCheckForInstall = false;
-    m_updateDownloading = true;
-    if (m_updateProgress) {
-        m_updateProgress->setRange(0, 100);
-        m_updateProgress->setValue(0);
-        m_updateProgress->setVisible(true);
-    }
-    UpdateChecker::UpdateInfo info;
-    info.valid = true;
-    info.version = m_updateOnline;
-    info.setupUrl = m_updateSetupUrl;
-    info.setupSha256 = m_updateSetupSha;
-    info.pageUrl = m_updatePageUrl;
-    m_updateClient->downloadSetup(info);
-}
-
-void SettingsPage::onUpdateChecked(const UpdateChecker::UpdateInfo &info)
-{
-    const bool forInstall = m_updateCheckForInstall;
-    m_updateChecking = false;
-    m_updateCheckForInstall = false;
-
-    if (info.valid) {
-        m_updateChecked = true;
-        m_updateSetupUrl = info.setupUrl;
-        m_updateSetupSha = info.setupSha256;
-        m_updatePortableUrl = info.portableUrl;
-        m_updatePageUrl = info.pageUrl;
-        m_updateOnline = info.version;
-        if (!info.version.isEmpty())
-            refreshUpdateVersionLine();
-    }
-
-    if (forInstall) {
-        if (info.valid) {
-            startUpdateDownload();
-            return;                                  // the download owns the busy state
-        }
-        finishUpdateBusy();
-        setUpdateState(QStringLiteral("检查更新失败，请稍后再试。"));
-    }
-}
-
-void SettingsPage::onUpdateFailed(const QString &reason)
-{
-    if (m_updateDownloading) {
-        finishUpdateBusy();
-        setUpdateState(QStringLiteral("下载失败：%1").arg(reason));
-        return;
-    }
-    if (m_updateChecking) {
-        const bool forInstall = m_updateCheckForInstall;
-        m_updateChecking = false;
-        m_updateCheckForInstall = false;
-        if (forInstall) {
-            finishUpdateBusy();
-            setUpdateState(QStringLiteral("更新失败：%1").arg(reason));
-        }
-        return;
-    }
-    // Only reached when the relaunch helper could not be written: keep running.
-    m_updateHelperFailed = true;
-    finishUpdateBusy();
-    setUpdateState(QStringLiteral("无法准备安装脚本：%1").arg(reason));
-}
-
-void SettingsPage::onUpdateProgress(qint64 received, qint64 total)
-{
-    if (!m_updateProgress || !m_updateDownloading)
-        return;
-    if (total > 0) {
-        m_updateProgress->setRange(0, 100);
-        m_updateProgress->setValue(int(qBound<qint64>(qint64(0), received * 100 / total,
-                                                      qint64(100))));
-    } else {
-        m_updateProgress->setRange(0, 0);
-    }
-}
-
-void SettingsPage::onUpdateStage(const QString &text)
-{
-    setUpdateState(text);
-}
-
-void SettingsPage::onUpdateSetupReady(const QString &path)
-{
-    m_updateDownloading = false;
-    m_updateHelperFailed = false;
-    setUpdateState(QStringLiteral("校验通过，正在启动安装程序…"));
-    if (m_updateClient)
-        m_updateClient->runInstallerAndRestart(path);
-    if (m_updateHelperFailed)
-        return;                       // the helper could not be written: stay open
-    QCoreApplication::quit();
-}
-
-void SettingsPage::onUpdateSetupUnverified(const QString &pageUrl)
-{
-    finishUpdateBusy();
-    setUpdateState(QStringLiteral("该来源未提供校验值，已改为打开下载页"));
-    UpdateChecker::Client::openInBrowser(pageUrl);
-}
-
-void SettingsPage::openPortablePage()
-{
-    QString url = m_updatePortableUrl;
-    if (url.isEmpty())
-        url = m_updatePageUrl;
-    if (url.isEmpty())
-        url = QString::fromLatin1(kReleasesLatest);
-    UpdateChecker::Client::openInBrowser(url);
 }
 
 void SettingsPage::refreshThemeNote()

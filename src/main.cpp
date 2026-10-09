@@ -15,7 +15,6 @@
 #include "PdfExport.h"
 #include "SettingsPage.h"
 #include "Theme.h"
-#include "UpdateChecker.h"
 #include "WordConvert.h"
 #include "ZoomBar.h"
 
@@ -27,14 +26,12 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QGuiApplication>
-#include <QNetworkProxyFactory>
 #include <QOperatingSystemVersion>
 #include <QPushButton>
 #include <QSlider>
 #include <QStackedWidget>
 #include <QMouseEvent>
 #include <QImageReader>
-#include <QSslSocket>
 #include <QStyle>
 #include <QThread>
 #include <QHash>
@@ -1864,9 +1861,9 @@ static int runThemeSelfTest()
 }
 
 // Headless home-page self test:  pdfboard.exe --selftest-home
-// Pure greeting / quote-filter helpers plus the recent-files registry
-// round-trip. No network calls, and the real machine state (the env var and
-// the stored recent list) is snapshotted and restored.
+// Pure greeting helpers plus the recent-files registry round-trip. No network
+// calls, and the real machine state (the env var and the stored recent list) is
+// snapshotted and restored.
 static int runHomeSelfTest()
 {
     int failed = 0;
@@ -1913,22 +1910,6 @@ static int runHomeSelfTest()
     else
         qputenv("USERNAME", savedUser);
     check("USERNAME restored", qgetenv("USERNAME") == savedUser ? 1 : 0, 1);
-
-    // --- classroom quote filter ---------------------------------------------
-    check("filter: classical line ok",
-          HomePage::isQuoteAcceptable(
-              QStringLiteral("书山有路勤为径，学海无涯苦作舟")) ? 1 : 0, 1);
-    check("filter: >60 chars rejected",
-          HomePage::isQuoteAcceptable(QString(61, QChar(0x597D))) ? 1 : 0, 0);
-    check("filter: http rejected",
-          HomePage::isQuoteAcceptable(QStringLiteral("详见 http://example.com")) ? 1 : 0, 0);
-    check("filter: blocked word rejected",
-          HomePage::isQuoteAcceptable(QStringLiteral("某某赌博平台欢迎你")) ? 1 : 0, 0);
-    // 死 occurs in perfectly appropriate classical poetry: no single-character
-    // filtering may reject it.
-    check("filter: 死 is not blocked",
-          HomePage::isQuoteAcceptable(
-              QStringLiteral("人生自古谁无死，留取丹心照汗青")) ? 1 : 0, 1);
 
     // --- recent files (real registry: snapshot, test, restore) --------------
     const QStringList savedRecent = AppSettings::recentFiles();
@@ -2485,160 +2466,6 @@ static int runDocxSelfTest()
     return failed == 0 ? 0 : 3;
 }
 
-// Headless self test:  pdfboard.exe --selftest-update
-// No network: the GitHub payload is parsed from a fixture, so the numeric version
-// comparison and the parser can be locked without a server.
-static int runUpdateSelfTest()
-{
-    int failed = 0;
-    auto check = [&failed](const char *what, int got, int want) {
-        const bool ok = (got == want);
-        if (!ok)
-            ++failed;
-        out(QStringLiteral("[selftest] %1: got %2 want %3 -> %4")
-                .arg(QString::fromLatin1(what), -28)
-                .arg(got).arg(want)
-                .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
-    };
-    using UpdateChecker::compareVersion;
-
-    // Numeric, component-wise - "1.4.10" is newer than "1.4.2".
-    check("version: equal", compareVersion(QStringLiteral("1.4.2"),
-                                          QStringLiteral("1.4.2")), 0);
-    check("version: newer", compareVersion(QStringLiteral("1.4.3"),
-                                           QStringLiteral("1.4.2")), 1);
-    check("version: older", compareVersion(QStringLiteral("1.3.9"),
-                                           QStringLiteral("1.4.0")), -1);
-    check("version: string trap", compareVersion(QStringLiteral("1.4.10"),
-                                                 QStringLiteral("1.4.2")), 1);
-    check("version: shorter is older", compareVersion(QStringLiteral("1.4"),
-                                                      QStringLiteral("1.4.1")), -1);
-    check("version: padded equal", compareVersion(QStringLiteral("1.4.0"),
-                                                  QStringLiteral("1.4")), 0);
-
-    const QByteArray ghWithDigest = QByteArrayLiteral(R"({
-        "tag_name":"v1.5.0","body":"notes","html_url":"https://github.com/r/rel",
-        "assets":[{"name":"PDFBoard-1.5.0-setup.exe","size":10,
-        "digest":"sha256:AABBCC","browser_download_url":"https://x/setup.exe"}]})");
-    const auto gh = UpdateChecker::parseGitHubJson(ghWithDigest, QStringLiteral("1.4.2"));
-    check("github: parsed", gh.valid ? 1 : 0, 1);
-    check("github: version from tag", gh.version == QStringLiteral("1.5.0") ? 1 : 0, 1);
-    check("github: newer", gh.available ? 1 : 0, 1);
-    check("github: digest stripped", gh.setupSha256 == QStringLiteral("aabbcc") ? 1 : 0, 1);
-
-    const QByteArray ghNoDigest = QByteArrayLiteral(R"({
-        "tag_name":"v1.5.0","body":"","html_url":"https://github.com/r/rel",
-        "assets":[{"name":"PDFBoard-1.5.0-setup.exe","size":10,
-        "browser_download_url":"https://x/setup.exe"}]})");
-    const auto gh2 = UpdateChecker::parseGitHubJson(ghNoDigest, QStringLiteral("1.4.2"));
-    check("github: no digest -> empty hash", gh2.setupSha256.isEmpty() ? 1 : 0, 1);
-    check("github: page url kept",
-          gh2.pageUrl == QStringLiteral("https://github.com/r/rel") ? 1 : 0, 1);
-    check("github: non-release rejected",
-          UpdateChecker::parseGitHubJson(QByteArrayLiteral("{}"),
-                                         QStringLiteral("1.0")).valid ? 1 : 0, 0);
-
-    // The running version must come from the executable's own resource.
-    const QString current = UpdateChecker::currentVersion();
-    check("current version readable", current.isEmpty() ? 0 : 1, 1);
-    check("current version is 3 parts",
-          current.count(QLatin1Char('.')) >= 2 ? 1 : 0, 1);
-    (void)UpdateChecker::isInstalledCopy();
-
-    // Crash evidence: the ring must record and stay bounded (it is what a crash
-    // report shows), and the directory must resolve.
-    {
-        const int before = CrashLog::testBreadcrumbCount();
-        for (int i = 0; i < 40; ++i)
-            CrashLog::breadcrumb("selftest", QStringLiteral("第 %1 次").arg(i));
-        check("crash: breadcrumbs recorded",
-              CrashLog::testBreadcrumbCount() > before ? 1 : 0, 1);
-        check("crash: ring is bounded", CrashLog::testBreadcrumbCount() <= 24 ? 1 : 0, 1);
-        check("crash: directory resolves", CrashLog::directory().isEmpty() ? 0 : 1, 1);
-    }
-
-    // Release notes + the prompt decision: the dialog may only appear for a parsed,
-    // newer, not-yet-announced version, and whatever the release body says has to
-    // reach the teacher as plain text.
-    {
-        const QByteArray ghNotes = QByteArrayLiteral(R"({
-            "tag_name":"v9.9.9","body":"- 修好了 A\n- 新增了 B",
-            "html_url":"https://github.com/r/rel",
-            "assets":[{"name":"PDFBoard-9.9.9-setup.exe","size":10,
-            "browser_download_url":"https://x/setup.exe"}]})");
-        const auto gh3 = UpdateChecker::parseGitHubJson(ghNotes, QStringLiteral("1.0.0"));
-        check("notes: github body -> notes",
-              gh3.notes.contains(QStringLiteral("修好了 A")) ? 1 : 0, 1);
-        check("notes: prompt for newer",
-              UpdateChecker::shouldPrompt(gh3, QString(), QStringLiteral("1.0.0")) ? 1 : 0, 1);
-        check("notes: no second prompt",
-              UpdateChecker::shouldPrompt(gh3, QStringLiteral("9.9.9"),
-                                          QStringLiteral("1.0.0")) ? 0 : 1, 1);
-        check("notes: nothing for same version",
-              UpdateChecker::shouldPrompt(gh3, QString(), QStringLiteral("9.9.9")) ? 0 : 1, 1);
-        const UpdateChecker::UpdateInfo unparsed;
-        check("notes: nothing when unparsed",
-              UpdateChecker::shouldPrompt(unparsed, QString(), QStringLiteral("1.0.0")) ? 0 : 1, 1);
-
-        // The portable asset is picked out of the same payload: that is what the
-        // portable buttons hand to the browser.
-        const QByteArray withPortable = QByteArrayLiteral(R"({
-            "tag_name":"v9.9.9","body":"","html_url":"https://github.com/r/rel",
-            "assets":[{"name":"PDFBoard-9.9.9-setup.exe","size":10,
-            "browser_download_url":"https://x/setup.exe"},
-            {"name":"PDFBoard-9.9.9-portable.zip","size":20,
-            "browser_download_url":"https://x/portable.zip"}]})");
-        const auto portable = UpdateChecker::parseGitHubJson(withPortable,
-                                                            QStringLiteral("1.0.0"));
-        check("github: portable asset found",
-              portable.portableUrl == QStringLiteral("https://x/portable.zip") ? 1 : 0, 1);
-    }
-
-    // The update card is where the changelog stays readable after the dialog is
-    // dismissed, so its content is locked here too. Headless page, and the daily
-    // quiet check is silenced for the duration (restored afterwards): a self test
-    // must stay offline and must not disturb the user's preferences.
-    {
-        const qint64 savedCheck = AppSettings::lastUpdateCheckMs();
-        AppSettings::setLastUpdateCheckMs(QDateTime::currentMSecsSinceEpoch(), nullptr);
-
-        SettingsPage page;
-        page.setAttribute(Qt::WA_DontShowOnScreen, true);
-        page.resize(1200, 900);
-        page.show();
-
-        check("card: notes hidden at first", page.testUpdateNotesShown() ? 0 : 1, 1);
-
-        UpdateChecker::UpdateInfo withNotes;
-        withNotes.valid = true;
-        withNotes.version = QStringLiteral("9.9.9");
-        withNotes.notes = QStringLiteral("- 修好了 A\n- 新增了 B");
-        page.setUpdateInfo(withNotes);
-        check("card: notes shown", page.testUpdateNotesShown() ? 1 : 0, 1);
-        check("card: notes text kept",
-              page.testUpdateNotes().contains(QStringLiteral("修好了 A")) ? 1 : 0, 1);
-
-        UpdateChecker::UpdateInfo noNotes;
-        noNotes.valid = true;
-        noNotes.version = QStringLiteral("9.9.9");
-        page.setUpdateInfo(noNotes);
-        check("card: empty notes explained",
-              page.testUpdateNotes().contains(QStringLiteral("未提供更新日志")) ? 1 : 0, 1);
-
-        const QString unchanged = page.testUpdateNotes();
-        const UpdateChecker::UpdateInfo unparsed2;   // invalid: must change nothing
-        page.setUpdateInfo(unparsed2);
-        check("card: invalid info ignored",
-              page.testUpdateNotes() == unchanged ? 1 : 0, 1);
-
-        AppSettings::setLastUpdateCheckMs(savedCheck, nullptr);
-    }
-
-    out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")
-                    : QStringLiteral("[selftest] %1 CHECK(S) FAILED").arg(failed));
-    return failed == 0 ? 0 : 3;
-}
-
 // Headless image self test:  pdfboard.exe --selftest-image
 // Fully self-contained: every fixture is generated under QDir::temp(), no
 // network and no external file. Locks the extension filter, the points-per-pixel
@@ -2684,9 +2511,6 @@ static int runImageSelfTest()
               ImageImport::isImage(QStringLiteral("C:/a/b.webp")) ? 0 : 1, 1);
         check("image: tiff not advertised",
               ImageImport::isImage(QStringLiteral("C:/a/b.tiff")) ? 0 : 1, 1);
-        // The updater needs an HTTPS stack; a missing TLS backend would only show up as
-        // "update check failed" on a classroom machine.
-        check("env: TLS backend available", QSslSocket::supportsSsl() ? 1 : 0, 1);
     }
     check("isImage: .png", int(ImageImport::isImage(QStringLiteral("C:/a/b.png"))), 1);
     check("isImage: .PNG", int(ImageImport::isImage(QStringLiteral("C:/a/b.PNG"))), 1);
@@ -3910,12 +3734,6 @@ int main(int argc, char **argv)
     // repeated once the application object exists (the plugin reads it per event,
     // not at init).
     QCoreApplication::setAttribute(Qt::AA_CompressHighFrequencyEvents, false);
-    // School networks often only reach the internet through a proxy the OS is
-    // configured with. Qt does not use it unless asked - and since the update
-    // check now talks to GitHub only (no third-party accelerator, see 2.75 in
-    // docs/03), honouring the system proxy is the ONLY fallback left: without it a
-    // classroom machine that needs a proxy would fail every update check silently.
-    QNetworkProxyFactory::setUseSystemConfiguration(true);
 
     // Record which app-local runtime the package shipped: startup.log then names the exact CRT
     // version a machine is running, which is the first thing to check when one refuses to start
@@ -3988,7 +3806,6 @@ int main(int argc, char **argv)
     const int themeIdx = args.indexOf(QStringLiteral("--selftest-theme"));
     const int homeIdx = args.indexOf(QStringLiteral("--selftest-home"));
     const int docxIdx = args.indexOf(QStringLiteral("--selftest-docx"));
-    const int updateIdx = args.indexOf(QStringLiteral("--selftest-update"));
     const int imageIdx = args.indexOf(QStringLiteral("--selftest-image"));
     const int smokeIdx = args.indexOf(QStringLiteral("--selftest-smoke"));
     const int crashIdx = args.indexOf(QStringLiteral("--selftest-crash"));
@@ -4004,7 +3821,6 @@ int main(int argc, char **argv)
         || themeIdx >= 0
         || homeIdx >= 0
         || docxIdx >= 0
-        || updateIdx >= 0
         || imageIdx >= 0
         || (smokeIdx >= 0 && smokeIdx + 1 < args.size())) {
         attachConsoleForCli();
@@ -4030,9 +3846,6 @@ int main(int argc, char **argv)
 
     if (docxIdx >= 0)
         return runDocxSelfTest();
-
-    if (updateIdx >= 0)
-        return runUpdateSelfTest();
 
     if (smokeIdx >= 0 && smokeIdx + 1 < args.size())
         return runSmokeSelfTest(args.at(smokeIdx + 1));

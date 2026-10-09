@@ -1,7 +1,5 @@
 #pragma once
 
-#include "UpdateChecker.h"
-
 #include <QMainWindow>
 #include <QPixmap>
 #include <QVector>
@@ -181,14 +179,6 @@ private:
     void settleTransition();
     bool transitionCanAnimate() const;
 
-    // Update check: once shortly after launch, and again after every document
-    // opens (throttled). A newer release is announced at most once per session -
-    // a teacher opening twenty files must not be interrupted twenty times, and
-    // the Settings page keeps the changelog for whenever they look.
-    void       checkForUpdates(bool fromFileOpen);
-    void       promptUpdate(const UpdateChecker::UpdateInfo &info);
-    void       openUpdateSettings();        // settings page, update card in view
-
     // --- 「工具岛闲置淡出」（5 秒无输入 -> 透明度 60%）------------------------
     // 输入探测只有一条路径：QApplication 级事件过滤器按事件类型判定，命中就调
     // noteUserActivity()（恢复所有岛 + 重新计时）。计时是单个 5 秒单次定时器。
@@ -233,10 +223,6 @@ private:
     // something is feeding back; the cap turns that into a logged no-op instead of a
     // stack overflow, and writes a breadcrumb so a crash report names the culprit.
     int      m_zoomWiring = 0;
-
-    UpdateChecker::Client *m_updateClient = nullptr;
-    QString                m_updateAnnouncedVersion;  // per session
-    qint64                 m_lastUpdateCheckMs = 0;   // throttles file-open checks
 
     // 「工具岛闲置淡出」：单个 5 秒单次定时器，任何输入都重启它（见 noteUserActivity）。
     QTimer                *m_idleTimer = nullptr;

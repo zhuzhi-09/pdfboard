@@ -3,25 +3,18 @@
 #include "AppSettings.h"
 #include "Theme.h"
 
-#include <QDateTime>
 #include <QDir>
 #include <QFileInfo>
 #include <QFrame>
 #include <QHBoxLayout>
-#include <QJsonDocument>
-#include <QJsonObject>
 #include <QLabel>
 #include <QMessageBox>
 #include <QMouseEvent>
-#include <QNetworkAccessManager>
-#include <QNetworkReply>
-#include <QNetworkRequest>
 #include <QPushButton>
 #include <QRandomGenerator>
 #include <QResizeEvent>
 #include <QTime>
 #include <QTimer>
-#include <QUrl>
 #include <QVBoxLayout>
 
 #include <functional>
@@ -29,24 +22,16 @@
 
 namespace {
 
-// 一言 endpoint: poems only (c=i). The literature / philosophy genres have
-// returned modern web-fiction sources that are not classroom material.
-const char *const kQuoteUrl =
-    "https://v1.hitokoto.cn/?c=i&encode=json&charset=utf-8";
-
-constexpr qint64 kQuoteThrottleMs = 10 * 60 * 1000;   // at most one per 10 min
-constexpr int    kQuoteTimeoutMs  = 4000;
-constexpr int    kQuoteMaxChars   = 60;
-
-// Curated offline fallback: classical lines a classroom can always show.
-struct FallbackQuote {
+// Curated: classical lines a classroom can always show. The app carries them
+// itself and never goes online, so no filtering or network fallback is needed.
+struct Quote {
     QString text;
     QString source;
 };
 
-const FallbackQuote &randomFallback()
+const Quote &randomLocalQuote()
 {
-    static const FallbackQuote kFallbacks[] = {
+    static const Quote kQuotes[] = {
         { QStringLiteral("书山有路勤为径，学海无涯苦作舟"), QStringLiteral("增广贤文") },
         { QStringLiteral("少壮不努力，老大徒伤悲"),         QStringLiteral("长歌行") },
         { QStringLiteral("千里之行，始于足下"),             QStringLiteral("道德经") },
@@ -58,8 +43,8 @@ const FallbackQuote &randomFallback()
         { QStringLiteral("长风破浪会有时，直挂云帆济沧海"), QStringLiteral("行路难") },
         { QStringLiteral("问渠那得清如许？为有源头活水来"), QStringLiteral("观书有感") },
     };
-    const int count = int(std::size(kFallbacks));
-    return kFallbacks[QRandomGenerator::global()->bounded(count)];
+    const int count = int(std::size(kQuotes));
+    return kQuotes[QRandomGenerator::global()->bounded(count)];
 }
 
 // `text —— 《source》`, the book title brackets omitted when the source
@@ -265,12 +250,10 @@ HomePage::HomePage(QWidget *parent)
 
     buildUi();
 
-    m_net = new QNetworkAccessManager(this);
-    setQuote(fallbackQuote());       // never empty, even with no network
+    setQuote(randomQuote());
 
     // The greeting has to age with the clock: a home page left open overnight
-    // would otherwise still wish a good night in the morning. Only the greeting
-    // is re-rendered here - the quote keeps its own request throttle.
+    // would otherwise still wish a good night in the morning.
     auto *clock = new QTimer(this);
     clock->setInterval(60 * 1000);
     connect(clock, &QTimer::timeout, this, [this] {
@@ -404,31 +387,9 @@ QString HomePage::userName()
     return name.isEmpty() ? QStringLiteral("老师") : name;
 }
 
-bool HomePage::isQuoteAcceptable(const QString &text)
+QString HomePage::randomQuote()
 {
-    const QString trimmed = text.trimmed();
-    if (trimmed.isEmpty() || trimmed.size() > kQuoteMaxChars)
-        return false;
-    if (trimmed.contains(QStringLiteral("http"), Qt::CaseInsensitive))
-        return false;
-
-    // Deliberately tiny and literal: single characters like 死 occur in
-    // perfectly appropriate classical poetry and must NOT be filtered.
-    static const QString kBlocked[] = {
-        QStringLiteral("色情"), QStringLiteral("裸"), QStringLiteral("赌博"),
-        QStringLiteral("毒品"), QStringLiteral("自杀"), QStringLiteral("他妈"),
-        QStringLiteral("操你"),
-    };
-    for (const QString &word : kBlocked) {
-        if (trimmed.contains(word))
-            return false;
-    }
-    return true;
-}
-
-QString HomePage::fallbackQuote()
-{
-    const FallbackQuote &pick = randomFallback();
+    const Quote &pick = randomLocalQuote();
     return formatQuote(pick.text, pick.source);
 }
 
@@ -436,7 +397,7 @@ void HomePage::refresh()
 {
     refreshGreeting();
     rebuildRecentList();
-    fetchQuoteIfDue();
+    setQuote(randomQuote());
 }
 
 void HomePage::refreshGreeting()
@@ -526,37 +487,6 @@ void HomePage::setQuote(const QString &line)
 {
     if (m_quote && !line.isEmpty())
         m_quote->setText(line);
-}
-
-void HomePage::fetchQuoteIfDue()
-{
-    const QDateTime now = QDateTime::currentDateTimeUtc();
-
-    // One request per window, whatever the previous outcome was: a machine
-    // with no network must not be hammered on every visit.
-    if (m_lastQuoteAttempt.isValid()
-        && m_lastQuoteAttempt.msecsTo(now) < kQuoteThrottleMs) {
-        return;
-    }
-    m_lastQuoteAttempt = now;
-
-    QNetworkRequest request{QUrl(QString::fromUtf8(kQuoteUrl))};
-    request.setTransferTimeout(kQuoteTimeoutMs);
-
-    QNetworkReply *reply = m_net->get(request);
-    connect(reply, &QNetworkReply::finished, this, [this, reply] {
-        reply->deleteLater();
-        if (reply->error() != QNetworkReply::NoError)
-            return;                       // keep the fallback line: silent
-
-        const QJsonObject obj = QJsonDocument::fromJson(reply->readAll()).object();
-        const QString text = obj.value(QStringLiteral("hitokoto")).toString().trimmed();
-        if (!isQuoteAcceptable(text))
-            return;                       // keep the fallback line: silent
-
-        setQuote(formatQuote(text,
-                             obj.value(QStringLiteral("from")).toString().trimmed()));
-    });
 }
 
 // The content column keeps a stable width and stays centred: mirror of

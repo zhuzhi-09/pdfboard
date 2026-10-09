@@ -1,16 +1,12 @@
 #pragma once
 
-#include "UpdateChecker.h"
-
 #include <QScrollArea>
 
 class QAbstractButton;
 class QButtonGroup;
 class QFrame;
 class QLabel;
-class QPlainTextEdit;
 class QPushButton;
-class QProgressBar;
 class QWidget;
 
 // Full-area settings PAGE, shown as one page inside MainWindow's stack - not a
@@ -39,18 +35,6 @@ public:
     // Re-applies the palette-derived pieces (page background, sheet, gear
     // pixmap) after the application theme changed.
     void refreshTheme();
-
-    // Show a check result that came from elsewhere (the launch / file-open check
-    // in MainWindow) so the update card always reflects the newest news, and bring
-    // the card into view when the teacher accepts the "new version" dialog.
-    void setUpdateInfo(const UpdateChecker::UpdateInfo &info);
-    void focusUpdateSection();
-
-    // --- Test hooks (used by `--selftest-update`) --------------------------
-    // The update card's changelog area is the only place the teacher can read the
-    // release notes after dismissing the dialog, so its content is asserted.
-    QString testUpdateNotes() const;
-    bool    testUpdateNotesShown() const;
 
 signals:
     void themeChanged();     // an appearance mode was picked and stored
@@ -126,48 +110,6 @@ private:
     QAbstractButton *m_wordNagFix     = nullptr;
     QPushButton     *m_restoreWordNag = nullptr;
     QLabel          *m_wordNagNote    = nullptr;
-
-    // --- 更新 ---------------------------------------------------------------
-    UpdateChecker::Client *m_updateClient = nullptr;
-    QProgressBar *m_updateProgress = nullptr;
-    QLabel       *m_updateVersion  = nullptr;   // 当前版本 / 线上最新
-    QLabel       *m_updateNote     = nullptr;   // state line
-    QPlainTextEdit *m_updateNotes  = nullptr;   // release notes (changelog)
-    QFrame         *m_updateCard   = nullptr;   // brought into view on demand
-    QPushButton  *m_updateGh       = nullptr;
-    QPushButton  *m_updateSite     = nullptr;
-    QPushButton  *m_updatePortableGh     = nullptr;
-
-    // Last successful GitHub check (there is only one source now): only the fields
-    // the panel needs, so no request is repeated.
-    QString m_updateSetupUrl;
-    QString m_updateSetupSha;
-    QString m_updatePortableUrl;
-    QString m_updatePageUrl;
-    bool    m_updateChecked = false;
-    bool    m_updateChecking = false;
-    bool    m_updateCheckForInstall = false;
-    bool    m_updateDownloading = false;
-    bool    m_updateHelperFailed = false;
-    QString m_updateOnline;      // version the last check announced
-
-private slots:
-    void onUpdateChecked(const UpdateChecker::UpdateInfo &info);
-    void onUpdateFailed(const QString &reason);
-    void onUpdateProgress(qint64 received, qint64 total);
-    void onUpdateStage(const QString &text);
-    void onUpdateSetupReady(const QString &path);
-    void onUpdateSetupUnverified(const QString &pageUrl);
-
-private:
-    void beginUpdateInstall();
-    void startUpdateCheck(bool forInstall);
-    void startUpdateDownload();
-    void finishUpdateBusy();
-    void setUpdateState(const QString &text);
-    void setUpdateNotes(const QString &notes);
-    void refreshUpdateVersionLine();
-    void openPortablePage();
 
     int           m_maxColumn = 0;
 };
