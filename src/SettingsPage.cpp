@@ -555,6 +555,14 @@ void SettingsPage::buildUi()
                                        QStringLiteral("手掌当橡皮（实验性）"),
                                        QStringLiteral("实验性功能，暂不可用：多指触摸会被系统手势拦截"),
                                        m_palmEraser, Theme::Space3, Theme::Space3));
+    m_reduceMotion = new ToggleSwitch(general.frame);
+    m_reduceMotion->setToolTip(QStringLiteral("界面动画直接跳到结果，适合配置较低的一体机"));
+    m_reduceMotion->setChecked(AppSettings::reduceMotion());
+    connect(m_reduceMotion, &QAbstractButton::toggled, this, &SettingsPage::onReduceMotionToggled);
+    general.col->addWidget(makeTextRow(general.frame,
+                                       QStringLiteral("减少动效"),
+                                       QStringLiteral("关闭界面动画，配置较低的一体机上更省资源"),
+                                       m_reduceMotion, Theme::Space3, Theme::Space3));
     col->addWidget(general.frame);
 
     // --- Word 文档 ----------------------------------------------------------
@@ -1294,6 +1302,18 @@ void SettingsPage::onPalmEraserToggled(bool on)
         return;
     }
     emit palmEraserChanged();
+}
+
+void SettingsPage::onReduceMotionToggled(bool on)
+{
+    QString err;
+    if (!AppSettings::setReduceMotion(on, &err)) {
+        QMessageBox::warning(this, QStringLiteral("保存失败"), err);
+        const QSignalBlocker block(m_reduceMotion);
+        m_reduceMotion->setChecked(AppSettings::reduceMotion());
+        return;
+    }
+    Theme::Motion::setReduced(on);   // takes effect on the next animation, no restart
 }
 
 void SettingsPage::onRegisterPdf()

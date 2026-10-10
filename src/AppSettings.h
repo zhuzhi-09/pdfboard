@@ -84,4 +84,10 @@ bool setPalmEraserEnabled(bool on, QString *errorOut = nullptr);
 int  toolbarStyle();
 bool setToolbarStyle(int style, QString *errorOut = nullptr);
 
+// 减少动效: OFF by default. When ON, the MD3 chrome animations (switch handle,
+// tool indicator, ...) jump straight to their end state - for slow classroom
+// machines and for anyone who finds motion distracting.
+bool reduceMotion();
+bool setReduceMotion(bool on, QString *errorOut = nullptr);
+
 }   // namespace AppSettings

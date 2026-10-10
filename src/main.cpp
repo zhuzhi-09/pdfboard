@@ -1842,6 +1842,41 @@ static int runThemeSelfTest()
         raw.remove(QStringLiteral("ToolbarStyle"));
     raw.sync();
 
+    // 减少动效：默认关，往返读写；开启后 MD3 动画时长归零，落笔闸门同样归零。
+    const QVariant savedReduceMotion = raw.value(QStringLiteral("ReduceMotion"));
+    const bool savedReduced = Theme::Motion::reduced();
+    raw.remove(QStringLiteral("ReduceMotion"));
+    raw.sync();
+    check("reduce motion: default off", AppSettings::reduceMotion() ? 1 : 0, 0);
+    check("reduce motion: set on succeeds", AppSettings::setReduceMotion(true, nullptr) ? 1 : 0, 1);
+    check("reduce motion: stored on reads back", AppSettings::reduceMotion() ? 1 : 0, 1);
+    Theme::Motion::setReduced(false);
+    check("motion: normal duration",
+          Theme::Motion::duration(Theme::Motion::Medium2), int(Theme::Motion::Medium2));
+    Theme::Motion::setReduced(true);
+    check("motion: reduced duration is 0", Theme::Motion::duration(Theme::Motion::Medium2), 0);
+    Theme::Motion::setReduced(false);
+    Theme::Motion::inkBegan();
+    check("motion: inking duration is 0", Theme::Motion::duration(Theme::Motion::Medium2), 0);
+    Theme::Motion::inkEnded();
+    Theme::Motion::inkEnded();   // an unbalanced end must not go negative
+    check("motion: gate released",
+          Theme::Motion::duration(Theme::Motion::Medium2), int(Theme::Motion::Medium2));
+    Theme::Motion::setReduced(savedReduced);
+    if (savedReduceMotion.isValid())
+        raw.setValue(QStringLiteral("ReduceMotion"), savedReduceMotion);
+    else
+        raw.remove(QStringLiteral("ReduceMotion"));
+    raw.sync();
+
+    // MD3 roles: the legacy names must stay derived from them.
+    const Theme::Palette md = Theme::makeLightPalette();
+    check("md3: accent is primary", md.accent == md.primary ? 1 : 0, 1);
+    check("md3: text is onSurface", md.text == md.onSurface ? 1 : 0, 1);
+    check("md3: paper stays white", md.paper == QColor(Qt::white) ? 1 : 0, 1);
+    check("md3: dark paper stays white",
+          Theme::makeDarkPalette().paper == QColor(Qt::white) ? 1 : 0, 1);
+
     if (savedValue.isValid())
         raw.setValue(QStringLiteral("ThemeMode"), savedValue);
     else
@@ -3777,6 +3812,7 @@ int main(int argc, char **argv)
     // The appearance preference must be in place before any widget is built:
     // the chrome bakes its colours at construction.
     Theme::setMode(static_cast<Theme::Mode>(AppSettings::themeMode()));
+    Theme::Motion::setReduced(AppSettings::reduceMotion());
 
     AppLog::write(QStringLiteral("app"),
                   QStringLiteral("外观：设置 %1 → 解析 %2（系统 %3）pal=%4 desk=%5,%6,%7")
