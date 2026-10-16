@@ -55,7 +55,7 @@ jobs:
           else          { "enabled=false" | Out-File -Append -Encoding utf8 $env:GITHUB_OUTPUT }
 
       - name: Install Qt
-        uses: jurplel/install-qt-action@v4
+        uses: jurplel/install-qt-action@v4.3.1
         with:
           version: ${{ env.QT_VERSION }}
           arch: ${{ env.QT_ARCH }}
