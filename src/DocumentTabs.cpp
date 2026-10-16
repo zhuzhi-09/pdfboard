@@ -375,6 +375,15 @@ void DocumentTabs::paintEvent(QPaintEvent *)
                                        m_chipH / 2.0);
     const qreal markStroke = qMax<qreal>(1.6, m_chipH * 0.055);
 
+    // MD3 selection: the active tab is a secondaryContainer pill with
+    // onSecondaryContainer content (the filled "selected chip" look) - no
+    // border, no underline bar.
+    const auto paintActive = [&p, &pal, radius](const QRectF &box) {
+        p.setPen(Qt::NoPen);
+        p.setBrush(pal.secondaryContainer);
+        p.drawRoundedRect(box, radius, radius);
+    };
+
     // --- chips (clipped to the scrolling area) ------------------------------
     p.save();
     p.setClipRect(QRect(m_chipsLeft, 0, qMax(0, m_chipsRight - m_chipsLeft), height()));
@@ -390,24 +399,15 @@ void DocumentTabs::paintEvent(QPaintEvent *)
         const QRectF box = QRectF(chip.rect).adjusted(0.5, 0.5, -0.5, -0.5);
 
         if (active) {
-            // A surface card on the desk, exactly like the island chip.
-            p.setPen(QPen(pal.surfaceEdge, 1.0));
-            p.setBrush(pal.surface);
-            p.drawRoundedRect(box, radius, radius);
-
-            const qreal barH = qMax<qreal>(2.0, m_chipH * 0.07);
-            const QRectF bar(box.left() + m_padX, box.bottom() - barH - m_stripPad * 0.5,
-                             qMax<qreal>(1.0, box.width() - 2.0 * m_padX), barH);
-            p.setPen(Qt::NoPen);
-            p.setBrush(pal.accent);
-            p.drawRoundedRect(bar, barH / 2.0, barH / 2.0);
+            paintActive(box);
         } else if (hovered) {
             p.setPen(Qt::NoPen);
             p.setBrush(pal.surfaceHover);
             p.drawRoundedRect(box, radius, radius);
         }
 
-        const QColor textColor = active ? pal.text : (hovered ? pal.text : pal.textMuted);
+        const QColor textColor = active ? pal.onSecondaryContainer
+                                        : (hovered ? pal.text : pal.textMuted);
         p.setPen(textColor);
         p.setFont(font());
         p.drawText(QRect(chip.rect.left() + m_padX, chip.rect.top(),
@@ -421,7 +421,8 @@ void DocumentTabs::paintEvent(QPaintEvent *)
             p.setBrush(pal.chipTint);
             p.drawEllipse(closeBox.adjusted(1.0, 1.0, -1.0, -1.0));
         }
-        const QColor markColor = (m_hoverClose && hovered) ? pal.text : pal.textMuted;
+        const QColor markColor = (m_hoverClose && hovered) ? pal.text
+                                 : active ? pal.onSecondaryContainer : pal.textMuted;
         drawCloseMark(p, closeBox, markColor, markStroke);
     }
     p.restore();
@@ -431,16 +432,7 @@ void DocumentTabs::paintEvent(QPaintEvent *)
     if (homeBox.width() > 4.0) {
         const QRectF box = homeBox.adjusted(0.5, 0.5, -0.5, -0.5);
         if (m_homeActive) {
-            p.setPen(QPen(pal.surfaceEdge, 1.0));
-            p.setBrush(pal.surface);
-            p.drawRoundedRect(box, radius, radius);
-
-            const qreal barH = qMax<qreal>(2.0, m_chipH * 0.07);
-            const QRectF bar(box.left() + m_padX, box.bottom() - barH - m_stripPad * 0.5,
-                             qMax<qreal>(1.0, box.width() - 2.0 * m_padX), barH);
-            p.setPen(Qt::NoPen);
-            p.setBrush(pal.accent);
-            p.drawRoundedRect(bar, barH / 2.0, barH / 2.0);
+            paintActive(box);
         } else if (m_hoverHome) {
             p.setPen(Qt::NoPen);
             p.setBrush(pal.surfaceHover);
@@ -450,7 +442,7 @@ void DocumentTabs::paintEvent(QPaintEvent *)
         // A house, not a plus: the chip is a way back to the 主页, and a "+"
         // read as "new tab". Same glyph box and stroke weight as the Settings
         // chip's gear, so the two pinned chips match at every DPI.
-        const QColor ink = m_homeActive ? pal.accent
+        const QColor ink = m_homeActive ? pal.onSecondaryContainer
                                         : (m_hoverHome ? pal.text : pal.textMuted);
         const int glyphPx = qMin(m_iconBox, int(homeBox.height() * 0.62));
         const QPointF centre = homeBox.center();
@@ -472,23 +464,14 @@ void DocumentTabs::paintEvent(QPaintEvent *)
     if (sInner.width() > 4.0) {
         const QRectF sBox = sInner.adjusted(0.5, 0.5, -0.5, -0.5);
         if (m_settingsActive) {
-            p.setPen(QPen(pal.surfaceEdge, 1.0));
-            p.setBrush(pal.surface);
-            p.drawRoundedRect(sBox, radius, radius);
-
-            const qreal barH = qMax<qreal>(2.0, m_chipH * 0.07);
-            const QRectF bar(sBox.left() + m_padX, sBox.bottom() - barH - m_stripPad * 0.5,
-                             qMax<qreal>(1.0, sBox.width() - 2.0 * m_padX), barH);
-            p.setPen(Qt::NoPen);
-            p.setBrush(pal.accent);
-            p.drawRoundedRect(bar, barH / 2.0, barH / 2.0);
+            paintActive(sBox);
         } else if (m_hoverSettings) {
             p.setPen(Qt::NoPen);
             p.setBrush(pal.surfaceHover);
             p.drawRoundedRect(sBox, radius, radius);
         }
 
-        const QColor ink = m_settingsActive ? pal.accent
+        const QColor ink = m_settingsActive ? pal.onSecondaryContainer
                                             : (m_hoverSettings ? pal.text : pal.textMuted);
         const int glyphPx = qMin(m_iconBox, int(sInner.height() * 0.62));
         const QRectF glyphBox(sInner.left() + m_padX,
@@ -497,7 +480,7 @@ void DocumentTabs::paintEvent(QPaintEvent *)
         IconPainter::paintGlyph(p, IconPainter::Glyph::Gear, glyphBox, ink, 2.0);
 
         const int textX = int(sInner.left()) + m_padX + glyphPx + Theme::Space2;
-        p.setPen(m_settingsActive ? pal.text : ink);
+        p.setPen(ink);
         p.setFont(font());
         p.drawText(QRect(textX, int(sInner.top()),
                          qMax(0, int(sInner.right()) - textX - m_padX),
@@ -518,7 +501,7 @@ void DocumentTabs::paintEvent(QPaintEvent *)
         p.drawRoundedRect(inner, radius, radius);
     }
     if (inner.width() > 4.0) {
-        p.setPen(m_hoverAdd ? pal.accent : pal.textMuted);
+        p.setPen(m_hoverAdd ? pal.primary : pal.textMuted);
         p.setFont(font());
         p.drawText(inner, Qt::AlignCenter, QStringLiteral("打开"));
     }

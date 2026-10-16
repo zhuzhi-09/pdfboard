@@ -1,12 +1,16 @@
 #pragma once
 
 #include <QColor>
+#include <QEasingCurve>
 #include <QFont>
 #include <QFontMetricsF>
 #include <QGuiApplication>
+#include <QPointF>
 #include <QString>
 #include <QStyleHints>
 #include <QtGlobal>
+
+#include "ThemePresets.generated.h"
 
 // Central design tokens for the application chrome: the canvas backdrop, the
 // floating island toolbar, the pen palette popover and the status bar.
@@ -25,12 +29,56 @@ namespace Theme {
 // Palette
 // ---------------------------------------------------------------------------
 
+// Material Design 3 colour roles plus the legacy names the chrome was written
+// against. The roles are the source of truth; every legacy field is DERIVED
+// from them in finishPalette(), so a call site that still says `accent` or
+// `surfaceHover` already paints with the MD3 scheme.
+//
+// The two schemes are the MD3 "fidelity" variant (spec 2021) generated with
+// material-color-utilities from the brand seed #1A73E8: fidelity keeps the
+// seed's chroma, so the primary stays a clear blue on a washed-out classroom
+// projector instead of the greyish blue the tonal-spot variant produces.
 struct Palette {
+    // ---- MD3 colour roles -------------------------------------------------
+    QColor primary;
+    QColor onPrimary;
+    QColor primaryContainer;
+    QColor onPrimaryContainer;
+    QColor secondary;
+    QColor onSecondary;
+    QColor secondaryContainer;      // active indicator, tonal buttons, selected chips
+    QColor onSecondaryContainer;
+    QColor tertiary;
+    QColor onTertiary;
+    QColor tertiaryContainer;
+    QColor onTertiaryContainer;
+    QColor error;
+    QColor onError;
+    QColor errorContainer;
+    QColor onErrorContainer;
+
+    QColor surfaceDim;
+    QColor surfaceBright;
+    QColor surfaceContainerLowest;
+    QColor surfaceContainerLow;
+    QColor surfaceContainer;
+    QColor surfaceContainerHigh;
+    QColor surfaceContainerHighest;
+    QColor onSurface;
+    QColor onSurfaceVariant;
+    QColor outline;
+    QColor outlineVariant;
+    QColor inverseSurface;
+    QColor inverseOnSurface;
+    QColor inversePrimary;
+    QColor scrim;
+
+    // ---- Legacy names (derived, see finishPalette) ------------------------
     // Brand / selection.
-    QColor accent;
-    QColor accentHover;
-    QColor accentSoft;      // translucent accent wash
-    QColor onAccent;        // icon + text drawn on top of the accent
+    QColor accent;          // = primary
+    QColor accentHover;     // = primary + onPrimary hover layer
+    QColor accentSoft;      // translucent primary wash (selection, focus ring)
+    QColor onAccent;        // = onPrimary
 
     // Canvas ("paper on a desk").
     QColor desk;            // the flat plane the pages rest on
@@ -40,78 +88,150 @@ struct Palette {
     QColor pageShadow;      // base colour; the alpha comes from PageShadow
 
     // Floating chrome.
-    QColor surface;
-    QColor surfaceEdge;
-    QColor surfaceHover;
-    QColor surfacePressed;
-    QColor chipTint;        // inset pill (page counter, status chips)
+    QColor surface;         // the container colour of floating chrome
+    QColor surfaceEdge;     // = outlineVariant
+    QColor surfaceHover;    // onSurface hover state layer (8 %)
+    QColor surfacePressed;  // onSurface pressed state layer (10 %)
+    QColor chipTint;        // inset pill (page counter, status chips, off tracks)
 
     // Text.
-    QColor text;
-    QColor textMuted;
-    QColor textDisabled;
-    QColor divider;
+    QColor text;            // = onSurface
+    QColor textMuted;       // = onSurfaceVariant
+    QColor textDisabled;    // onSurface at 38 %
+    QColor divider;         // = outlineVariant
 
     // Drop shadow of the floating chrome.
     QColor shadow;
 };
 
-inline Palette makeLightPalette()
+// ---------------------------------------------------------------------------
+// State layers
+// ---------------------------------------------------------------------------
+
+// MD3 state-layer opacities: an interactive element shows its state by laying
+// its CONTENT colour over its container at this opacity.
+namespace State {
+constexpr qreal Hover             = 0.08;
+constexpr qreal Focus             = 0.10;
+constexpr qreal Pressed           = 0.10;
+constexpr qreal Dragged           = 0.16;
+constexpr qreal DisabledContent   = 0.38;
+constexpr qreal DisabledContainer = 0.12;
+}   // namespace State
+
+// `c` with its alpha replaced by `opacity` (0..1).
+inline QColor withAlpha(QColor c, qreal opacity)
 {
-    Palette c;
-    c.accent         = QColor(0x1A, 0x73, 0xE8);
-    c.accentHover    = QColor(0x15, 0x63, 0xC8);
-    c.accentSoft     = QColor(0x1A, 0x73, 0xE8, 0x22);
-    c.onAccent       = QColor(0xFF, 0xFF, 0xFF);
-
-    c.desk           = QColor(0xEB, 0xED, 0xF2);
-    c.deskShade      = QColor(0xDF, 0xE3, 0xEA);
-    c.paper          = QColor(0xFF, 0xFF, 0xFF);
-    c.pageEdge       = QColor(0x10, 0x18, 0x28, 0x24);
-    c.pageShadow     = QColor(0x10, 0x18, 0x28);
-
-    c.surface        = QColor(0xFC, 0xFC, 0xFD);
-    c.surfaceEdge    = QColor(0x10, 0x18, 0x28, 0x20);
-    c.surfaceHover   = QColor(0x10, 0x18, 0x28, 0x14);
-    c.surfacePressed = QColor(0x10, 0x18, 0x28, 0x26);
-    c.chipTint       = QColor(0x10, 0x18, 0x28, 0x0F);
-
-    c.text           = QColor(0x1F, 0x24, 0x30);
-    c.textMuted      = QColor(0x5C, 0x66, 0x75);
-    c.textDisabled   = QColor(0x1F, 0x24, 0x30, 0x48);
-    c.divider        = QColor(0x10, 0x18, 0x28, 0x18);
-
-    c.shadow         = QColor(0x10, 0x18, 0x28);
+    c.setAlphaF(float(qBound<qreal>(0.0, opacity, 1.0)));
     return c;
 }
 
-inline Palette makeDarkPalette()
+// `layer` composited over the opaque `base` at `opacity`: the flattened colour
+// of a container under a state layer. Opaque, so it is cheap to paint and can
+// be used where a translucent fill would let the page show through.
+inline QColor stateLayer(const QColor &base, const QColor &layer, qreal opacity)
 {
+    const qreal a = qBound<qreal>(0.0, opacity, 1.0);
+    return QColor::fromRgbF(float(base.redF()   * (1.0 - a) + layer.redF()   * a),
+                            float(base.greenF() * (1.0 - a) + layer.greenF() * a),
+                            float(base.blueF()  * (1.0 - a) + layer.blueF()  * a),
+                            base.alphaF());
+}
+
+// Fills every legacy field from the MD3 roles. `dark` only picks the
+// scheme-specific desk / chrome container steps.
+inline void finishPalette(Palette &c, bool dark)
+{
+    c.accent      = c.primary;
+    c.accentHover = stateLayer(c.primary, c.onPrimary, State::Hover);
+    c.accentSoft  = withAlpha(c.primary, dark ? 0.18 : 0.12);
+    c.onAccent    = c.onPrimary;
+
+    // The desk is a mid container step; floating chrome sits one step brighter
+    // (light) or higher (dark) so it reads as a separate surface without
+    // relying on a heavy shadow - MD3 expresses elevation with tone.
+    c.desk      = dark ? c.surfaceDim             : c.surfaceContainer;
+    c.deskShade = dark ? c.surfaceContainerLowest : c.surfaceContainerHighest;
+    c.surface   = dark ? c.surfaceContainerHigh   : c.surfaceContainerLow;
+
+    c.paper      = QColor(0xFF, 0xFF, 0xFF);   // pages stay paper white in both modes
+    c.pageEdge   = dark ? c.outlineVariant : withAlpha(c.onSurface, 0.14);
+    c.pageShadow = QColor(0x00, 0x00, 0x00);
+
+    c.surfaceEdge    = c.outlineVariant;
+    c.surfaceHover   = withAlpha(c.onSurface, State::Hover);
+    c.surfacePressed = withAlpha(c.onSurface, State::Pressed);
+    c.chipTint       = c.surfaceContainerHighest;
+
+    c.text         = c.onSurface;
+    c.textMuted    = c.onSurfaceVariant;
+    c.textDisabled = withAlpha(c.onSurface, State::DisabledContent);
+    c.divider      = c.outlineVariant;
+
+    c.shadow = QColor(0x00, 0x00, 0x00);
+}
+
+// 「主题色」种子与「调色板风格」预设。索引对应 ThemePresets.generated.h 里的表
+// （见 tools/md3-presets），改表或加种子时两边一起改。
+enum class PaletteStyle { Fidelity = 0, TonalSpot = 1, Neutral = 2, Monochrome = 3 };
+constexpr int kDefaultPreset = 0;                        // 品牌蓝
+constexpr int kDefaultStyle  = int(PaletteStyle::Fidelity);   // 投影最优的风格
+
+// MD3 调色板由 (种子, 风格, 明暗) 三者决定；这里只做查表 + 派生旧语义名。
+inline Palette makePalette(bool dark, int preset, int style)
+{
+    preset = qBound(0, preset, ThemePresets::kSeedCount - 1);
+    style  = qBound(0, style,  ThemePresets::kStyleCount - 1);
+    const ThemePresets::Scheme &d = ThemePresets::kSchemes[preset][style][dark ? 1 : 0];
+    const auto col = [](const ThemePresets::Rgb &v) { return QColor(v.r, v.g, v.b); };
+
     Palette c;
-    c.accent         = QColor(0x4C, 0x95, 0xFF);
-    c.accentHover    = QColor(0x6B, 0xA8, 0xFF);
-    c.accentSoft     = QColor(0x4C, 0x95, 0xFF, 0x2E);
-    c.onAccent       = QColor(0xFF, 0xFF, 0xFF);
+    c.primary              = col(d.primary);
+    c.onPrimary            = col(d.onPrimary);
+    c.primaryContainer     = col(d.primaryContainer);
+    c.onPrimaryContainer   = col(d.onPrimaryContainer);
+    c.secondary            = col(d.secondary);
+    c.onSecondary          = col(d.onSecondary);
+    c.secondaryContainer   = col(d.secondaryContainer);
+    c.onSecondaryContainer = col(d.onSecondaryContainer);
+    c.tertiary             = col(d.tertiary);
+    c.onTertiary           = col(d.onTertiary);
+    c.tertiaryContainer    = col(d.tertiaryContainer);
+    c.onTertiaryContainer  = col(d.onTertiaryContainer);
+    c.error                = col(d.error);
+    c.onError              = col(d.onError);
+    c.errorContainer       = col(d.errorContainer);
+    c.onErrorContainer     = col(d.onErrorContainer);
+    c.surfaceDim              = col(d.surfaceDim);
+    c.surfaceBright           = col(d.surfaceBright);
+    c.surfaceContainerLowest  = col(d.surfaceContainerLowest);
+    c.surfaceContainerLow     = col(d.surfaceContainerLow);
+    c.surfaceContainer        = col(d.surfaceContainer);
+    c.surfaceContainerHigh    = col(d.surfaceContainerHigh);
+    c.surfaceContainerHighest = col(d.surfaceContainerHighest);
+    c.onSurface          = col(d.onSurface);
+    c.onSurfaceVariant   = col(d.onSurfaceVariant);
+    c.outline            = col(d.outline);
+    c.outlineVariant     = col(d.outlineVariant);
+    c.inverseSurface     = col(d.inverseSurface);
+    c.inverseOnSurface   = col(d.inverseOnSurface);
+    c.inversePrimary     = col(d.inversePrimary);
+    c.scrim              = col(d.scrim);
 
-    c.desk           = QColor(0x1B, 0x1B, 0x1F);
-    c.deskShade      = QColor(0x14, 0x14, 0x17);
-    c.paper          = QColor(0xFF, 0xFF, 0xFF);
-    c.pageEdge       = QColor(0x3A, 0x3A, 0x42);
-    c.pageShadow     = QColor(0x00, 0x00, 0x00);
-
-    c.surface        = QColor(0x2C, 0x2C, 0x31);
-    c.surfaceEdge    = QColor(0x3A, 0x3A, 0x42);
-    c.surfaceHover   = QColor(0x38, 0x38, 0x3F);
-    c.surfacePressed = QColor(0x44, 0x44, 0x4C);
-    c.chipTint       = QColor(0x4C, 0x95, 0xFF, 0x1F);
-
-    c.text           = QColor(0xE8, 0xE8, 0xEC);
-    c.textMuted      = QColor(0xA0, 0xA0, 0xAA);
-    c.textDisabled   = QColor(0x6A, 0x6A, 0x74);
-    c.divider        = QColor(0x3A, 0x3A, 0x42);
-
-    c.shadow         = QColor(0x00, 0x00, 0x00);
+    finishPalette(c, dark);
     return c;
+}
+
+// The factories keep (preset, style) defaulted so every existing caller compiles
+// unchanged and starts on 品牌蓝 / fidelity - the look the app shipped with.
+inline Palette makeLightPalette(int preset = kDefaultPreset, int style = kDefaultStyle)
+{
+    return makePalette(false, preset, style);
+}
+
+inline Palette makeDarkPalette(int preset = kDefaultPreset, int style = kDefaultStyle)
+{
+    return makePalette(true, preset, style);
 }
 
 // How the appearance is chosen.
@@ -137,6 +257,20 @@ inline Mode &modeRef() { return g_mode; }
 
 inline Mode mode() { return modeRef(); }
 
+// 「主题色」种子 / 「调色板风格」的运行时状态 (indexes into the generated table,
+// see makePalette above). The setters re-apply immediately, like setMode does.
+inline int g_preset = kDefaultPreset;
+inline int g_style  = kDefaultStyle;
+
+inline int preset() { return g_preset; }
+inline int style()  { return g_style; }
+
+// applyTheme is defined just below; declared first so the setters can re-apply.
+inline void applyTheme();
+
+inline void setPreset(int p) { g_preset = qBound(0, p, ThemePresets::kSeedCount - 1); applyTheme(); }
+inline void setStyle(int s)  { g_style  = qBound(0, s,  ThemePresets::kStyleCount - 1); applyTheme(); }
+
 // What the OS asks for right now (Qt 6.5+ colour scheme).
 inline Mode systemMode()
 {
@@ -150,12 +284,13 @@ inline Mode resolvedMode()
     return m == Mode::System ? systemMode() : m;
 }
 
-// Swaps the palette to match resolvedMode(). Call at startup before any widget
-// is built, and again whenever the setting or the OS scheme changes.
+// Swaps the palette to match resolvedMode() with the current (preset, style).
+// Call at startup before any widget is built, and again whenever the setting or
+// the OS scheme changes.
 inline void applyTheme()
 {
-    g_palette = (resolvedMode() == Mode::Dark) ? makeDarkPalette()
-                                               : makeLightPalette();
+    g_palette = (resolvedMode() == Mode::Dark) ? makeDarkPalette(g_preset, g_style)
+                                               : makeLightPalette(g_preset, g_style);
 }
 
 inline void setMode(Mode m)
@@ -171,6 +306,17 @@ inline void setMode(Mode m)
 inline void applyStoredMode(int stored)
 {
     setMode(static_cast<Mode>(qBound(0, stored, 2)));
+}
+
+// Applies the STORED preferences (mode 0/1/2, preset, style) in one shot. Every
+// path that re-applies the theme must go through a function like this: the
+// settings page only persists the values, so the runtime state has to be re-synced.
+inline void applyStoredTheme(int storedMode, int storedPreset, int storedStyle)
+{
+    modeRef() = static_cast<Mode>(qBound(0, storedMode, 2));
+    g_preset  = qBound(0, storedPreset, ThemePresets::kSeedCount - 1);
+    g_style   = qBound(0, storedStyle,  ThemePresets::kStyleCount - 1);
+    applyTheme();
 }
 
 // ---------------------------------------------------------------------------
@@ -220,6 +366,95 @@ enum Radius {
     RadiusChip    = 22,    // island chip
 };
 
+// MD3 shape scale (logical px at 100 %). "Full" is not a number: a fully
+// rounded shape uses half of its own height, see shapeFull().
+enum Shape {
+    ShapeNone        = 0,
+    ShapeExtraSmall  = 4,
+    ShapeSmall       = 8,
+    ShapeMedium      = 12,
+    ShapeLarge       = 16,
+    ShapeExtraLarge  = 28,
+};
+
+inline int shapeFull(int height) { return height / 2; }
+
+// ---------------------------------------------------------------------------
+// Motion
+// ---------------------------------------------------------------------------
+
+// MD3 motion tokens. Durations are in milliseconds; the curves are the MD3
+// cubic beziers. Use Motion::duration() rather than the raw value so the
+// "减少动效" switch and the pen-down gate are honoured everywhere.
+//
+// Performance contract (the canvas must never lose a frame to the chrome):
+//  - animate small chrome only (buttons, indicators, popovers) - never the canvas;
+//  - while a stroke is being drawn, chrome animations jump to their end value;
+//  - every animation is a QVariantAnimation / QPropertyAnimation that stops
+//    itself, never a free-running timer.
+namespace Motion {
+
+enum Duration {
+    Short1  = 50,
+    Short2  = 100,
+    Short3  = 150,
+    Short4  = 200,
+    Medium1 = 250,
+    Medium2 = 300,
+    Medium3 = 350,
+    Medium4 = 400,
+    Long1   = 450,
+    Long2   = 500,
+};
+
+enum class Easing {
+    Standard,
+    StandardDecelerate,
+    StandardAccelerate,
+    EmphasizedDecelerate,
+    EmphasizedAccelerate,
+};
+
+inline QEasingCurve curve(Easing e)
+{
+    QPointF c1, c2;
+    switch (e) {
+    case Easing::Standard:             c1 = { 0.20, 0.00 }; c2 = { 0.00, 1.00 }; break;
+    case Easing::StandardDecelerate:   c1 = { 0.00, 0.00 }; c2 = { 0.00, 1.00 }; break;
+    case Easing::StandardAccelerate:   c1 = { 0.30, 0.00 }; c2 = { 1.00, 1.00 }; break;
+    case Easing::EmphasizedDecelerate: c1 = { 0.05, 0.70 }; c2 = { 0.10, 1.00 }; break;
+    case Easing::EmphasizedAccelerate: c1 = { 0.30, 0.00 }; c2 = { 0.80, 0.15 }; break;
+    }
+    QEasingCurve curve(QEasingCurve::BezierSpline);
+    curve.addCubicBezierSegment(c1, c2, QPointF(1.0, 1.0));
+    return curve;
+}
+
+// The user's 减少动效 preference (settings), and a counter the canvas raises
+// while a pen / finger stroke is in progress.
+inline bool g_reduced = false;
+inline int g_inkActive = 0;
+
+inline bool reduced() { return g_reduced; }
+inline void setReduced(bool on) { g_reduced = on; }
+
+// The canvas reports each stroke's start and end exactly once (on the
+// transition of its own drawing flag), so several open documents can share
+// the counter.
+inline void inkBegan() { ++g_inkActive; }
+inline void inkEnded() { g_inkActive = qMax(0, g_inkActive - 1); }
+
+inline bool inking() { return g_inkActive > 0; }
+
+// The duration an animation should actually run: 0 (jump to the end) when
+// motion is reduced or a stroke is in progress.
+inline int duration(Duration d)
+{
+    return (reduced() || inking()) ? 0 : int(d);
+}
+
+}   // namespace Motion
+
 // ---------------------------------------------------------------------------
 // Font scales (relative to the application font)
 // ---------------------------------------------------------------------------
@@ -232,6 +467,11 @@ constexpr qreal FontCaption = 0.86;   // section captions, status bar
 // ---------------------------------------------------------------------------
 // Shadow specs
 // ---------------------------------------------------------------------------
+
+// Alpha (0..255) of the soft drop shadow under floating chrome (island,
+// palettes, page grid). MD3 carries elevation mostly in the container tone, so
+// the shadow only has to lift the chrome off a white page - kept light.
+constexpr int ChromeShadowAlpha = 0x30;
 
 // A page lift is faked with a few stacked translucent rounded rectangles: one
 // per layer, each a little larger and further down than the previous one. It is

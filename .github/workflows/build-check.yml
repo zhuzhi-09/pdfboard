@@ -1,0 +1,94 @@
+#  分支构建检查
+#
+#  触发：推送到 main 以外的任何分支 / 手动
+#  作用：只编译 + 跑自测，不打安装包、不发布 Release。
+#  产物：dist/stage（可直接运行的 exe + Qt 运行库），作为 workflow artifact 保存 7 天，
+#        用 `gh run download` 下载到本机即可试用——本机不需要装 VS / Qt。
+name: build-check
+
+on:
+  push:
+    branches-ignore: [main]
+    paths-ignore:
+      - "**.md"
+      - "docs/**"
+      - "LICENSE"
+      - ".gitignore"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-latest
+    # 一次正常运行约 3 分钟；未知的自测旗标会让程序当成普通启动、开出窗口一直等，
+    # 没有上限就会挂满 6 小时。
+    timeout-minutes: 30
+    env:
+      QT_VERSION: 6.8.3
+      QT_ARCH: win64_msvc2022_64
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Qt
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: ${{ env.QT_VERSION }}
+          arch: ${{ env.QT_ARCH }}
+          modules: qtpdf
+          cache: true
+
+      # runner 的 PATH 里 MinGW 排在前面，CMake 会误选 g++ 去链接 MSVC 版 Qt。
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      - name: Configure and build
+        shell: pwsh
+        run: |
+          cmake -S . -B build -G Ninja `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_C_COMPILER=cl `
+            -DCMAKE_CXX_COMPILER=cl `
+            -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR"
+          cmake --build build
+          if ($LASTEXITCODE -ne 0) { throw "build failed" }
+
+      - name: Stage runtime
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist/stage | Out-Null
+          Copy-Item build/pdfboard.exe dist/stage/
+          & "$env:QT_ROOT_DIR/bin/windeployqt.exe" --release --no-translations `
+              --no-system-d3d-compiler dist/stage/pdfboard.exe
+          if ($LASTEXITCODE -ne 0) { throw "windeployqt failed" }
+          Remove-Item dist/stage/dxcompiler.dll, dist/stage/dxil.dll, dist/stage/vc_redist.x64.exe -ErrorAction SilentlyContinue
+          ./tools/bundle-runtime.ps1 -Stage dist/stage
+          New-Item -ItemType Directory -Force dist/stage/translations | Out-Null
+          Copy-Item "$env:QT_ROOT_DIR/translations/*zh_CN.qm" dist/stage/translations/ -ErrorAction SilentlyContinue
+
+      - name: Self test
+        shell: pwsh
+        run: |
+          $flags = @("--selftest-log", "--selftest-theme", "--selftest-ui",
+                     "--selftest-home", "--selftest-docx",
+                     "--selftest-gpu", "--selftest-image")
+          foreach ($flag in $flags) {
+            $p = Start-Process -FilePath "dist/stage/pdfboard.exe" -ArgumentList $flag `
+                               -NoNewWindow -Wait -PassThru
+            "selftest {0}: exit 0x{1:X8}" -f $flag, $p.ExitCode | Write-Host
+            if ($p.ExitCode -ne 0) {
+              throw ("self test failed for {0} (exit 0x{1:X8})" -f $flag, $p.ExitCode)
+            }
+          }
+
+      - name: Upload build
+        uses: actions/upload-artifact@v4
+        with:
+          name: pdfboard-${{ github.ref_name }}-${{ github.sha }}
+          path: dist/stage
+          retention-days: 7

@@ -640,35 +640,41 @@ PdfCanvas *MainWindow::createCanvas()
 
 // --- 「工具岛闲置淡出」----------------------------------------------------
 //
-// 探测很便宜：一个 QApplication 级事件过滤器，只按事件类型判断"这是不是用户
-// 输入"，命中就恢复所有岛并重启 5 秒单次定时器。每个事件里不做任何重活。
+// 恢复口径：**只有点在工具岛本身（或其按钮）上**才算动作 —— 滚动页面、在画布上
+// 书写（笔 / 手指拖动）都不再把岛顶回 100%。所以只在「离散的按下 / 轻触」落在
+// 某个工具岛上时才恢复；移动、滚轮、笔的移动一律不算。
 //
-// 纯 hover（没有按键的鼠标移动）刻意不算动作：教室大屏是触控，鼠标随手一碰 /
-// 微动就会不断刷新计时器，那样工具岛将永远不淡出。按住键的拖动算输入。
+// 纯 hover（没有按键的鼠标移动）本就不算动作；这条在新口径下自然成立。
 bool MainWindow::eventFilter(QObject *watched, QEvent *event)
 {
     switch (event->type()) {
     case QEvent::MouseButtonPress:
     case QEvent::MouseButtonDblClick:
-    case QEvent::Wheel:
-    case QEvent::KeyPress:
     case QEvent::TouchBegin:
-    case QEvent::TouchUpdate:
-    case QEvent::TouchEnd:
     case QEvent::TabletPress:
-    case QEvent::TabletMove:
-    case QEvent::TabletRelease:
-        noteUserActivity();
-        break;
-    case QEvent::MouseMove:
-        // 只有按住键的移动才算"拖动"；空手移动是 hover，按上面的口径排除。
-        if (static_cast<QMouseEvent *>(event)->buttons() != Qt::NoButton)
+        if (isInsideToolbar(watched))
             noteUserActivity();
         break;
     default:
         break;
     }
     return QMainWindow::eventFilter(watched, event);
+}
+
+// `watched` 是某个工具岛本身、或它的某个子控件？（按钮被按下时事件目标就是按钮，
+// 岛上的按钮是 viewport 的子控件，所以按"事件目标是否属于某个岛"来区分"点岛"与
+// "点画布 / 点空白"。）
+bool MainWindow::isInsideToolbar(QObject *watched) const
+{
+    auto *w = qobject_cast<QWidget *>(watched);
+    if (!w)
+        return false;
+    for (PdfCanvas *canvas : m_canvases) {
+        InkToolbar *bar = canvas->toolbar();
+        if (bar && (w == bar || bar->isAncestorOf(w)))
+            return true;
+    }
+    return false;
 }
 
 void MainWindow::noteUserActivity()
@@ -828,11 +834,12 @@ void MainWindow::closeEvent(QCloseEvent *event)
 // bar - and finally the native palettes (dialogs, title bar).
 void MainWindow::applyTheme()
 {
-    // Re-sync the runtime mode from the stored preference FIRST: the settings
-    // page only writes the value, so without this the palette would be
-    // recomputed from whatever mode was set at startup and a click on
-    // 浅色 / 深色 would appear to do nothing.
-    Theme::applyStoredMode(AppSettings::themeMode());
+    // Re-sync the runtime mode, 主题色 and 调色板风格 from the stored
+    // preferences FIRST: the settings page only writes the values, so without
+    // this the palette would be recomputed from whatever was set at startup and
+    // a click on 浅色 / 深色 / 主题色 would appear to do nothing.
+    Theme::applyStoredTheme(AppSettings::themeMode(), AppSettings::themePreset(),
+                            AppSettings::themeStyle());
 
     // Native dialogs and message boxes follow the theme too; the light modes
     // restore the palette Windows gave us at startup.
@@ -1818,10 +1825,21 @@ void MainWindow::switchToPage(QWidget *incoming, PdfCanvas *releaseOnLeave, int 
 
     // Freeze the outgoing BEFORE the memory policy drops its rendered bitmaps:
     // the animation must never play on a blanked canvas.
+    //
+    // A plain page (home / settings) is grabbed; a document page routes through
+    // freezeFramePixmap(), because a GPU canvas (硬件加速) must not be grabbed -
+    // QWidget::grab() cannot capture a QOpenGLWidget's GL content, and the corrupt
+    // frozen frame was the "切页花屏" report. The animation stays on for both kinds;
+    // only the frame source differs.
+    const auto freezePage = [](QWidget *w) -> QPixmap {
+        if (auto *c = qobject_cast<PdfCanvas *>(w))
+            return c->freezeFramePixmap();
+        return w->grab();
+    };
     const bool wantAnim = !samePage && transitionCanAnimate();
     QPixmap outPix;
     if (wantAnim)
-        outPix = outgoing->grab();
+        outPix = freezePage(outgoing);
 
     // The logical switch happens now: the incoming page is the current widget
     // for the whole animation, so input (the overlay is mouse-transparent) and
@@ -1835,7 +1853,7 @@ void MainWindow::switchToPage(QWidget *incoming, PdfCanvas *releaseOnLeave, int 
         // (otherwise the frozen frame would be taken at a stale size).
         if (m_stack->layout())
             m_stack->layout()->activate();
-        inPix = incoming->grab();
+        inPix = freezePage(incoming);
     }
 
     // Memory policy, unchanged: the document we leave for a DIFFERENT document

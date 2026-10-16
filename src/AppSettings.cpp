@@ -1,4 +1,5 @@
 #include "AppSettings.h"
+#include "ThemePresets.generated.h"
 
 #include <QCoreApplication>
 #include <QDir>
@@ -23,6 +24,10 @@ const QString kWordOpenModeValue = QStringLiteral("WordOpenMode");
 const QString kWordNagFixValue = QStringLiteral("WordNagFix");
 const QString kPalmEraserValue = QStringLiteral("PalmEraser");
 const QString kToolbarStyleValue = QStringLiteral("ToolbarStyle");
+const QString kThemePresetValue = QStringLiteral("ThemePreset");
+const QString kThemeStyleValue  = QStringLiteral("ThemeStyle");
+const QString kReduceMotionValue = QStringLiteral("ReduceMotion");
+const QString kGpuAccelerationValue = QStringLiteral("GpuAcceleration");
 const QString kRecentFilesValue = QStringLiteral("RecentFiles");
 
 // 最近项目 keeps at most this many paths; the oldest entry is dropped first.
@@ -359,6 +364,51 @@ int AppSettings::toolbarStyle()
     return (style == 0 || style == 1) ? style : 0;
 }
 
+bool AppSettings::reduceMotion()
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    return s.value(kReduceMotionValue, false).toBool();
+}
+
+bool AppSettings::setReduceMotion(bool on, QString *errorOut)
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    s.setValue(kReduceMotionValue, on);
+    s.sync();
+
+    if (s.status() != QSettings::NoError) {
+        if (errorOut)
+            *errorOut = QStringLiteral("无法写入注册表（减少动效）");
+        return false;
+    }
+    if (errorOut)
+        errorOut->clear();
+    return true;
+}
+
+bool AppSettings::gpuAcceleration()
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    // 默认关：GPU 路径是实验性的，只有在真机验证过的机器上才该打开。
+    return s.value(kGpuAccelerationValue, false).toBool();
+}
+
+bool AppSettings::setGpuAcceleration(bool on, QString *errorOut)
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    s.setValue(kGpuAccelerationValue, on);
+    s.sync();
+
+    if (s.status() != QSettings::NoError) {
+        if (errorOut)
+            *errorOut = QStringLiteral("无法写入注册表（硬件加速）");
+        return false;
+    }
+    if (errorOut)
+        errorOut->clear();
+    return true;
+}
+
 bool AppSettings::setToolbarStyle(int style, QString *errorOut)
 {
     QSettings s(kAppKey, QSettings::NativeFormat);
@@ -368,6 +418,54 @@ bool AppSettings::setToolbarStyle(int style, QString *errorOut)
     if (s.status() != QSettings::NoError) {
         if (errorOut)
             *errorOut = QStringLiteral("无法写入注册表（工具栏风格）");
+        return false;
+    }
+    if (errorOut)
+        errorOut->clear();
+    return true;
+}
+
+int AppSettings::themePreset()
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    const int preset = s.value(kThemePresetValue, 0).toInt();
+    // 默认品牌蓝（0）。越界值（手工改过注册表）一律读回默认。
+    return (preset >= 0 && preset < ThemePresets::kSeedCount) ? preset : 0;
+}
+
+bool AppSettings::setThemePreset(int preset, QString *errorOut)
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    s.setValue(kThemePresetValue, qBound(0, preset, ThemePresets::kSeedCount - 1));
+    s.sync();
+
+    if (s.status() != QSettings::NoError) {
+        if (errorOut)
+            *errorOut = QStringLiteral("无法写入注册表（主题色）");
+        return false;
+    }
+    if (errorOut)
+        errorOut->clear();
+    return true;
+}
+
+int AppSettings::themeStyle()
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    const int style = s.value(kThemeStyleValue, 0).toInt();
+    // 默认 fidelity（0）。越界值（手工改过注册表）一律读回默认。
+    return (style >= 0 && style < ThemePresets::kStyleCount) ? style : 0;
+}
+
+bool AppSettings::setThemeStyle(int style, QString *errorOut)
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    s.setValue(kThemeStyleValue, qBound(0, style, ThemePresets::kStyleCount - 1));
+    s.sync();
+
+    if (s.status() != QSettings::NoError) {
+        if (errorOut)
+            *errorOut = QStringLiteral("无法写入注册表（调色板风格）");
         return false;
     }
     if (errorOut)

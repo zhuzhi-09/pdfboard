@@ -84,4 +84,28 @@ bool setPalmEraserEnabled(bool on, QString *errorOut = nullptr);
 int  toolbarStyle();
 bool setToolbarStyle(int style, QString *errorOut = nullptr);
 
+// 「主题色」seed preset (0 = 品牌蓝, the default, up to ThemePresets::kSeedCount - 1)
+// and 「调色板风格」 (0 = fidelity, the default ... 3 = monochrome). The index
+// spaces live in ThemePresets.generated.h. An out-of-range stored value reads
+// back as 0.
+int  themePreset();
+bool setThemePreset(int preset, QString *errorOut = nullptr);
+int  themeStyle();
+bool setThemeStyle(int style, QString *errorOut = nullptr);
+
+// 减少动效: OFF by default. When ON, the MD3 chrome animations (switch handle,
+// tool indicator, ...) jump straight to their end state - for slow classroom
+// machines and for anyone who finds motion distracting.
+bool reduceMotion();
+bool setReduceMotion(bool on, QString *errorOut = nullptr);
+
+// 硬件加速（实验性）: OFF by default. When ON, a newly opened document paints its
+// pages through a GPU-backed OpenGL viewport instead of the CPU raster engine.
+// The switch is read when a document's canvas is created, so it applies to
+// documents opened afterwards. It only takes effect where a real OpenGL driver
+// exists - a software rasteriser (llvmpipe / GDI Generic) is refused, because it
+// is slower than the CPU path it would replace.
+bool gpuAcceleration();
+bool setGpuAcceleration(bool on, QString *errorOut = nullptr);
+
 }   // namespace AppSettings

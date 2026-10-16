@@ -51,9 +51,12 @@ QString zoomSheet(const Theme::Palette &c, const Theme::Metrics &m)
                "QToolButton#zoomPercent:hover { background: %5; color: %1; }"
                "QToolButton#zoomPercent:pressed { background: %6; }"
                "QSlider#zoomSlider { background: transparent; }"
+               // MD3 slider: the inactive track is secondaryContainer, the
+               // active part (left of the handle) is primary.
                "QSlider#zoomSlider::groove:horizontal {"
-               " height: %10; background: %8; border-radius: %11; }"
-               "QSlider#zoomSlider::sub-page:horizontal { background: transparent; }"
+               " height: %10; background: %17; border-radius: %11; }"
+               "QSlider#zoomSlider::sub-page:horizontal {"
+               " height: %10; background: %14; border-radius: %11; }"
                "QSlider#zoomSlider::handle:horizontal {"
                " width: %12; height: %12; margin: -%13 0;"
                " background: %14; border: none; border-radius: %15; }"
@@ -66,7 +69,8 @@ QString zoomSheet(const Theme::Palette &c, const Theme::Metrics &m)
         .arg(Theme::px(Theme::RadiusPill)).arg(Theme::px(track))
         .arg(Theme::px(track / 2)).arg(Theme::px(knob))
         .arg(Theme::px(inset)).arg(Theme::rgba(c.accent))
-        .arg(Theme::px(knob / 2)).arg(Theme::rgba(c.accentSoft));
+        .arg(Theme::px(knob / 2)).arg(Theme::rgba(c.accentSoft))
+        .arg(Theme::rgba(c.secondaryContainer));
 }
 
 }   // namespace

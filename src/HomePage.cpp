@@ -163,38 +163,47 @@ QString homeSheet(const QFont &font)
                "QFrame#homeRowLine { background: %8; border: none; }"
                "QFrame#homeRecentRow { background: transparent; border: none; }"
                "QFrame#homeRecentRow:hover { background: %9; }"
+               // MD3 text button: no container until hovered, primary label.
                "QPushButton {"
-               " color: %1;"
-               " background: %10;"
-               " border: 1px solid %6;"
+               " color: %10;"
+               " background: transparent;"
+               " border: none;"
                " border-radius: %11;"
                " padding: %12 %13; }"
-               "QPushButton:hover { background: %9; }"
-               "QPushButton:pressed { background: %14; }"
+               "QPushButton:hover { background: %14; }"
+               "QPushButton:pressed { background: %15; }"
                "QPushButton#homeRecentRemove { color: %2; }"
+               // 打开文件 is the page's one hero action: an MD3 extended FAB -
+               // primaryContainer (the brand blue) with the large shape.
                "QPushButton#homePrimary {"
-               " color: %15;"
-               " background: %16;"
-               " border: none; }"
-               "QPushButton#homePrimary:hover { background: %17; }"
-               "QPushButton#homePrimary:pressed { background: %17; }")
+               " color: %16;"
+               " background: %17;"
+               " border: none;"
+               " border-radius: %18; }"
+               "QPushButton#homePrimary:hover { background: %19; }"
+               "QPushButton#homePrimary:pressed { background: %20; }")
         .arg(Theme::rgba(c.text))             // 1
         .arg(Theme::rgba(c.textMuted))        // 2
         .arg(Theme::rgba(c.accent))           // 3
         .arg(Theme::rgba(c.textDisabled))     // 4
         .arg(Theme::rgba(c.surface))          // 5
         .arg(Theme::rgba(c.surfaceEdge))      // 6
-        .arg(Theme::px(qMax(Theme::Space2 + 2, m.radiusButton - Theme::Space1)))  // 7
+        .arg(Theme::px(Theme::ShapeMedium))   // 7  MD3 card shape
         .arg(Theme::rgba(c.divider))          // 8
         .arg(Theme::rgba(c.surfaceHover))     // 9
-        .arg(Theme::rgba(c.chipTint))         // 10
-        .arg(Theme::px(m.radiusButton))       // 11
+        .arg(Theme::rgba(c.primary))          // 10
+        .arg(Theme::px(Theme::shapeFull(m.touch)))   // 11
         .arg(Theme::px(m.padY))               // 12
         .arg(Theme::px(m.padX + Theme::Space1))   // 13
-        .arg(Theme::rgba(c.surfacePressed))   // 14
-        .arg(Theme::rgba(c.onAccent))         // 15
-        .arg(Theme::rgba(c.accent))           // 16
-        .arg(Theme::rgba(c.accentHover));     // 17
+        .arg(Theme::rgba(Theme::withAlpha(c.primary, Theme::State::Hover)))    // 14
+        .arg(Theme::rgba(Theme::withAlpha(c.primary, Theme::State::Pressed)))  // 15
+        .arg(Theme::rgba(c.onPrimaryContainer))   // 16
+        .arg(Theme::rgba(c.primaryContainer))     // 17
+        .arg(Theme::px(Theme::ShapeLarge))        // 18
+        .arg(Theme::rgba(Theme::stateLayer(c.primaryContainer, c.onPrimaryContainer,
+                                           Theme::State::Hover)))     // 19
+        .arg(Theme::rgba(Theme::stateLayer(c.primaryContainer, c.onPrimaryContainer,
+                                           Theme::State::Pressed)));  // 20
 }
 
 // A rounded card with a hairline border (the same building block SettingsPage

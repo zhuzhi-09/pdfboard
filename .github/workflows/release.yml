@@ -113,11 +113,11 @@ jobs:
         shell: pwsh
         run: |
           # 每个旗标都必须退出码 0。这些都不需要外部文件、不联网：
-          # log / theme / ui / home / docx / image。
+          # log / theme / ui / home / docx / gpu / image。
           # （--selftest-ink 需要一个 PDF 参数，故不适合做门禁。）
           $flags = @("--selftest-log", "--selftest-theme", "--selftest-ui",
                      "--selftest-home", "--selftest-docx",
-                     "--selftest-image")
+                     "--selftest-gpu", "--selftest-image")
           foreach ($flag in $flags) {
             $p = Start-Process -FilePath "dist/stage/pdfboard.exe" -ArgumentList $flag `
                                -NoNewWindow -Wait -PassThru

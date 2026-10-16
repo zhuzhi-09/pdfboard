@@ -6,6 +6,7 @@
 #include <QColor>
 #include <QHash>
 #include <QImage>
+#include <QPixmap>
 #include <QJsonObject>
 #include <QPointF>
 #include <QSizeF>
@@ -54,6 +55,28 @@ public:
     // overlay that hangs off this canvas (the toolbar island owns the pen
     // palette and the page-grid picker).
     void applyTheme();
+
+    // The whole page-painting pass (backdrop, pages, ink, eraser ring). paintEvent()
+    // calls it with a painter on the CPU raster viewport; GlViewport::paintGL()
+    // calls it with a painter on the OpenGL surface when 硬件加速 is on. The
+    // painter is always created by the caller, so this method never binds a
+    // surface of its own - that is what lets both paths share one implementation.
+    void paintForViewport(QPainter &p);
+    bool gpuAccelerated() const { return m_gpu; }
+
+    // A full-canvas freeze frame for the page-switch transition (MainWindow).
+    // A plain canvas is grabbed; a GPU canvas (硬件加速) is NOT - QWidget::grab()
+    // does not capture a QOpenGLWidget's GL content, which is what made a switch
+    // 花屏 - so its page pass is rendered into the pixmap with the very same
+    // paintForViewport() the on-screen CPU path uses. Sized like grab(): the whole
+    // widget at the widget's device pixel ratio.
+    QPixmap freezeFramePixmap();
+
+    // GPU path (硬件加速) test hooks: `testGpuRenderAvailable()` is the same
+    // driver probe the constructor consults, and `testViewportIsGl()` reports
+    // which viewport actually won (true = the OpenGL surface was installed).
+    static bool testGpuRenderAvailable();
+    bool testViewportIsGl() const;
 
     int pageCount() const;
     int currentPage() const;            // topmost visible page
@@ -261,6 +284,8 @@ protected:
     void mouseReleaseEvent(QMouseEvent *e) override;
 
 private:
+    // The only writer of m_drawing: keeps Theme::Motion's pen-down gate balanced.
+    void setDrawing(bool on);
     struct PageGeom {
         qreal y = 0;    // top edge in content coordinates
         qreal w = 0;    // display width
@@ -362,6 +387,10 @@ private:
     QTimer       *m_zoomSettle = nullptr;   // re-render at full quality after a zoom
     QTimer       *m_touchRelease = nullptr; // delays clearing the touch ink lock
     QString       m_path;
+
+    // True when the viewport is a GlViewport (硬件加速): the GPU surface owns
+    // painting and paintEvent() steps aside.
+    bool m_gpu = false;
 
     Theme::Metrics m_ui;                // chrome metrics derived from the font
     qreal m_pageRadius = 4.0;           // rounded paper corners (logical px)

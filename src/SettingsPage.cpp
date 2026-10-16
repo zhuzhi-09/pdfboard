@@ -9,6 +9,8 @@
 #include <QAbstractButton>
 #include <QButtonGroup>
 #include <QByteArray>
+#include <QAction>
+#include <QActionGroup>
 #include <QCoreApplication>
 #include <QDesktopServices>
 #include <QDir>
@@ -18,15 +20,25 @@
 #include <QFileInfo>
 #include <QFrame>
 #include <QHBoxLayout>
+#include <QHideEvent>
+#include <QMenu>
 #include <QLabel>
+#include <QPropertyAnimation>
 #include <QMessageBox>
+#include <QMouseEvent>
 #include <QPainter>
+#include <QPainterPath>
 #include <QPushButton>
 #include <QResizeEvent>
+#include <QScreen>
+#include <QShowEvent>
 #include <QSignalBlocker>
 #include <QStyle>
+#include <QToolButton>
 #include <QUrl>
+#include <QVariantAnimation>
 #include <QVBoxLayout>
+#include <QWheelEvent>
 
 #include <windows.h>
 
@@ -86,10 +98,16 @@ QString appVersion()
         .arg(HIWORD(info->dwFileVersionLS));
 }
 
-// The auto-start control: a WinUI-style toggle switch painted with the Theme
-// tokens. Doing it by hand - rather than through a style sheet - keeps the app
-// free of image assets, and the metrics follow the font, so the switch grows
-// with the display DPI and the touch panel's hit targets.
+// The on/off control: an MD3 switch painted with the Theme tokens. Doing it by
+// hand - rather than through a style sheet - keeps the app free of image
+// assets, and the metrics follow the font, so the switch grows with the
+// display DPI and the touch panel's hit targets.
+//
+// MD3 anatomy (32 x 52 at 100 %): off = surfaceContainerHighest track with a
+// 2 px outline and a small outline-coloured handle; on = primary track with a
+// large onPrimary handle; pressed = the handle grows to its full size. The
+// handle slides and grows with the MD3 standard curve - one small widget, so
+// the animation costs a few tiny repaints and stops by itself.
 class ToggleSwitch : public QAbstractButton
 {
 public:
@@ -100,12 +118,36 @@ public:
         setCursor(Qt::PointingHandCursor);
         setFocusPolicy(Qt::StrongFocus);
         setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+        setAttribute(Qt::WA_Hover, true);
+
+        m_anim = new QVariantAnimation(this);
+        m_anim->setEasingCurve(Theme::Motion::curve(Theme::Motion::Easing::Standard));
+        connect(m_anim, &QVariantAnimation::valueChanged, this, [this](const QVariant &v) {
+            m_pos = v.toReal();
+            update();
+        });
+        // Programmatic setChecked (loading the stored setting) fires toggled
+        // too; it animates the same short way, which is harmless.
+        connect(this, &QAbstractButton::toggled, this, [this](bool on) {
+            const qreal target = on ? 1.0 : 0.0;
+            const int ms = Theme::Motion::duration(Theme::Motion::Medium1);
+            m_anim->stop();
+            if (ms <= 0 || !isVisible()) {
+                m_pos = target;
+                update();
+                return;
+            }
+            m_anim->setDuration(ms);
+            m_anim->setStartValue(m_pos);
+            m_anim->setEndValue(target);
+            m_anim->start();
+        });
     }
 
     QSize sizeHint() const override
     {
         const int h = trackHeight();
-        return QSize(int(h * 1.9), h);
+        return QSize(int(h * 52.0 / 32.0 + 0.5), h);
     }
 
 protected:
@@ -113,37 +155,69 @@ protected:
     {
         const Theme::Palette &pal = Theme::light();
         const QSize hint = sizeHint();
-        const int h = hint.height();
+        const qreal h = hint.height();
+        const qreal unit = h / 32.0;                 // 1 MD3 dp at this size
         const QRectF track((width() - hint.width()) / 2.0, (height() - h) / 2.0,
                            hint.width(), h);
-        const qreal margin = h * 0.12;
-        const qreal knob = h - 2.0 * margin;
         const qreal radius = h / 2.0;
-        const bool on = isChecked();
+        const bool enabled = isEnabled();
+        const qreal t = m_pos;                       // 0 = off, 1 = on
 
         QPainter p(this);
         p.setRenderHint(QPainter::Antialiasing, true);
 
-        if (hasFocus()) {
-            p.setPen(QPen(pal.accentSoft, 2.0));
-            p.setBrush(Qt::NoBrush);
-            p.drawRoundedRect(track.adjusted(-2.0, -2.0, 2.0, 2.0),
-                              radius + 2.0, radius + 2.0);
+        // Track: blend between the off and on containers while sliding.
+        const QColor offTrack = pal.surfaceContainerHighest;
+        const QColor onTrack  = pal.primary;
+        QColor trackFill = Theme::stateLayer(offTrack, onTrack, t);
+        if (!enabled)
+            trackFill = Theme::withAlpha(t > 0.5 ? pal.onSurface : offTrack,
+                                         t > 0.5 ? Theme::State::DisabledContainer : 1.0);
+        const qreal border = 2.0 * unit * (1.0 - t);
+        p.setPen(border > 0.05 ? QPen(enabled ? pal.outline
+                                              : Theme::withAlpha(pal.onSurface,
+                                                                 Theme::State::DisabledContainer),
+                                      border)
+                               : QPen(Qt::NoPen));
+        p.setBrush(trackFill);
+        const qreal inset = border / 2.0;
+        p.drawRoundedRect(track.adjusted(inset, inset, -inset, -inset),
+                          radius - inset, radius - inset);
+
+        // Handle: 16 dp off, 24 dp on, 28 dp while pressed.
+        qreal handle = (16.0 + 8.0 * t) * unit;
+        if (isDown())
+            handle = 28.0 * unit;
+        const qreal travelLeft  = track.left() + 16.0 * unit;     // centre when off
+        const qreal travelRight = track.right() - 16.0 * unit;    // centre when on
+        const QPointF centre(travelLeft + (travelRight - travelLeft) * t,
+                             track.center().y());
+
+        // Hover / focus / press state layer: a 40 dp disc behind the handle.
+        if (enabled && (underMouse() || hasFocus() || isDown())) {
+            const qreal opacity = isDown() ? Theme::State::Pressed
+                                : hasFocus() ? Theme::State::Focus
+                                             : Theme::State::Hover;
+            const QColor layer = t > 0.5 ? pal.primary : pal.onSurface;
+            p.setPen(Qt::NoPen);
+            p.setBrush(Theme::withAlpha(layer, opacity));
+            p.drawEllipse(centre, 20.0 * unit, 20.0 * unit);
         }
 
-        // Off: an inset chip; on: the accent fill. Hover tightens the fill.
-        p.setBrush(on ? (underMouse() ? pal.accentHover : pal.accent)
-                      : (underMouse() ? pal.surfacePressed : pal.chipTint));
-        p.setPen(on ? QPen(Qt::NoPen)
-                    : QPen(pal.surfaceEdge, qMax<qreal>(1.0, h * 0.06)));
-        p.drawRoundedRect(track, radius, radius);
-
-        const QPointF centre(on ? track.right() - margin - knob / 2.0
-                                : track.left() + margin + knob / 2.0,
-                             track.center().y());
+        QColor handleFill = Theme::stateLayer(pal.outline, pal.onPrimary, t);
+        if (!enabled)
+            handleFill = t > 0.5 ? pal.surface
+                                 : Theme::withAlpha(pal.onSurface, Theme::State::DisabledContent);
         p.setPen(Qt::NoPen);
-        p.setBrush(pal.onAccent);
-        p.drawEllipse(centre, knob / 2.0, knob / 2.0);
+        p.setBrush(handleFill);
+        p.drawEllipse(centre, handle / 2.0, handle / 2.0);
+    }
+
+    void showEvent(QShowEvent *e) override
+    {
+        QAbstractButton::showEvent(e);
+        m_anim->stop();
+        m_pos = isChecked() ? 1.0 : 0.0;   // never replay a slide that happened while hidden
     }
 
     void enterEvent(QEnterEvent *e) override
@@ -162,9 +236,140 @@ private:
     int trackHeight() const
     {
         const Theme::Metrics m = Theme::metrics(font());
-        return qMax(int(m.touch * 0.52), qMax(20, fontMetrics().height()));
+        return qMax(int(m.touch * 0.62), qMax(24, fontMetrics().height()));
     }
+
+    QVariantAnimation *m_anim = nullptr;
+    qreal m_pos = 0.0;
 };
+
+// 「主题色」的一枚种子色板：一个实心圆，颜色取该种子在默认风格下的 primary
+// （fidelity 保留种子本身彩度，是这个种子最有代表性的颜色）。选中的一枚画一圈
+// 实时调色板的 primary 描边；悬停 / 按下按 MD3 状态层铺一层文本色圆晕。全自绘，
+// 无图片资源，颜色随主题实时变化，尺寸跟随字体缩放（和 ToggleSwitch 同一套做法）。
+class SeedSwatch : public QAbstractButton
+{
+public:
+    explicit SeedSwatch(int seed, QWidget *parent = nullptr)
+        : QAbstractButton(parent)
+        , m_seed(seed)
+    {
+        setCheckable(true);
+        setFocusPolicy(Qt::NoFocus);
+        setCursor(Qt::PointingHandCursor);
+        setAttribute(Qt::WA_Hover, true);
+        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+    }
+
+    QSize sizeHint() const override
+    {
+        // Every swatch is a touch target: the same floor as every button row.
+        const int side = Theme::metrics(font()).touch;
+        return QSize(side, side);
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        const Theme::Palette &pal = Theme::light();
+        const QColor fill = Theme::makeLightPalette(m_seed, Theme::kDefaultStyle).primary;
+
+        const qreal r     = qMin(width(), height()) / 2.0 - 1.0;   // 1 px AA slack
+        const qreal ring  = qMax(2.0, r * 0.14);                   // selected ring
+        const qreal gap   = ring * 0.9;                            // surface gap
+        const qreal fillR = r - ring - gap;
+        const QPointF centre(width() / 2.0, height() / 2.0);
+
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+
+        // Hover / press: an MD3 state-layer disc in the text colour, under the
+        // fill so the swatch colour always stays true.
+        if (isDown() || underMouse()) {
+            p.setPen(Qt::NoPen);
+            p.setBrush(Theme::withAlpha(pal.text,
+                                        isDown() ? Theme::State::Pressed
+                                                 : Theme::State::Hover));
+            p.drawEllipse(centre, r, r);
+        }
+
+        p.setPen(Qt::NoPen);
+        p.setBrush(fill);
+        p.drawEllipse(centre, fillR, fillR);
+
+        // Selected: a ring in the live primary, one surface-gap clear of the fill
+        // (MD3 selection never touches the selected content).
+        if (isChecked()) {
+            QPen ringPen(pal.primary, ring);
+            ringPen.setCapStyle(Qt::RoundCap);
+            p.setPen(ringPen);
+            p.setBrush(Qt::NoBrush);
+            p.drawEllipse(centre, fillR + gap + ring / 2.0, fillR + gap + ring / 2.0);
+        }
+    }
+
+    void enterEvent(QEnterEvent *e) override
+    {
+        QAbstractButton::enterEvent(e);
+        update();
+    }
+
+    void leaveEvent(QEvent *e) override
+    {
+        QAbstractButton::leaveEvent(e);
+        update();
+    }
+
+private:
+    int m_seed = 0;
+};
+
+// MD3 common buttons, all fully rounded at the touch height:
+//   plain QPushButton          -> Outlined button (outline border, primary label)
+//   #settingsPrimary           -> Filled button  (primary / onPrimary)
+// Hover / press are the MD3 state layers flattened onto the container, so a
+// button never turns see-through over the card.
+QString buttonSheet(const Theme::Palette &c, const Theme::Metrics &m)
+{
+    const QString radius = Theme::px(Theme::shapeFull(m.touch));
+    const QColor card = c.surface;
+
+    return QStringLiteral(
+               "QPushButton {"
+               " color: %1;"
+               " background: transparent;"
+               " border: 1px solid %2;"
+               " border-radius: %3;"
+               " padding: %4 %5; }"
+               "QPushButton:hover { background: %6; }"
+               "QPushButton:pressed { background: %7; }"
+               "QPushButton:disabled { color: %8; border: 1px solid %9; }")
+               .arg(Theme::rgba(c.primary))
+               .arg(Theme::rgba(c.outline))
+               .arg(radius)
+               .arg(Theme::px(m.padY))
+               .arg(Theme::px(Theme::Space5))           // MD3: 24 dp side padding
+               .arg(Theme::rgba(Theme::stateLayer(card, c.primary, Theme::State::Hover)))
+               .arg(Theme::rgba(Theme::stateLayer(card, c.primary, Theme::State::Pressed)))
+               .arg(Theme::rgba(c.textDisabled))
+               .arg(Theme::rgba(Theme::withAlpha(c.onSurface, Theme::State::DisabledContainer)))
+        + QStringLiteral(
+              "QPushButton#settingsPrimary {"
+              " color: %1; background: %2; border-radius: %7; }"
+              "QPushButton#settingsPrimary:hover { background: %3; }"
+              "QPushButton#settingsPrimary:pressed { background: %4; }"
+              "QPushButton#settingsPrimary:disabled { color: %5; background: %6; }")
+              .arg(Theme::rgba(c.onPrimary))
+              .arg(Theme::rgba(c.primary))
+              .arg(Theme::rgba(Theme::stateLayer(c.primary, c.onPrimary, Theme::State::Hover)))
+              .arg(Theme::rgba(Theme::stateLayer(c.primary, c.onPrimary, Theme::State::Pressed)))
+              .arg(Theme::rgba(c.textDisabled))
+              .arg(Theme::rgba(Theme::withAlpha(c.onSurface, Theme::State::DisabledContainer)))
+               // `border: none` drops the base rule's radius, so the filled button went
+               // square; restate it (the pill radius is the same all buttons share).
+               .arg(radius)
+        ;
+}
 
 // The sheet of the page body. Applied to the scrolling body (never to the page
 // root) so the guidance message box spawned from here keeps its native look.
@@ -183,53 +388,16 @@ QString pageSheet(const QFont &font)
                " background: %3;"
                " border: 1px solid %4;"
                " border-radius: %5; }"
-               "QFrame#settingsRowLine { background: %6; border: none; }"
-               "QPushButton {"
-               " color: %1;"
-               " background: %7;"
-               " border: 1px solid %4;"
-               " border-radius: %8;"
-               " padding: %9 %10; }"
-               "QPushButton:hover { background: %11; }"
-               "QPushButton:pressed { background: %12; }"
-               // A disabled button (no backup to restore, no log file to open)
-               // keeps its surface but greys out, so the state is visible.
-               "QPushButton:disabled { color: %16; }"
-               "QPushButton#settingsPrimary {"
-               " color: %13;"
-               " background: %14;"
-               " border: none; }"
-               "QPushButton#settingsPrimary:hover { background: %15; }"
-               // The 外观 segmented control: the checked segment is the accent
-               // pill, so the active mode reads at a glance in both themes.
-               "QPushButton#settingsSegment:checked {"
-               " color: %13;"
-               " background: %14;"
-               " border: 1px solid %14; }"
-               "QPushButton#settingsSegment:checked:hover {"
-               " background: %15;"
-               " border: 1px solid %15; }"
-               "QPushButton#settingsSegment:checked:pressed {"
-               " background: %15;"
-               " border: 1px solid %15; }")
+               "QFrame#settingsRowLine { background: %6; border: none; }")
         .arg(Theme::rgba(c.text))
         .arg(Theme::rgba(c.textMuted))
         // Cards are a surface, not paper: paper stays white in dark mode too
         // (it is the PDF page), and a white card on a dark page looks broken.
         .arg(Theme::rgba(c.surface))
         .arg(Theme::rgba(c.surfaceEdge))
-        .arg(Theme::px(qMax(Theme::Space2 + 2, m.radiusButton - Theme::Space1)))
+        .arg(Theme::px(Theme::ShapeMedium))      // MD3 card shape
         .arg(Theme::rgba(c.divider))
-        .arg(Theme::rgba(c.chipTint))
-        .arg(Theme::px(m.radiusButton))
-        .arg(Theme::px(m.padY))
-        .arg(Theme::px(m.padX + Theme::Space1))
-        .arg(Theme::rgba(c.surfaceHover))
-        .arg(Theme::rgba(c.surfacePressed))
-        .arg(Theme::rgba(c.onAccent))
-        .arg(Theme::rgba(c.accent))
-        .arg(Theme::rgba(c.accentHover))
-        .arg(Theme::rgba(c.textDisabled));
+        + buttonSheet(c, m);
 }
 
 // A rounded card with a hairline border. Rows go into `col`; the caller
@@ -313,8 +481,8 @@ struct ButtonRow {
     QHBoxLayout *row = nullptr;   // 按钮按加入顺序横排
 };
 
-// 行内按钮的用途：普通按钮 / 等宽分段按钮（选中态 = 强调色胶囊）/ 主操作按钮。
-enum class RowButton { Plain, Segment, Primary };
+// 行内按钮的用途：普通按钮 / 主操作按钮。
+enum class RowButton { Plain, Primary };
 
 ButtonRow makeButtonRow(QWidget *parent, const QFont &font)
 {
@@ -339,19 +507,9 @@ QPushButton *addRowButton(ButtonRow &row, const QFont &font, const QString &text
     button->setCursor(Qt::PointingHandCursor);
     button->setFont(Theme::chromeFont(font));
     button->setMinimumHeight(m.touch);         // 触控目标：整页按钮行统一高度
-    int stretch = 0;
-    if (kind == RowButton::Segment) {
-        // 分段按钮：等宽分满整行，选中态由 pageSheet 的
-        // QPushButton#settingsSegment:checked 画成强调色胶囊。
-        button->setObjectName(QStringLiteral("settingsSegment"));
-        button->setCheckable(true);
-        button->setFocusPolicy(Qt::NoFocus);
-        button->setMinimumWidth(m.touch * 2);
-        stretch = 1;
-    } else if (kind == RowButton::Primary) {
+    if (kind == RowButton::Primary)
         button->setObjectName(QStringLiteral("settingsPrimary"));
-    }
-    row.row->addWidget(button, stretch);
+    row.row->addWidget(button);
     return button;
 }
 
@@ -372,7 +530,291 @@ QLabel *makeSectionBody(QWidget *parent, const QString &text)
     return label;
 }
 
+// ---------------------------------------------------------------------------
+// SettingsSelect 的弹出层：原生 QMenu（见下方 SelectMenu）—— 宽度按内容算、
+// 文本不省略、键盘 / 点外部 / Esc 都由 Qt 管；皮肤走 selectMenuSheet()，当前项
+// 由菜单自己的对勾标出。
+// ---------------------------------------------------------------------------
+
+// 箭头与对勾共用的字形尺寸：跟随字体，最小 16 逻辑像素（= Space4）。
+int selectGlyphSize(const Theme::Metrics &m)
+{
+    return qMax(int(Theme::Space4), int(m.icon * 0.80));
+}
+
+// 弹出的菜单卡片皮肤：surface 卡片 + outlineVariant 发丝线 + ShapeMedium 圆角；
+// 行高向触控目标看齐，悬停 / 按下是压到卡片上的 MD3 状态层。当前项用强调色文字
+// —— Qt 把行的文字色同时交给左侧的对勾，勾与字因此同为强调色，一眼看清选了哪个。
+QString selectMenuSheet(const Theme::Palette &c, const QFont &font)
+{
+    const Theme::Metrics m = Theme::metrics(font);
+    const int textH = QFontMetrics(font).height();
+    const int padY = qMax(int(Theme::Space2), (int(m.touch) - textH + 1) / 2);
+    const int rowRadius = qMax(int(Theme::ShapeSmall), m.radiusPill);
+
+    return QStringLiteral(
+               "QMenu {"
+               " background-color: %1;"
+               " border: 1px solid %2;"
+               " border-radius: %3;"
+               " padding: %4; }"
+               "QMenu::item {"
+               " padding: %5 %6 %5 %7;"
+               " border-radius: %8;"
+               " color: %9; }"
+               "QMenu::item:selected { background-color: %10; }"
+               "QMenu::item:pressed { background-color: %11; }"
+               "QMenu::item:disabled { color: %12; }"
+               "QMenu::item:checked { color: %13; }")
+        .arg(Theme::rgba(c.surface))
+        .arg(Theme::rgba(c.outlineVariant))
+        .arg(Theme::px(Theme::ShapeMedium))
+        .arg(Theme::px(Theme::Space1))
+        .arg(Theme::px(padY))
+        .arg(Theme::px(Theme::Space3))     // 右侧内边距
+        .arg(Theme::px(Theme::Space4))     // 左侧给对勾留位
+        .arg(Theme::px(rowRadius))
+        .arg(Theme::rgba(c.text))
+        .arg(Theme::rgba(Theme::stateLayer(c.surface, c.onSurface, Theme::State::Hover)))
+        .arg(Theme::rgba(Theme::stateLayer(c.surface, c.onSurface, Theme::State::Pressed)))
+        .arg(Theme::rgba(c.textDisabled))
+        .arg(Theme::rgba(c.primary));
+}
+
+// QMenu 子类：补两件 Qt 不管的事 —— 去掉 Windows 给弹出窗口配的方形系统投影，
+// 以及打开时一段 130 ms 的淡入（「减少动效」下直接到位）。窗口透明度由窗口系统
+// 合成，不进任何部件的重绘路径。
+class SelectMenu : public QMenu
+{
+public:
+    explicit SelectMenu(QWidget *parent = nullptr)
+        : QMenu(parent)
+    {
+        setWindowFlags(windowFlags() | Qt::NoDropShadowWindowHint);
+        setToolTipsVisible(true);   // 「调色板风格」每项的说明挂在 action tooltip 上
+    }
+
+protected:
+    void showEvent(QShowEvent *event) override
+    {
+        QMenu::showEvent(event);
+
+        const int ms = Theme::Motion::reduced() ? 0 : kFadeMs;
+        if (ms <= 0) {
+            setWindowOpacity(1.0);
+            return;
+        }
+        setWindowOpacity(0.0);
+        auto *fade = new QPropertyAnimation(this, "windowOpacity", this);
+        fade->setDuration(ms);
+        fade->setStartValue(0.0);
+        fade->setEndValue(1.0);
+        fade->setEasingCurve(QEasingCurve::OutCubic);
+        fade->start(QAbstractAnimation::DeleteWhenStopped);
+    }
+
+    void hideEvent(QHideEvent *event) override
+    {
+        setWindowOpacity(1.0);      // 收起即复位：下次打开都从 0 重新淡入
+        QMenu::hideEvent(event);
+    }
+
+private:
+    static constexpr int kFadeMs = 130;
+};
+
 }   // namespace
+
+// ---------------------------------------------------------------------------
+// 设置行上的下拉选择。收起态是自绘 QToolButton（无框：右对齐当前值 + 右缘一枚
+// ChevronDown，悬停 / 按下铺圆角状态层，宽度按最宽选项算所以换值不跳行）；弹出层
+// 是原生 QMenu —— 宽度永远按内容算（文本不会被省略）、键盘可导航、点外部与 Esc 都
+// 归 Qt 管，换主题只换皮肤。只有用户真的从菜单里选定（QAction::triggered）才发
+// changed(int)，程序性的 setCurrentIndex 不打扰外面。
+// ---------------------------------------------------------------------------
+class SettingsSelect : public QToolButton
+{
+    Q_OBJECT
+public:
+    explicit SettingsSelect(const QStringList &options, QWidget *parent = nullptr)
+        : QToolButton(parent)
+        , m_options(options)
+    {
+        setFocusPolicy(Qt::NoFocus);
+        setCursor(Qt::PointingHandCursor);
+        setAttribute(Qt::WA_Hover, true);
+        setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
+
+        m_menu = new SelectMenu(this);
+        auto *group = new QActionGroup(m_menu);
+        group->setExclusive(true);
+        for (int i = 0; i < m_options.size(); ++i) {
+            QAction *action = m_menu->addAction(m_options.at(i));
+            action->setCheckable(true);
+            action->setActionGroup(group);
+            connect(action, &QAction::triggered, this, [this, i] { emit changed(i); });
+        }
+        m_menu->setStyleSheet(selectMenuSheet(Theme::light(), font()));
+        // 菜单收起后重画一次：清掉打开时被冻结的悬停层（见 paintEvent 的说明）。
+        connect(m_menu, &QMenu::aboutToHide, this, [this] { update(); });
+
+        setCurrentIndex(0);
+    }
+
+    int currentIndex() const { return m_index; }
+
+    // 程序性同步：挡住 action 的信号，外部 connect 到 changed 的槽不会被打扰。
+    void setCurrentIndex(int index)
+    {
+        const int n = m_options.size();
+        if (n <= 0)
+            return;
+        const int i = qBound(0, index, n - 1);
+        m_index = i;
+        // 不挡信号：QActionGroup 是靠 action 的 toggled 信号取消旧选中项的，挡住它
+        // 会让旧项一直保持勾选（菜单里出现两个对勾）。这里也不会误发 changed ——
+        // changed 只从 QAction::triggered（真实点击）发出，程序性 setChecked 不触发它。
+        const QList<QAction *> acts = m_menu->actions();
+        if (i < acts.size())
+            acts.at(i)->setChecked(true);
+        syncTip();
+        update();
+    }
+
+    // 每项的悬停提示（调色板风格行用它解释四种算法）；收起态显示当前项的。
+    void setOptionTips(const QStringList &tips)
+    {
+        m_tips = tips;
+        const QList<QAction *> acts = m_menu->actions();
+        for (int i = 0; i < acts.size() && i < tips.size(); ++i)
+            acts.at(i)->setToolTip(tips.at(i));
+        syncTip();
+    }
+
+    void refreshTheme()
+    {
+        m_menu->setStyleSheet(selectMenuSheet(Theme::light(), font()));
+        update();
+    }
+
+signals:
+    void changed(int index);
+
+protected:
+    QSize sizeHint() const override
+    {
+        const Theme::Metrics m = Theme::metrics(font());
+        const QFontMetrics fm(font());
+        int text = 0;
+        for (const QString &s : m_options)
+            text = qMax(text, fm.horizontalAdvance(s));
+        return QSize(text + 2 * Theme::Space3 + Theme::Space2 + selectGlyphSize(m),
+                     qMax(int(m.touch), fm.height() + Theme::Space2));
+    }
+
+    QSize minimumSizeHint() const override { return sizeHint(); }
+
+    void paintEvent(QPaintEvent *) override
+    {
+        const Theme::Palette &pal = Theme::light();
+        const Theme::Metrics m = Theme::metrics(font());
+
+        QPainter p(this);
+        p.setRenderHint(QPainter::Antialiasing, true);
+
+        // 悬停：整块一个圆角状态层，和行内按钮同一套语言。用显式的 hover 标记
+        // 而不是 underMouse()：点开菜单后弹出层抢走鼠标，underMouse() 会一直停在
+        // true，状态层就「粘」在控件上（要滚动才消）；这里在打开菜单时清掉它。
+        if (isEnabled() && m_hover) {
+            p.setPen(Qt::NoPen);
+            p.setBrush(Theme::stateLayer(pal.surface, pal.onSurface, Theme::State::Hover));
+            const int radius = qMax(int(Theme::ShapeSmall), m.radiusPill);
+            p.drawRoundedRect(rect(), radius, radius);
+        }
+
+        // 右侧箭头（比正文淡一档 = onSurfaceVariant），当前值右对齐贴着它。
+        const int box = selectGlyphSize(m);
+        const QRectF arrow(width() - Theme::Space3 - box,
+                           (height() - box) / 2.0, box, box);
+        IconPainter::paintGlyph(p, IconPainter::Glyph::ChevronDown, arrow,
+                                isEnabled() ? pal.textMuted : pal.textDisabled);
+        p.setFont(font());
+        p.setPen(isEnabled() ? pal.text : pal.textDisabled);
+        const QRect textRect(0, 0, qMax(0, int(arrow.left()) - Theme::Space2), height());
+        p.drawText(textRect, Qt::AlignRight | Qt::AlignVCenter, currentLabel());
+    }
+
+    // 弹出的菜单由 Qt 拥有（能越出滚动区域），这里只把它的位置对齐到收起态的
+    // 右缘；超出屏幕时钳回可用区域。
+    void mousePressEvent(QMouseEvent *event) override
+    {
+        if (event->button() != Qt::LeftButton) {
+            QToolButton::mousePressEvent(event);
+            return;
+        }
+        const QSize hint = m_menu->sizeHint();
+        const QPoint below = mapToGlobal(QPoint(width() - hint.width(), height() + 2));
+        QPoint pos = below;
+        if (QScreen *scr = screen()) {
+            const QRect avail = scr->availableGeometry();
+            const int x = qBound(avail.left(), below.x(), avail.right() - hint.width() + 1);
+            int y = below.y();
+            if (y + hint.height() > avail.bottom())
+                y = mapToGlobal(QPoint(0, 0)).y() - hint.height() - 2;   // 下方放不下就翻到上方
+            pos = QPoint(x, y);
+        }
+        m_hover = false;        // 菜单接管鼠标：先收掉悬停层，别把它冻在控件上
+        update();
+        m_menu->popup(pos);
+        event->accept();
+    }
+
+    // 设置页是滚动的：滚轮划过控件时不能顺手把值改了 —— 选择只由点击触发。
+    void wheelEvent(QWheelEvent *event) override { event->ignore(); }
+
+    void enterEvent(QEnterEvent *event) override
+    {
+        QToolButton::enterEvent(event);
+        m_hover = true;
+        update();
+    }
+
+    void leaveEvent(QEvent *event) override
+    {
+        QToolButton::leaveEvent(event);
+        m_hover = false;
+        update();
+    }
+
+    // 字体（DPI / 系统字号）变了，弹出菜单的字体与行尺寸跟上。
+    void changeEvent(QEvent *event) override
+    {
+        QToolButton::changeEvent(event);
+        if (event->type() == QEvent::FontChange
+            || event->type() == QEvent::ApplicationFontChange) {
+            refreshTheme();
+        }
+    }
+
+private:
+    QString currentLabel() const
+    {
+        return (m_index >= 0 && m_index < m_options.size()) ? m_options.at(m_index)
+                                                            : QString();
+    }
+
+    void syncTip()
+    {
+        setToolTip(m_index >= 0 && m_index < m_tips.size() ? m_tips.at(m_index)
+                                                           : currentLabel());
+    }
+
+    QStringList  m_options;
+    QStringList  m_tips;
+    SelectMenu  *m_menu = nullptr;
+    int          m_index = 0;
+    bool         m_hover = false;
+};
 
 SettingsPage::SettingsPage(QWidget *parent)
     : QScrollArea(parent)
@@ -462,6 +904,24 @@ void SettingsPage::buildUi()
                                        QStringLiteral("手掌当橡皮（实验性）"),
                                        QStringLiteral("实验性功能，暂不可用：多指触摸会被系统手势拦截"),
                                        m_palmEraser, Theme::Space3, Theme::Space3));
+    m_reduceMotion = new ToggleSwitch(general.frame);
+    m_reduceMotion->setToolTip(QStringLiteral("界面动画直接跳到结果，适合配置较低的一体机"));
+    m_reduceMotion->setChecked(AppSettings::reduceMotion());
+    connect(m_reduceMotion, &QAbstractButton::toggled, this, &SettingsPage::onReduceMotionToggled);
+    general.col->addWidget(makeTextRow(general.frame,
+                                       QStringLiteral("减少动效"),
+                                       QStringLiteral("关闭界面动画，配置较低的一体机上更省资源"),
+                                       m_reduceMotion, Theme::Space3, Theme::Space3));
+    m_gpuAccel = new ToggleSwitch(general.frame);
+    m_gpuAccel->setToolTip(QStringLiteral("用 GPU 渲染页面；仅有独立显卡驱动时有效，"
+                                          "软件 OpenGL 会被忽略。重新打开文档后生效"));
+    m_gpuAccel->setChecked(AppSettings::gpuAcceleration());
+    connect(m_gpuAccel, &QAbstractButton::toggled, this, &SettingsPage::onGpuAccelerationToggled);
+    general.col->addWidget(makeTextRow(general.frame,
+                                       QStringLiteral("硬件加速（实验性）"),
+                                       QStringLiteral("用 GPU 渲染页面，重新打开文档后生效；"
+                                                      "仅在显卡驱动可用时起作用"),
+                                       m_gpuAccel, Theme::Space3, Theme::Space3));
     col->addWidget(general.frame);
 
     // --- Word 文档 ----------------------------------------------------------
@@ -470,26 +930,19 @@ void SettingsPage::buildUi()
 
     const Card wordOpen = makeCard(m_column);
     {
-        ButtonRow segments = makeButtonRow(wordOpen.frame, font());
-
-        m_wordGroup = new QButtonGroup(this);
-        m_wordGroup->setExclusive(true);
-        const QString labels[3] = { QStringLiteral("每次询问"), QStringLiteral("批注"),
-                                    QStringLiteral("用 Word 打开") };
-        for (int i = 0; i < 3; ++i) {
-            QPushButton *button =
-                addRowButton(segments, font(), labels[i], RowButton::Segment);
-            m_wordGroup->addButton(button, i);
-            m_wordSegments[i] = button;
-        }
-        connect(m_wordGroup, &QButtonGroup::idClicked,
+        m_wordSelect = new SettingsSelect(
+            { QStringLiteral("每次询问"), QStringLiteral("批注"),
+              QStringLiteral("用 Word 打开") },
+            wordOpen.frame);
+        m_wordSelect->setFont(Theme::chromeFont(font()));
+        connect(m_wordSelect, &SettingsSelect::changed,
                 this, &SettingsPage::onWordModePicked);
-        syncWordSegment();
+        syncWordSelect();
 
         wordOpen.col->addWidget(makeTextRow(wordOpen.frame,
                                             QStringLiteral("打开 Word 文档时"),
                                             QStringLiteral("每次询问 / 批注 / 用 Word 打开"),
-                                            segments.box, Theme::Space4, Theme::Space4));
+                                            m_wordSelect, Theme::Space4, Theme::Space4));
         wordOpen.col->addWidget(makeRowSeparator(wordOpen.frame));
 
         // The nag fix: a toggle that persists AppSettings::wordNagFixEnabled,
@@ -513,7 +966,7 @@ void SettingsPage::buildUi()
         m_restoreWordNag = new QPushButton(QStringLiteral("恢复 Word 设置"), nagTrailing);
         m_restoreWordNag->setCursor(Qt::PointingHandCursor);
         m_restoreWordNag->setFont(Theme::chromeFont(font()));
-        m_restoreWordNag->setMinimumHeight(int(m.touch * 0.72));
+        m_restoreWordNag->setMinimumHeight(m.touch);   // 满触控高：药丸圆角=touch/2，更矮会溢出退化成方角
         nv->addWidget(m_restoreWordNag, 0, Qt::AlignRight);
 
         auto *nagRow = new QWidget(wordOpen.frame);
@@ -563,26 +1016,18 @@ void SettingsPage::buildUi()
 
     const Card appearance = makeCard(m_column);
     {
-        ButtonRow segments = makeButtonRow(appearance.frame, font());
-
-        m_themeGroup = new QButtonGroup(this);
-        m_themeGroup->setExclusive(true);
-        const QString labels[3] = { QStringLiteral("系统"), QStringLiteral("浅色"),
-                                    QStringLiteral("深色") };
-        for (int i = 0; i < 3; ++i) {
-            QPushButton *button =
-                addRowButton(segments, font(), labels[i], RowButton::Segment);
-            m_themeGroup->addButton(button, i);
-            m_themeSegments[i] = button;
-        }
-        connect(m_themeGroup, &QButtonGroup::idClicked,
+        m_themeSelect = new SettingsSelect(
+            { QStringLiteral("系统"), QStringLiteral("浅色"), QStringLiteral("深色") },
+            appearance.frame);
+        m_themeSelect->setFont(Theme::chromeFont(font()));
+        connect(m_themeSelect, &SettingsSelect::changed,
                 this, &SettingsPage::onThemePicked);
-        syncThemeSegment();
+        syncThemeSelect();
 
         appearance.col->addWidget(makeTextRow(appearance.frame,
                                               QStringLiteral("外观"),
                                               QStringLiteral("跟随系统 / 浅色 / 深色"),
-                                              segments.box, Theme::Space4, Theme::Space4));
+                                              m_themeSelect, Theme::Space4, Theme::Space4));
         appearance.col->addWidget(makeRowSeparator(appearance.frame));
 
         // The hint that explains what 系统 currently resolves to.
@@ -600,25 +1045,91 @@ void SettingsPage::buildUi()
         appearance.col->addWidget(makeRowSeparator(appearance.frame));
 
         // 工具栏风格：两种外观、同一组按钮（简约 = 纯图标，文字 = 图标+名称）。
-        ButtonRow styleSegments = makeButtonRow(appearance.frame, font());
-        m_toolbarStyleGroup = new QButtonGroup(this);
-        m_toolbarStyleGroup->setExclusive(true);
-        const QString styleLabels[2] = { QStringLiteral("简约"), QStringLiteral("文字") };
-        for (int i = 0; i < 2; ++i) {
-            QPushButton *button =
-                addRowButton(styleSegments, font(), styleLabels[i], RowButton::Segment);
-            m_toolbarStyleGroup->addButton(button, i);
-            m_toolbarStyleSegments[i] = button;
-        }
-        connect(m_toolbarStyleGroup, &QButtonGroup::idClicked,
+        m_toolbarStyleSelect = new SettingsSelect(
+            { QStringLiteral("简约"), QStringLiteral("文字") }, appearance.frame);
+        m_toolbarStyleSelect->setFont(Theme::chromeFont(font()));
+        connect(m_toolbarStyleSelect, &SettingsSelect::changed,
                 this, &SettingsPage::onToolbarStylePicked);
-        syncToolbarStyleSegment();
+        syncToolbarStyleSelect();
 
         appearance.col->addWidget(makeTextRow(
             appearance.frame,
             QStringLiteral("工具栏风格"),
             QStringLiteral("简约（纯图标）/ 文字（图标+名称）"),
-            styleSegments.box, Theme::Space4, Theme::Space4));
+            m_toolbarStyleSelect, Theme::Space4, Theme::Space4));
+        appearance.col->addWidget(makeRowSeparator(appearance.frame));
+
+        // 主题色：8 个种子色的圆形色板，横排成一行。色板自带触控目标宽度，
+        // 挂在行右侧会把说明文字挤成一条缝，所以整行竖排：标题 / 说明 / 色板。
+        auto *seedWrap = new QWidget(appearance.frame);
+        auto *seedCol = new QVBoxLayout(seedWrap);
+        seedCol->setContentsMargins(Theme::Space4, Theme::Space4, Theme::Space4, Theme::Space4);
+        seedCol->setSpacing(Theme::Space1);
+
+        auto *seedTitle = new QLabel(QStringLiteral("主题色"), seedWrap);
+        seedTitle->setFont(Theme::chromeFont(seedWrap->font()));
+        seedTitle->setWordWrap(true);
+        seedCol->addWidget(seedTitle);
+
+        auto *seedBody = new QLabel(
+            QStringLiteral("选择界面配色由哪个种子色推导（PDF 纸面始终保持白色）"), seedWrap);
+        seedBody->setObjectName(QStringLiteral("settingsRowBody"));
+        seedBody->setFont(Theme::scaledFont(seedWrap->font(), 0.95, QFont::Normal));
+        seedBody->setWordWrap(true);
+        seedCol->addWidget(seedBody);
+
+        auto *seedStrip = new QWidget(seedWrap);
+        auto *seedRow = new QHBoxLayout(seedStrip);
+        seedRow->setContentsMargins(0, Theme::Space2, 0, 0);
+        seedRow->setSpacing(Theme::Space2);
+
+        m_themePresetGroup = new QButtonGroup(this);
+        m_themePresetGroup->setExclusive(true);
+        const QString seedNames[ThemePresets::kSeedCount] = {
+            QStringLiteral("蓝（默认）"), QStringLiteral("青绿"), QStringLiteral("绿"),
+            QStringLiteral("琥珀"), QStringLiteral("橙"), QStringLiteral("红"),
+            QStringLiteral("紫"), QStringLiteral("灰蓝") };
+        for (int i = 0; i < ThemePresets::kSeedCount; ++i) {
+            auto *swatch = new SeedSwatch(i, seedStrip);
+            swatch->setToolTip(seedNames[i]);
+            m_themePresetGroup->addButton(swatch, i);
+            m_themePresetSwatches[i] = swatch;
+            seedRow->addWidget(swatch, 0, Qt::AlignVCenter);
+        }
+        seedRow->addStretch(1);
+        connect(m_themePresetGroup, &QButtonGroup::idClicked,
+                this, &SettingsPage::onThemePresetPicked);
+        syncThemePreset();
+
+        seedCol->addWidget(seedStrip);
+        appearance.col->addWidget(seedWrap);
+        appearance.col->addWidget(makeRowSeparator(appearance.frame));
+
+        // 调色板风格：种子色 → 配色的推导算法（MD3 的四个变体），与「外观 /
+        // 工具栏风格」同一套下拉；每种算法的解释挂在列表项和当前值的提示上。
+        const QString paletteLabels[ThemePresets::kStyleCount] = {
+            QStringLiteral("保真"), QStringLiteral("均衡"),
+            QStringLiteral("中性"), QStringLiteral("单色") };
+        const QString paletteTips[ThemePresets::kStyleCount] = {
+            QStringLiteral("保留种子本身彩度、最贴品牌色（默认）"),
+            QStringLiteral("Material 3 默认"),
+            QStringLiteral("接近灰、最低调"),
+            QStringLiteral("纯灰阶") };
+        m_paletteStyleSelect = new SettingsSelect(
+            { paletteLabels[0], paletteLabels[1], paletteLabels[2], paletteLabels[3] },
+            appearance.frame);
+        m_paletteStyleSelect->setFont(Theme::chromeFont(font()));
+        m_paletteStyleSelect->setOptionTips(
+            { paletteTips[0], paletteTips[1], paletteTips[2], paletteTips[3] });
+        connect(m_paletteStyleSelect, &SettingsSelect::changed,
+                this, &SettingsPage::onPaletteStylePicked);
+        syncPaletteStyleSelect();
+
+        appearance.col->addWidget(makeTextRow(
+            appearance.frame,
+            QStringLiteral("调色板风格"),
+            QStringLiteral("由种子色推导配色的算法"),
+            m_paletteStyleSelect, Theme::Space4, Theme::Space4));
     }
     col->addWidget(appearance.frame);
 
@@ -674,7 +1185,11 @@ void SettingsPage::buildUi()
     m_register->setObjectName(QStringLiteral("settingsPrimary"));
     m_register->setCursor(Qt::PointingHandCursor);
     m_register->setFont(Theme::chromeFont(font()));
-    m_register->setMinimumHeight(int(m.touch * 0.8));
+    // Full touch height, same as every other button: Qt's style sheet only keeps
+    // the pill radius while it fits inside the button (radius <= height/2), and a
+    // 0.8-height button made the shared radius overflow it - the corners fell back
+    // to square.
+    m_register->setMinimumHeight(m.touch);
     m_register->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Fixed);
     connect(m_register, &QPushButton::clicked, this, &SettingsPage::onRegisterPdf);
     assoc.col->addWidget(makeTextRow(assoc.frame,
@@ -733,7 +1248,7 @@ void SettingsPage::buildUi()
         m_openLogDir = new QPushButton(QStringLiteral("打开日志文件夹"), logRow);
         m_openLogDir->setCursor(Qt::PointingHandCursor);
         m_openLogDir->setFont(Theme::chromeFont(font()));
-        m_openLogDir->setMinimumHeight(int(m.touch * 0.72));
+        m_openLogDir->setMinimumHeight(m.touch);   // 满触控高：药丸圆角=touch/2，更矮会溢出退化成方角
         h->addWidget(m_openLogDir, 0, Qt::AlignVCenter);
         debugCard.col->addWidget(logRow);
     }
@@ -804,7 +1319,7 @@ void SettingsPage::buildUi()
         auto *repoButton = new QPushButton(QStringLiteral("项目主页"), linksRow);
         repoButton->setCursor(Qt::PointingHandCursor);
         repoButton->setFont(Theme::chromeFont(font()));
-        repoButton->setMinimumHeight(int(m.touch * 0.72));
+        repoButton->setMinimumHeight(m.touch);   // 满触控高：药丸圆角=touch/2，更矮会溢出退化成方角
         connect(repoButton, &QPushButton::clicked, this, [] {
             QDesktopServices::openUrl(
                 QUrl(QStringLiteral("https://github.com/zhuzhi-09/pdfboard")));
@@ -965,23 +1480,27 @@ void SettingsPage::refreshTheme()
                               .pixmap(glyph, glyph));
     }
 
-    for (QPushButton *segment : m_themeSegments) {
-        if (!segment)
-            continue;
-        segment->style()->unpolish(segment);
-        segment->style()->polish(segment);
-    }
-    for (QPushButton *segment : m_wordSegments) {
-        if (!segment)
-            continue;
-        segment->style()->unpolish(segment);
-        segment->style()->polish(segment);
+    // 四个下拉：弹出层的卡片皮肤按新调色板重生成。
+    for (SettingsSelect *select : { m_wordSelect, m_themeSelect, m_toolbarStyleSelect,
+                                    m_paletteStyleSelect }) {
+        if (select)
+            select->refreshTheme();
     }
 
-    syncThemeSegment();
-    syncWordSegment();
+    syncThemeSelect();
+    syncWordSelect();
+    syncThemePreset();
+    syncPaletteStyleSelect();
+    syncToolbarStyleSelect();
     refreshWordNag();
     refreshThemeNote();
+
+    // 种子色板：选中圆环与悬停圆晕取自实时调色板（primary / text），换主题
+    // （含 主题色 / 调色板风格）后必须重绘；元素可能为空，页面未建好时安全跳过。
+    for (QAbstractButton *swatch : m_themePresetSwatches) {
+        if (swatch)
+            swatch->update();
+    }
     update();
 }
 
@@ -1002,15 +1521,12 @@ void SettingsPage::refreshThemeNote()
     }
 }
 
-void SettingsPage::syncThemeSegment()
+void SettingsPage::syncThemeSelect()
 {
-    if (!m_themeGroup)
+    if (!m_themeSelect)
         return;
-    QAbstractButton *button = m_themeGroup->button(AppSettings::themeMode());
-    if (!button || button->isChecked())
-        return;
-    const QSignalBlocker block(m_themeGroup);
-    button->setChecked(true);
+    const QSignalBlocker block(m_themeSelect);
+    m_themeSelect->setCurrentIndex(AppSettings::themeMode());
 }
 
 void SettingsPage::onThemePicked(int mode)
@@ -1018,24 +1534,21 @@ void SettingsPage::onThemePicked(int mode)
     QString err;
     if (!AppSettings::setThemeMode(mode, &err)) {
         QMessageBox::warning(this, QStringLiteral("设置失败"), err);
-        syncThemeSegment();      // show the value that is really stored
+        syncThemeSelect();       // show the value that is really stored
         return;
     }
 
-    syncThemeSegment();
+    syncThemeSelect();
     emit themeChanged();         // MainWindow re-applies the theme everywhere
     refreshThemeNote();
 }
 
-void SettingsPage::syncToolbarStyleSegment()
+void SettingsPage::syncToolbarStyleSelect()
 {
-    if (!m_toolbarStyleGroup)
+    if (!m_toolbarStyleSelect)
         return;
-    QAbstractButton *button = m_toolbarStyleGroup->button(AppSettings::toolbarStyle());
-    if (!button || button->isChecked())
-        return;
-    const QSignalBlocker block(m_toolbarStyleGroup);
-    button->setChecked(true);
+    const QSignalBlocker block(m_toolbarStyleSelect);
+    m_toolbarStyleSelect->setCurrentIndex(AppSettings::toolbarStyle());
 }
 
 void SettingsPage::onToolbarStylePicked(int style)
@@ -1043,22 +1556,62 @@ void SettingsPage::onToolbarStylePicked(int style)
     QString err;
     if (!AppSettings::setToolbarStyle(style, &err)) {
         QMessageBox::warning(this, QStringLiteral("设置失败"), err);
-        syncToolbarStyleSegment();   // show the value that is really stored
+        syncToolbarStyleSelect();   // show the value that is really stored
         return;
     }
-    syncToolbarStyleSegment();
+    syncToolbarStyleSelect();
     emit toolbarStyleChanged();      // MainWindow pushes it to every toolbar
 }
 
-void SettingsPage::syncWordSegment()
+void SettingsPage::syncThemePreset()
 {
-    if (!m_wordGroup)
+    if (!m_themePresetGroup)
         return;
-    QAbstractButton *button = m_wordGroup->button(AppSettings::wordOpenMode());
+    QAbstractButton *button = m_themePresetGroup->button(AppSettings::themePreset());
     if (!button || button->isChecked())
         return;
-    const QSignalBlocker block(m_wordGroup);
+    const QSignalBlocker block(m_themePresetGroup);
     button->setChecked(true);
+}
+
+void SettingsPage::onThemePresetPicked(int preset)
+{
+    QString err;
+    if (!AppSettings::setThemePreset(preset, &err)) {
+        QMessageBox::warning(this, QStringLiteral("设置失败"), err);
+        syncThemePreset();       // show the value that is really stored
+        return;
+    }
+    syncThemePreset();
+    emit themeChanged();         // MainWindow re-applies the theme everywhere
+}
+
+void SettingsPage::syncPaletteStyleSelect()
+{
+    if (!m_paletteStyleSelect)
+        return;
+    const QSignalBlocker block(m_paletteStyleSelect);
+    m_paletteStyleSelect->setCurrentIndex(AppSettings::themeStyle());
+}
+
+void SettingsPage::onPaletteStylePicked(int style)
+{
+    QString err;
+    if (!AppSettings::setThemeStyle(style, &err)) {
+        QMessageBox::warning(this, QStringLiteral("设置失败"), err);
+        syncPaletteStyleSelect();    // show the value that is really stored
+        return;
+    }
+    syncPaletteStyleSelect();
+    emit themeChanged();             // MainWindow re-applies the theme everywhere
+}
+
+void SettingsPage::syncWordSelect()
+{
+    if (!m_wordSelect)
+        return;
+    const QSignalBlocker block(m_wordSelect);
+    m_wordSelect->setCurrentIndex(AppSettings::wordOpenMode());
 }
 
 void SettingsPage::onWordModePicked(int mode)
@@ -1066,10 +1619,10 @@ void SettingsPage::onWordModePicked(int mode)
     QString err;
     if (!AppSettings::setWordOpenMode(mode, &err)) {
         QMessageBox::warning(this, QStringLiteral("设置失败"), err);
-        syncWordSegment();      // show the value that is really stored
+        syncWordSelect();       // show the value that is really stored
         return;
     }
-    syncWordSegment();
+    syncWordSelect();
 }
 
 void SettingsPage::onWordNagFixToggled(bool on)
@@ -1203,6 +1756,30 @@ void SettingsPage::onPalmEraserToggled(bool on)
     emit palmEraserChanged();
 }
 
+void SettingsPage::onReduceMotionToggled(bool on)
+{
+    QString err;
+    if (!AppSettings::setReduceMotion(on, &err)) {
+        QMessageBox::warning(this, QStringLiteral("保存失败"), err);
+        const QSignalBlocker block(m_reduceMotion);
+        m_reduceMotion->setChecked(AppSettings::reduceMotion());
+        return;
+    }
+    Theme::Motion::setReduced(on);   // takes effect on the next animation, no restart
+}
+
+// 硬件加速 has no live switch: the viewport is chosen when a document's canvas is
+// created, so the value only applies to documents opened from now on.
+void SettingsPage::onGpuAccelerationToggled(bool on)
+{
+    QString err;
+    if (!AppSettings::setGpuAcceleration(on, &err)) {
+        QMessageBox::warning(this, QStringLiteral("保存失败"), err);
+        const QSignalBlocker block(m_gpuAccel);
+        m_gpuAccel->setChecked(AppSettings::gpuAcceleration());
+    }
+}
+
 void SettingsPage::onRegisterPdf()
 {
     QString err;
@@ -1227,3 +1804,5 @@ void SettingsPage::onRegisterPdf()
     if (box.exec() == QMessageBox::Ok)
         QDesktopServices::openUrl(QUrl(QStringLiteral("ms-settings:defaultapps")));
 }
+
+#include "SettingsPage.moc"

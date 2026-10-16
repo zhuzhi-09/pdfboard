@@ -633,7 +633,8 @@ static int runSmokeSelfTest(const QString &path)
                   qRound(island->testIdleOpacity() * 100.0), 40);
             const int armsBefore = window.testIdleArmCount();
             {
-                // 合成一次鼠标按下 / 抬起，发到窗口 -> 走真实的 QApplication 事件过滤器。
+                // 新口径的成对证明（上）：点空白窗口 / 画布 **不**恢复、也不重新计时
+                // —— 滚动与书写走的正是这条路，它们不该把岛顶回 100%。
                 const QPointF at(5.0, 5.0);
                 const QPointF global = window.mapToGlobal(at.toPoint());
                 QMouseEvent press(QEvent::MouseButtonPress, at, global, Qt::LeftButton,
@@ -643,9 +644,25 @@ static int runSmokeSelfTest(const QString &path)
                                     Qt::NoButton, Qt::NoModifier);
                 QApplication::sendEvent(&window, &release);
             }
-            check("idle: any input targets the visible state again",
+            check("idle: a press off the island does not restore",
+                  island->testIdleFaded() ? 1 : 0, 1);
+            check("idle: a press off the island does not rearm",
+                  window.testIdleArmCount(), armsBefore);
+            if (moveBtn) {
+                // 成对证明（下）：点在岛上的按钮 -> 恢复 + 重新计时。
+                const QPointF local(hitPt);
+                const QPointF global(moveBtn->mapToGlobal(hitPt));
+                QMouseEvent press(QEvent::MouseButtonPress, local, global, Qt::LeftButton,
+                                  Qt::LeftButton, Qt::NoModifier);
+                QApplication::sendEvent(moveBtn, &press);
+                QMouseEvent release(QEvent::MouseButtonRelease, local, global, Qt::LeftButton,
+                                    Qt::NoButton, Qt::NoModifier);
+                QApplication::sendEvent(moveBtn, &release);
+                doc->setTool(PdfCanvas::InkTool::Pen);   // 复原工具
+            }
+            check("idle: clicking the island targets the visible state again",
                   island->testIdleFaded() ? 0 : 1, 1);
-            check("idle: the input restarts the 5 s timer",
+            check("idle: the island click restarts the 5 s timer",
                   window.testIdleArmCount(), armsBefore + 1);
             check("idle: the timer is running after the input",
                   window.testIdleTimerActive() ? 1 : 0, 1);
@@ -654,7 +671,7 @@ static int runSmokeSelfTest(const QString &path)
                   qRound(island->testIdleOpacity() * 100.0), 100);
             check("idle: the effect is off at rest (cheap)",
                   island->testIdleEffectEnabled() ? 0 : 1, 1);
-            out(QStringLiteral("[selftest] 输入恢复：不透明度 %1，效果器 %2，定时器 %3，计数 %4->%5")
+            out(QStringLiteral("[selftest] 岛点击恢复：不透明度 %1，效果器 %2，定时器 %3，计数 %4->%5")
                     .arg(island->testIdleOpacity(), 0, 'f', 2)
                     .arg(island->testIdleEffectEnabled() ? QStringLiteral("启用")
                                                          : QStringLiteral("关闭"))
@@ -684,6 +701,24 @@ static int runSmokeSelfTest(const QString &path)
             // 收尾：恢复静止态，别把淡出留给后面的断言。
             island->setIdleFaded(false);
             island->testIdleAt(island->testIdleFadeDurationMs());
+
+            // 面板展开规则（用户口径）：第一次切到橡皮只换工具、**不**展开；该工具已
+            // 选中时再点才展开 / 收起。橡皮与笔走同一段代码，用它验证规则本身。
+            if (QToolButton *eraser = island->testEraserButton()) {
+                doc->setTool(PdfCanvas::InkTool::Move);
+                eraser->click();
+                check("palette: first eraser switch selects the tool",
+                      doc->tool() == PdfCanvas::InkTool::Eraser ? 1 : 0, 1);
+                check("palette: first switch does not open the panel",
+                      island->hasOpenOverlay() ? 0 : 1, 1);
+                eraser->click();
+                check("palette: a second click opens the panel",
+                      island->hasOpenOverlay() ? 1 : 0, 1);
+                eraser->click();
+                check("palette: a third click closes the panel",
+                      island->hasOpenOverlay() ? 0 : 1, 1);
+                doc->setTool(PdfCanvas::InkTool::Pen);
+            }
         }
     }
 
@@ -1366,9 +1401,10 @@ static int runInkSelfTest(const QString &path)
             check("collapse: the pin holds through a reversal", xBack, xExpanded0);
 
             // Deterministic viewport shot so the centred default is eyeballable.
-            if (QDir(QStringLiteral("D:/dev/tmp")).exists())
+            if (QDir(QStringLiteral("D:/dev/tmp")).exists()) {
                 fresh.viewport()->grab().save(
                     QStringLiteral("D:/dev/tmp/island-default.png"), "PNG");
+            }
         }
     }
 
@@ -1842,11 +1878,134 @@ static int runThemeSelfTest()
         raw.remove(QStringLiteral("ToolbarStyle"));
     raw.sync();
 
+    // 主题色 / 调色板风格（MD3 预设表见 ThemePresets.generated.h）：注册表往返，
+    // 默认 0、越界回 0、set/read-back，处理完复原。
+    const QVariant savedThemePreset = raw.value(QStringLiteral("ThemePreset"));
+    const QVariant savedThemeStyle = raw.value(QStringLiteral("ThemeStyle"));
+    raw.remove(QStringLiteral("ThemePreset"));
+    raw.remove(QStringLiteral("ThemeStyle"));
+    raw.sync();
+    check("preset: default is 0", AppSettings::themePreset(), 0);
+    check("style: default is 0", AppSettings::themeStyle(), 0);
+    raw.setValue(QStringLiteral("ThemePreset"), 99);
+    raw.setValue(QStringLiteral("ThemeStyle"), 99);
+    raw.sync();
+    check("preset: out-of-range reads 0", AppSettings::themePreset(), 0);
+    check("style: out-of-range reads 0", AppSettings::themeStyle(), 0);
+    check("preset: set 3 succeeds", AppSettings::setThemePreset(3, nullptr) ? 1 : 0, 1);
+    check("preset: stored 3 reads back", AppSettings::themePreset(), 3);
+    check("style: set 2 succeeds", AppSettings::setThemeStyle(2, nullptr) ? 1 : 0, 1);
+    check("style: stored 2 reads back", AppSettings::themeStyle(), 2);
+    if (savedThemePreset.isValid())
+        raw.setValue(QStringLiteral("ThemePreset"), savedThemePreset);
+    else
+        raw.remove(QStringLiteral("ThemePreset"));
+    if (savedThemeStyle.isValid())
+        raw.setValue(QStringLiteral("ThemeStyle"), savedThemeStyle);
+    else
+        raw.remove(QStringLiteral("ThemeStyle"));
+    raw.sync();
+
+    // Every (种子 × 风格 × 明暗) scheme must build and stay legible: the paper is
+    // pure white in BOTH modes (the standing rule) and the two critical WCAG
+    // pairs clear their thresholds. Luminance is the WCAG 2.x definition (sRGB
+    // linearisation, then (L1 + 0.05) / (L2 + 0.05)).
+    auto luminance = [](const QColor &c) {
+        auto lin = [](qreal v) {
+            v /= 255.0;
+            return v <= 0.03928 ? v / 12.92 : qPow((v + 0.055) / 1.055, 2.4);
+        };
+        return 0.2126 * lin(c.red()) + 0.7152 * lin(c.green()) + 0.0722 * lin(c.blue());
+    };
+    auto contrast = [&luminance](const QColor &a, const QColor &b) {
+        const qreal la = luminance(a);
+        const qreal lb = luminance(b);
+        return (qMax(la, lb) + 0.05) / (qMin(la, lb) + 0.05);
+    };
+    int combos = 0;
+    int combosFails = 0;
+    for (int p = 0; p < ThemePresets::kSeedCount; ++p) {
+        for (int st = 0; st < ThemePresets::kStyleCount; ++st) {
+            for (int dark = 0; dark < ThemePresets::kModeCount; ++dark) {
+                const Theme::Palette pal = Theme::makePalette(dark != 0, p, st);
+                ++combos;
+                if (pal.paper != QColor(0xFF, 0xFF, 0xFF))
+                    ++combosFails;
+                if (contrast(pal.onSurface, pal.surface) < 4.5)
+                    ++combosFails;
+                if (contrast(pal.primary, pal.onPrimary) < 3.0)
+                    ++combosFails;
+            }
+        }
+    }
+    check("preset: combinations covered", combos,
+          ThemePresets::kSeedCount * ThemePresets::kStyleCount * ThemePresets::kModeCount);
+    check("preset: every scheme is legible", combosFails, 0);
+
+    // A different seed really changes the palette (fidelity, light), and
+    // monochrome (preset 0, style 3, light) is achromatic: r == g == b.
+    check("preset: seed changes the palette",
+          Theme::makeLightPalette(0, 0).primary != Theme::makeLightPalette(5, 0).primary ? 1 : 0, 1);
+    const QColor mono = Theme::makeLightPalette(0, 3).primary;
+    check("preset: monochrome primary is grey",
+          (mono.red() == mono.green() && mono.green() == mono.blue()) ? 1 : 0, 1);
+
+    // The live switch: setPreset / setStyle must recompute the running palette
+    // from the table. Pinned to light so the check is honest on a dark Windows
+    // too; the runtime values are restored at the end of the test.
+    const int savedPreset = Theme::preset();
+    const int savedStyle = Theme::style();
+    Theme::setMode(Theme::Mode::Light);
+    Theme::setPreset(5);
+    Theme::setStyle(3);
+    const ThemePresets::Rgb live = ThemePresets::kSchemes[5][3][0].primary;
+    check("preset: live switch recomputes",
+          Theme::light().primary == QColor(live.r, live.g, live.b) ? 1 : 0, 1);
+    check("preset: live switch keeps paper white",
+          Theme::light().paper == QColor(Qt::white) ? 1 : 0, 1);
+
+    // 减少动效：默认关，往返读写；开启后 MD3 动画时长归零，落笔闸门同样归零。
+    const QVariant savedReduceMotion = raw.value(QStringLiteral("ReduceMotion"));
+    const bool savedReduced = Theme::Motion::reduced();
+    raw.remove(QStringLiteral("ReduceMotion"));
+    raw.sync();
+    check("reduce motion: default off", AppSettings::reduceMotion() ? 1 : 0, 0);
+    check("reduce motion: set on succeeds", AppSettings::setReduceMotion(true, nullptr) ? 1 : 0, 1);
+    check("reduce motion: stored on reads back", AppSettings::reduceMotion() ? 1 : 0, 1);
+    Theme::Motion::setReduced(false);
+    check("motion: normal duration",
+          Theme::Motion::duration(Theme::Motion::Medium2), int(Theme::Motion::Medium2));
+    Theme::Motion::setReduced(true);
+    check("motion: reduced duration is 0", Theme::Motion::duration(Theme::Motion::Medium2), 0);
+    Theme::Motion::setReduced(false);
+    Theme::Motion::inkBegan();
+    check("motion: inking duration is 0", Theme::Motion::duration(Theme::Motion::Medium2), 0);
+    Theme::Motion::inkEnded();
+    Theme::Motion::inkEnded();   // an unbalanced end must not go negative
+    check("motion: gate released",
+          Theme::Motion::duration(Theme::Motion::Medium2), int(Theme::Motion::Medium2));
+    Theme::Motion::setReduced(savedReduced);
+    if (savedReduceMotion.isValid())
+        raw.setValue(QStringLiteral("ReduceMotion"), savedReduceMotion);
+    else
+        raw.remove(QStringLiteral("ReduceMotion"));
+    raw.sync();
+
+    // MD3 roles: the legacy names must stay derived from them.
+    const Theme::Palette md = Theme::makeLightPalette();
+    check("md3: accent is primary", md.accent == md.primary ? 1 : 0, 1);
+    check("md3: text is onSurface", md.text == md.onSurface ? 1 : 0, 1);
+    check("md3: paper stays white", md.paper == QColor(Qt::white) ? 1 : 0, 1);
+    check("md3: dark paper stays white",
+          Theme::makeDarkPalette().paper == QColor(Qt::white) ? 1 : 0, 1);
+
     if (savedValue.isValid())
         raw.setValue(QStringLiteral("ThemeMode"), savedValue);
     else
         raw.remove(QStringLiteral("ThemeMode"));
     raw.sync();
+    Theme::setPreset(savedPreset);
+    Theme::setStyle(savedStyle);
     Theme::setMode(savedMode);
 
     const bool restored = savedValue.isValid()
@@ -1854,6 +2013,95 @@ static int runThemeSelfTest()
         : !raw.contains(QStringLiteral("ThemeMode"));
     check("stored preference restored", restored ? 1 : 0, 1);
     check("theme mode restored", Theme::mode() == savedMode ? 1 : 0, 1);
+
+    out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")
+                    : QStringLiteral("[selftest] %1 CHECK(S) FAILED").arg(failed));
+    return failed == 0 ? 0 : 3;
+}
+
+// Headless GPU self test:  pdfboard.exe --selftest-gpu
+// Locks the startup rules of the experimental 硬件加速 path: the stored
+// preference defaults to OFF and round-trips, the driver probe is stable within
+// a session, and a canvas installs the OpenGL viewport only when the setting is
+// ON *and* a real driver exists. With a software rasteriser the request is
+// refused and the plain raster viewport stays, so a page can never go black.
+// The registry value is snapshotted and restored exactly as found.
+static int runGpuSelfTest()
+{
+    int failed = 0;
+    auto check = [&failed](const char *what, int got, int want) {
+        const bool ok = (got == want);
+        if (!ok)
+            ++failed;
+        out(QStringLiteral("[selftest] %1: got %2 want %3 -> %4")
+                .arg(QString::fromLatin1(what), -28)
+                .arg(got).arg(want)
+                .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+    };
+
+    QSettings raw(QStringLiteral("HKEY_CURRENT_USER\\Software\\PDFBoard"),
+                  QSettings::NativeFormat);
+    const QVariant savedValue = raw.value(QStringLiteral("GpuAcceleration"));
+
+    raw.remove(QStringLiteral("GpuAcceleration"));
+    raw.sync();
+    check("gpu: default is off", AppSettings::gpuAcceleration() ? 1 : 0, 0);
+
+    check("gpu: set on succeeds", AppSettings::setGpuAcceleration(true, nullptr) ? 1 : 0, 1);
+    check("gpu: stored on reads back", AppSettings::gpuAcceleration() ? 1 : 0, 1);
+    check("gpu: set off succeeds", AppSettings::setGpuAcceleration(false, nullptr) ? 1 : 0, 1);
+
+    // The driver probe is cached for the session: two calls must agree. The
+    // value itself is machine-dependent (a VM without a GPU answers 0), so it
+    // is reported, not asserted.
+    const bool gl1 = PdfCanvas::testGpuRenderAvailable();
+    const bool gl2 = PdfCanvas::testGpuRenderAvailable();
+    check("gpu: probe is stable", gl1 == gl2 ? 1 : 0, 1);
+    out(QStringLiteral("[selftest] gpu: OpenGL renderer available = %1").arg(gl1 ? 1 : 0));
+
+    // OFF: a fresh canvas must stay on the CPU raster viewport.
+    {
+        PdfCanvas c;
+        c.setAttribute(Qt::WA_DontShowOnScreen, true);
+        c.resize(1000, 800);
+        c.show();
+        check("gpu: off keeps the raster viewport", c.gpuAccelerated() ? 1 : 0, 0);
+        check("gpu: off installs no GL widget", c.testViewportIsGl() ? 1 : 0, 0);
+        const QPixmap fz = c.freezeFramePixmap();
+        const QSize fzLogical(fz.isNull() ? 0 : qRound(fz.width() / fz.devicePixelRatio()),
+                              fz.isNull() ? 0 : qRound(fz.height() / fz.devicePixelRatio()));
+        check("gpu: freeze frame is full size",
+              (fzLogical == c.size()) ? 1 : 0, 1);
+    }
+
+    // ON: the canvas follows the probe. With a real driver the GL surface is
+    // installed; with only a software rasteriser the request is refused and the
+    // plain viewport stays (no black page) - both sides of the invariant.
+    AppSettings::setGpuAcceleration(true, nullptr);
+    {
+        PdfCanvas c2;
+        c2.setAttribute(Qt::WA_DontShowOnScreen, true);
+        c2.resize(1000, 800);
+        c2.show();
+        check("gpu: on follows the probe", c2.gpuAccelerated() ? 1 : 0, gl1 ? 1 : 0);
+        check("gpu: viewport matches the flag",
+              c2.testViewportIsGl() ? 1 : 0, c2.gpuAccelerated() ? 1 : 0);
+        const QPixmap fz = c2.freezeFramePixmap();
+        const QSize fzLogical(fz.isNull() ? 0 : qRound(fz.width() / fz.devicePixelRatio()),
+                              fz.isNull() ? 0 : qRound(fz.height() / fz.devicePixelRatio()));
+        check("gpu: gpu freeze frame is full size",
+              (fzLogical == c2.size()) ? 1 : 0, 1);
+    }
+
+    if (savedValue.isValid())
+        raw.setValue(QStringLiteral("GpuAcceleration"), savedValue);
+    else
+        raw.remove(QStringLiteral("GpuAcceleration"));
+    raw.sync();
+    const bool restored = savedValue.isValid()
+        ? (raw.value(QStringLiteral("GpuAcceleration")) == savedValue)
+        : !raw.contains(QStringLiteral("GpuAcceleration"));
+    check("gpu: stored preference restored", restored ? 1 : 0, 1);
 
     out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")
                     : QStringLiteral("[selftest] %1 CHECK(S) FAILED").arg(failed));
@@ -3775,8 +4023,11 @@ int main(int argc, char **argv)
     AppLog::applySettings();
 
     // The appearance preference must be in place before any widget is built:
-    // the chrome bakes its colours at construction.
-    Theme::setMode(static_cast<Theme::Mode>(AppSettings::themeMode()));
+    // the chrome bakes its colours at construction. Mode + 主题色 + 调色板风格
+    // are re-synced in one shot from the stored values.
+    Theme::applyStoredTheme(AppSettings::themeMode(), AppSettings::themePreset(),
+                            AppSettings::themeStyle());
+    Theme::Motion::setReduced(AppSettings::reduceMotion());
 
     AppLog::write(QStringLiteral("app"),
                   QStringLiteral("外观：设置 %1 → 解析 %2（系统 %3）pal=%4 desk=%5,%6,%7")
@@ -3809,6 +4060,7 @@ int main(int argc, char **argv)
     const int imageIdx = args.indexOf(QStringLiteral("--selftest-image"));
     const int smokeIdx = args.indexOf(QStringLiteral("--selftest-smoke"));
     const int crashIdx = args.indexOf(QStringLiteral("--selftest-crash"));
+    const int gpuIdx = args.indexOf(QStringLiteral("--selftest-gpu"));
 
     // The shipping build is a GUI executable (no console window when the user
     // double-clicks it). The console-based modes still need their output, so
@@ -3822,6 +4074,7 @@ int main(int argc, char **argv)
         || homeIdx >= 0
         || docxIdx >= 0
         || imageIdx >= 0
+        || gpuIdx >= 0
         || (smokeIdx >= 0 && smokeIdx + 1 < args.size())) {
         attachConsoleForCli();
     }
@@ -3840,6 +4093,9 @@ int main(int argc, char **argv)
 
     if (themeIdx >= 0)
         return runThemeSelfTest();
+
+    if (gpuIdx >= 0)
+        return runGpuSelfTest();
 
     if (homeIdx >= 0)
         return runHomeSelfTest();

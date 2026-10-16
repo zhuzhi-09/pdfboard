@@ -306,7 +306,7 @@ void PageGrid::buildUi()
     m_glow->setBlurRadius(m.shadowBlur);
     m_glow->setOffset(0.0, m.shadowOffsetY);
     QColor shadow = pal.shadow;
-    shadow.setAlpha(0x46);
+    shadow.setAlpha(Theme::ChromeShadowAlpha);
     m_glow->setColor(shadow);
     m_card->setGraphicsEffect(m_glow);
     outer->addWidget(m_card);
@@ -389,7 +389,7 @@ void PageGrid::applyTheme()
         m_card->setStyleSheet(cardSheet(pal, m_metrics));
     if (m_glow) {
         QColor shadow = pal.shadow;
-        shadow.setAlpha(0x46);
+        shadow.setAlpha(Theme::ChromeShadowAlpha);
         m_glow->setColor(shadow);
     }
     refreshGlyph();
