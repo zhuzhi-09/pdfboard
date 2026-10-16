@@ -21,6 +21,7 @@ class QVariantAnimation;
 class PageGrid;
 class PenPalette;
 class EraserPalette;
+class ClearPalette;
 class ToolIndicator;
 
 // Classroom-whiteboard style floating toolbar that hovers over the page area.
@@ -145,6 +146,7 @@ public slots:
     void toggleCollapsed();
     void showPenPalette();
     void showEraserPalette();
+    void showClearPalette();
     void setFullscreenActive(bool on);
 
 signals:
@@ -207,6 +209,7 @@ private:
     void onPenColorPicked(const QColor &color);
     void onPenWidthPicked(qreal width);
     void onEraserSizePicked(qreal radiusPx);
+    void onClearScopePicked(int scope);
     void togglePageGrid();         // the "n / N" chip: page-thumbnail picker
     void dismissPageGrid();        // any command hides the picker it covers
 
@@ -236,6 +239,7 @@ private:
     QToolButton *m_moreButton  = nullptr;   // the collapse / expand chevron
     PenPalette  *m_palette     = nullptr;
     EraserPalette *m_eraserPalette = nullptr;   // 橡皮按钮上的大小面板
+    ClearPalette  *m_clearPalette  = nullptr;   // 「清空」按钮上的范围面板（本页 / 整个文件）
     ToolIndicator *m_toolIndicator = nullptr;   // MD3 active indicator under the current tool
     QToolButton   *m_indicatorTarget = nullptr; // the tool button the indicator follows
     PageGrid    *m_pageGrid    = nullptr;

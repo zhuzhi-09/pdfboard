@@ -701,6 +701,24 @@ static int runSmokeSelfTest(const QString &path)
             // 收尾：恢复静止态，别把淡出留给后面的断言。
             island->setIdleFaded(false);
             island->testIdleAt(island->testIdleFadeDurationMs());
+
+            // 面板展开规则（用户口径）：第一次切到橡皮只换工具、**不**展开；该工具已
+            // 选中时再点才展开 / 收起。橡皮与笔走同一段代码，用它验证规则本身。
+            if (QToolButton *eraser = island->testEraserButton()) {
+                doc->setTool(PdfCanvas::InkTool::Move);
+                eraser->click();
+                check("palette: first eraser switch selects the tool",
+                      doc->tool() == PdfCanvas::InkTool::Eraser ? 1 : 0, 1);
+                check("palette: first switch does not open the panel",
+                      island->hasOpenOverlay() ? 0 : 1, 1);
+                eraser->click();
+                check("palette: a second click opens the panel",
+                      island->hasOpenOverlay() ? 1 : 0, 1);
+                eraser->click();
+                check("palette: a third click closes the panel",
+                      island->hasOpenOverlay() ? 0 : 1, 1);
+                doc->setTool(PdfCanvas::InkTool::Pen);
+            }
         }
     }
 

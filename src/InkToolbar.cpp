@@ -17,6 +17,7 @@
 #include <QMouseEvent>
 #include <QGraphicsDropShadowEffect>
 #include <QGraphicsOpacityEffect>
+#include <QHideEvent>
 #include <QPropertyAnimation>
 #include <QHBoxLayout>
 #include <QLabel>
@@ -450,6 +451,72 @@ public:
         update();
     }
 
+    // 展开动画：从底边向上「长出」（与工具岛抽屉同一套「外壳动画、内容裁剪」手法）。
+    // 芯片先脱出布局、按自然尺寸钉在卡片底边，动画只改卡片的外壳矩形 —— 内容因此
+    // 不被压缩、屏幕位置也不动；收尾把芯片放回布局。时长跟随 Theme::Motion
+    // （「减少动效」下为 0，直接落位）。
+    void revealAnimated()
+    {
+        restoreChip();     // 上一次若被中断，芯片可能还在布局外：先放回，尺寸才对
+
+        const int ms = Theme::Motion::duration(Theme::Motion::Medium2);
+        const QRect end = geometry();
+        if (ms <= 0 || end.isEmpty() || !m_chip) {
+            show();
+            return;
+        }
+
+        QLayout *outer = layout();
+        const QRect chip = m_chip->geometry();       // 终态位置（此刻布局已算好）
+        const int chipH = chip.height();
+        const int chipW = chip.width();
+        const int chipBottomGap = end.height() - (chip.bottom() + 1);
+
+        if (outer)
+            outer->removeWidget(m_chip);
+        // 芯片钉在卡片底边中点：外壳长 / 宽变化时，内容屏幕位置不动、只被裁剪。
+        m_chip->setGeometry((end.width() - chipW) / 2, end.height() - chipBottomGap - chipH,
+                            chipW, chipH);
+
+        // 起点：以底边为锚、缩到 1/4 高（不是一条线，读起来是「卡片展开」）。
+        const int h0 = qMax(1, end.height() / 4);
+        const QRect begin(end.left(), end.bottom() - h0 + 1, end.width(), h0);
+        setGeometry(begin);
+
+        if (m_expand)
+            m_expand->stop();                        // DeleteWhenStopped：停即销毁
+        show();
+        raise();
+
+        auto *anim = new QPropertyAnimation(this, "geometry", this);
+        anim->setDuration(ms);
+        anim->setStartValue(begin);
+        anim->setEndValue(end);
+        anim->setEasingCurve(Theme::Motion::curve(Theme::Motion::Easing::EmphasizedDecelerate));
+        // 每帧把芯片钉回「距卡片底边固定留白」处：外壳在长，内容不动。
+        connect(anim, &QPropertyAnimation::valueChanged, this,
+                [this, chipW, chipH, chipBottomGap] {
+                    m_chip->setGeometry((width() - chipW) / 2, height() - chipBottomGap - chipH,
+                                        chipW, chipH);
+                });
+        connect(anim, &QPropertyAnimation::finished, this, [this] { restoreChip(); });
+        anim->start(QAbstractAnimation::DeleteWhenStopped);
+        m_expand = anim;
+    }
+
+    // 把芯片放回布局（展开动画期间它被摘出来裁剪；中断 / 收起时必须放回，否则
+    // adjustSize() 只会量到卡片的留白，整块塌成一条细线 —— 那正是「细线再弹出来」）。
+    void restoreChip()
+    {
+        if (!m_chip)
+            return;
+        QLayout *outer = layout();
+        if (outer && outer->indexOf(m_chip) < 0) {
+            outer->addWidget(m_chip);
+            outer->activate();
+        }
+    }
+
 protected:
     // Builds the rounded card + shadow and returns the layout the content goes
     // into. Called once by each subclass constructor.
@@ -484,6 +551,12 @@ protected:
     {
         QWidget::showEvent(e);
         refreshArtwork();   // pick up the current screen's device pixel ratio
+    }
+
+    void hideEvent(QHideEvent *e) override
+    {
+        restoreChip();      // 中断的展开别把芯片留在布局外
+        QWidget::hideEvent(e);
     }
 
     bool eventFilter(QObject *watched, QEvent *e) override
@@ -533,6 +606,7 @@ private:
     QString                 m_cardName;
     QFrame                 *m_chip = nullptr;
     QGraphicsDropShadowEffect *m_glow = nullptr;
+    QPointer<QPropertyAnimation> m_expand;    // 展开动画（进行中的那一支）
 };
 
 // Pen colour + width palette: a child overlay above the toolbar.
@@ -767,6 +841,77 @@ void EraserPalette::syncSelection(qreal radius)
     refreshIcons();
 }
 
+// 清空面板：点「清空」后弹出来问「清空本页 / 清空整个文件」。骨架与橡皮面板一致
+// （同一套卡片 + 展开动画 + 点外部 / Esc 关闭），只是内容换成两个动作按钮。
+class ClearPalette : public PaletteCard
+{
+    Q_OBJECT
+public:
+    ClearPalette(QWidget *toolbar, const QFont &font, const Theme::Metrics &metrics)
+        : PaletteCard(toolbar, font, metrics, QStringLiteral("clearPalette"))
+    {
+        buildUi();
+    }
+
+signals:
+    void scopePicked(int scope);   // 0 = 本页, 1 = 整个文件
+
+protected:
+    void refreshArtwork() override { refreshIcons(); }
+
+private:
+    void buildUi();
+    void refreshIcons();
+
+    QVector<QToolButton *> m_buttons;
+};
+
+void ClearPalette::buildUi()
+{
+    const Theme::Metrics m = metrics();
+    QVBoxLayout *content = buildCard();
+    QFrame *card = chip();
+
+    auto *caption = new QLabel(QStringLiteral("清空"), card);
+    caption->setObjectName(QStringLiteral("paletteCaption"));
+    caption->setFont(Theme::captionFont(font()));
+    content->addWidget(caption);
+
+    const QString labels[2] = { QStringLiteral("清空本页"), QStringLiteral("清空整个文件") };
+    const QString tips[2]   = { QStringLiteral("只清掉当前页的批注"),
+                                QStringLiteral("清掉本文档所有页的批注") };
+    auto *row = new QHBoxLayout;
+    row->setSpacing(m.gap);
+    for (int i = 0; i < 2; ++i) {
+        auto *button = new QToolButton(card);
+        button->setFocusPolicy(Qt::NoFocus);
+        button->setCursor(Qt::PointingHandCursor);
+        button->setToolButtonStyle(Qt::ToolButtonTextUnderIcon);
+        button->setText(labels[i]);
+        button->setToolTip(tips[i]);
+        button->setMinimumHeight(m.touch);
+        connect(button, &QToolButton::clicked, this, [this, i] { emit scopePicked(i); });
+        m_buttons.append(button);
+        row->addWidget(button, 1);
+    }
+    content->addLayout(row);
+
+    refreshIcons();
+}
+
+void ClearPalette::refreshIcons()
+{
+    const Theme::Palette &pal = Theme::light();
+    const IconPainter::States states{ pal.text, pal.text, pal.textDisabled };
+    const QSize box(metrics().icon, metrics().icon);
+    const qreal dpr = devicePixelRatioF();
+    for (QToolButton *button : m_buttons) {
+        button->setIconSize(box);
+        button->setIcon(IconPainter::makeIcon(IconPainter::Glyph::Trash, box.width(),
+                                              states, dpr));
+    }
+}
+
 InkToolbar::InkToolbar(PdfCanvas *canvas)
     : QWidget(canvas ? canvas->viewport() : nullptr)
     , m_canvas(canvas)
@@ -942,15 +1087,29 @@ void InkToolbar::buildUi()
     m_pageButton->style()->unpolish(m_pageButton);
     m_pageButton->style()->polish(m_pageButton);
 
+    // 展开规则（用户口径）：第一次切到笔 / 橡皮只切换工具、**不**展开面板；该工具
+    // 已选中时再点一次，才展开 / 收起对应面板。
     connect(m_penButton, &QToolButton::clicked, this, [this] {
-        if (m_canvas)
-            m_canvas->setTool(PdfCanvas::InkTool::Pen);
-        showPenPalette();
+        if (!m_canvas)
+            return;
+        if (m_canvas->tool() != PdfCanvas::InkTool::Pen) {
+            m_canvas->setTool(PdfCanvas::InkTool::Pen);   // 首次切到笔：只切工具
+            hidePalettes();                               // …并把别的面板收掉
+            dismissPageGrid();
+            return;
+        }
+        showPenPalette();                                  // 已是笔：再点才展开 / 收起
     });
     connect(m_eraserButton, &QToolButton::clicked, this, [this] {
-        if (m_canvas)
-            m_canvas->setTool(PdfCanvas::InkTool::Eraser);
-        showEraserPalette();
+        if (!m_canvas)
+            return;
+        if (m_canvas->tool() != PdfCanvas::InkTool::Eraser) {
+            m_canvas->setTool(PdfCanvas::InkTool::Eraser);   // 首次切到橡皮：只切工具
+            hidePalettes();                                   // …并把别的面板收掉
+            dismissPageGrid();
+            return;
+        }
+        showEraserPalette();                                  // 已是橡皮：再点才展开 / 收起
     });
     connect(m_moveButton, &QToolButton::clicked, this, [this] {
         hidePalettes();
@@ -968,7 +1127,7 @@ void InkToolbar::buildUi()
     });
     connect(m_clearButton, &QToolButton::clicked, this, [this] {
         dismissPageGrid();
-        if (m_canvas) m_canvas->clearCurrentPage();
+        showClearPalette();   // 点一下弹范围面板：清空本页 / 清空整个文件
     });
     connect(m_fitButton, &QToolButton::clicked, this, [this] {
         dismissPageGrid();
@@ -1011,6 +1170,11 @@ void InkToolbar::buildUi()
     m_eraserPalette = new EraserPalette(this, font(), m_metrics);
     connect(m_eraserPalette, &EraserPalette::sizePicked, this, &InkToolbar::onEraserSizePicked);
     m_eraserPalette->hide();
+
+    // 「清空」按钮的范围面板：本页 / 整个文件，同一套卡片与关闭/定位规则。
+    m_clearPalette = new ClearPalette(this, font(), m_metrics);
+    connect(m_clearPalette, &ClearPalette::scopePicked, this, &InkToolbar::onClearScopePicked);
+    m_clearPalette->hide();
 
     // The page-thumbnail picker is another viewport child overlay, owned by the
     // canvas like the palette: the "n / N" chip toggles it.
@@ -1150,6 +1314,8 @@ bool InkToolbar::hasOpenOverlay() const
         return true;
     if (m_eraserPalette && m_eraserPalette->isVisible())
         return true;
+    if (m_clearPalette && m_clearPalette->isVisible())
+        return true;
     if (m_pageGrid && m_pageGrid->isOpen())
         return true;
     return false;
@@ -1263,6 +1429,8 @@ void InkToolbar::applyTheme()
         m_palette->applyTheme();
     if (m_eraserPalette)
         m_eraserPalette->applyTheme();
+    if (m_clearPalette)
+        m_clearPalette->applyTheme();
     if (m_pageGrid)
         m_pageGrid->applyTheme();   // owned by the island, drawn on the canvas
     if (m_toolIndicator)
@@ -1339,6 +1507,8 @@ void InkToolbar::showPenPalette()
     dismissPageGrid();
     if (m_eraserPalette)
         m_eraserPalette->hide();
+    if (m_clearPalette)
+        m_clearPalette->hide();
     if (m_palette->isVisible()) {
         m_palette->hide();
         return;
@@ -1346,8 +1516,7 @@ void InkToolbar::showPenPalette()
     if (m_canvas)
         m_palette->syncSelection(m_canvas->penColor(), m_canvas->penWidth());
     positionPaletteAbove(m_penButton, m_palette);
-    m_palette->show();
-    m_palette->raise();
+    m_palette->revealAnimated();
 }
 
 // 橡皮按钮的点击路径：和笔按钮完全对称 —— 普通一点开面板，再点收起；
@@ -1361,6 +1530,8 @@ void InkToolbar::showEraserPalette()
     dismissPageGrid();
     if (m_palette)
         m_palette->hide();
+    if (m_clearPalette)
+        m_clearPalette->hide();
     if (m_eraserPalette->isVisible()) {
         m_eraserPalette->hide();
         return;
@@ -1368,8 +1539,40 @@ void InkToolbar::showEraserPalette()
     if (m_canvas)
         m_eraserPalette->syncSelection(m_canvas->eraserRadius());
     positionPaletteAbove(m_eraserButton, m_eraserPalette);
-    m_eraserPalette->show();
-    m_eraserPalette->raise();
+    m_eraserPalette->revealAnimated();
+}
+
+// 「清空」按钮的点击路径：点一下弹出范围面板（本页 / 整个文件），再点收起；选中
+// 某项后执行并关掉面板。与笔 / 橡皮面板同一套开关与定位。
+void InkToolbar::showClearPalette()
+{
+    if (!m_clearPalette)
+        return;
+    if (m_collapsed)
+        setCollapsed(false);
+    dismissPageGrid();
+    if (m_palette)
+        m_palette->hide();
+    if (m_eraserPalette)
+        m_eraserPalette->hide();
+    if (m_clearPalette->isVisible()) {
+        m_clearPalette->hide();
+        return;
+    }
+    positionPaletteAbove(m_clearButton, m_clearPalette);
+    m_clearPalette->revealAnimated();
+}
+
+void InkToolbar::onClearScopePicked(int scope)
+{
+    if (m_canvas) {
+        if (scope == 1)
+            m_canvas->clearInk();            // 整个文件
+        else
+            m_canvas->clearCurrentPage();    // 本页
+    }
+    if (m_clearPalette)
+        m_clearPalette->hide();
 }
 
 void InkToolbar::hidePalettes()
@@ -1378,6 +1581,8 @@ void InkToolbar::hidePalettes()
         m_palette->hide();
     if (m_eraserPalette)
         m_eraserPalette->hide();
+    if (m_clearPalette)
+        m_clearPalette->hide();
 }
 
 // 把卡片锚在某个按钮上方，并钳在它所属的页面区域内。
@@ -1584,6 +1789,8 @@ void InkToolbar::moveBy(const QPoint &delta)
         positionPaletteAbove(m_penButton, m_palette);
     if (m_eraserPalette && m_eraserPalette->isVisible())
         positionPaletteAbove(m_eraserButton, m_eraserPalette);
+    if (m_clearPalette && m_clearPalette->isVisible())
+        positionPaletteAbove(m_clearButton, m_clearPalette);
     raise();
 }
 
@@ -1895,6 +2102,8 @@ void InkToolbar::reposition()
         positionPaletteAbove(m_penButton, m_palette);   // keep the popup glued above the bar
     if (m_eraserPalette && m_eraserPalette->isVisible())
         positionPaletteAbove(m_eraserButton, m_eraserPalette);
+    if (m_clearPalette && m_clearPalette->isVisible())
+        positionPaletteAbove(m_clearButton, m_clearPalette);
 }
 
 void InkToolbar::resizeEvent(QResizeEvent *e)
