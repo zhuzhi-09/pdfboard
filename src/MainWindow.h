@@ -180,9 +180,11 @@ private:
     bool transitionCanAnimate() const;
 
     // --- 「工具岛闲置淡出」（5 秒无输入 -> 透明度 60%）------------------------
-    // 输入探测只有一条路径：QApplication 级事件过滤器按事件类型判定，命中就调
-    // noteUserActivity()（恢复所有岛 + 重新计时）。计时是单个 5 秒单次定时器。
-    void       noteUserActivity();   // 任何输入：恢复所有岛 + 重新计时
+    // 输入探测只有一条路径：QApplication 级事件过滤器判定「这次按下 / 轻触是否落在
+    // 工具岛上」，是才调 noteUserActivity()（恢复所有岛 + 重新计时）。滚动与书写都
+    // 不算动作。计时是单个 5 秒单次定时器。
+    void       noteUserActivity();          // 点在岛上：恢复所有岛 + 重新计时
+    bool       isInsideToolbar(QObject *watched) const;   // 事件目标是否属于某个岛
     void       armIdleTimer();       // 重启 5 秒单次计时（无文档则停表）
     void       onIdleTimeout();      // 到点：把所有未开浮层的岛淡到 0.40
 

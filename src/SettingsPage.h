@@ -9,6 +9,10 @@ class QLabel;
 class QPushButton;
 class QWidget;
 
+// 设置行的下拉选择控件。和 InkToolbar.h 里的 PenPalette / EraserPalette 同一
+// 做法：完整定义在 .cpp 里（文件局部），头文件只持有指针。
+class SettingsSelect;
+
 // Full-area settings PAGE, shown as one page inside MainWindow's stack - not a
 // dialog. It owns the machine-level settings and nothing else:
 //   * 「开机自动启动」  - read from / written straight to the Run registry key
@@ -54,6 +58,7 @@ private slots:
     void onAutoStartToggled(bool on);
     void onPalmEraserToggled(bool on);
     void onReduceMotionToggled(bool on);
+    void onGpuAccelerationToggled(bool on);
     void onRegisterPdf();
     void onChooseSaveDir();
     void onResetSaveDir();
@@ -62,6 +67,8 @@ private slots:
     void onThemePicked(int mode);
     void onWordModePicked(int mode);
     void onToolbarStylePicked(int style);
+    void onThemePresetPicked(int preset);
+    void onPaletteStylePicked(int style);
     void onWordNagFixToggled(bool on);
     void onRestoreWordNag();
 
@@ -72,9 +79,11 @@ private:
     void refreshLogPath();
     void refreshThemeNote();
     void refreshWordNag();
-    void syncThemeSegment();
-    void syncWordSegment();
-    void syncToolbarStyleSegment();
+    void syncThemeSelect();
+    void syncWordSelect();
+    void syncToolbarStyleSelect();
+    void syncThemePreset();
+    void syncPaletteStyleSelect();
 
     QWidget         *m_body      = nullptr;   // the scrolling body
     QWidget         *m_column    = nullptr;   // the centred content column
@@ -82,6 +91,7 @@ private:
     QAbstractButton *m_autoStart = nullptr;
     QAbstractButton *m_palmEraser = nullptr;   // 手掌当橡皮（实验性，默认关）
     QAbstractButton *m_reduceMotion = nullptr; // 减少动效（默认关）
+    QAbstractButton *m_gpuAccel = nullptr;     // 硬件加速（实验性，默认关）
     QPushButton     *m_register  = nullptr;
     QLabel          *m_savePathLabel = nullptr;
     QPushButton     *m_chooseSaveDir = nullptr;
@@ -91,19 +101,24 @@ private:
     QLabel          *m_logEnvNote    = nullptr;
     QPushButton     *m_openLogDir    = nullptr;
 
-    // 外观: three mutually exclusive segments and the hint line under them.
-    QButtonGroup *m_themeGroup = nullptr;
-    QPushButton  *m_themeSegments[3] = {};
-    QLabel       *m_themeNote = nullptr;
+    // 外观: the 外观 dropdown and the hint line under it.
+    SettingsSelect *m_themeSelect = nullptr;
+    QLabel         *m_themeNote = nullptr;
 
-    // 工具栏风格: 简约（纯图标，默认）/ 文字（图标+名称），两个互斥分段。
-    QButtonGroup *m_toolbarStyleGroup = nullptr;
-    QPushButton  *m_toolbarStyleSegments[2] = {};
+    // 工具栏风格: 简约（纯图标，默认）/ 文字（图标+名称）。
+    SettingsSelect *m_toolbarStyleSelect = nullptr;
 
-    // 打开 Word 文档时: the same three-segment control, persisted through
+    // 主题色: 每个种子色一枚圆形色板（互斥）。控件本体 SeedSwatch 是 .cpp 里的
+    // 文件局部类，所以这里只保存基类指针。
+    QButtonGroup    *m_themePresetGroup = nullptr;
+    QAbstractButton *m_themePresetSwatches[8] = {};
+
+    // 调色板风格: 保真 / 均衡 / 中性 / 单色，由种子色推导配色的算法。
+    SettingsSelect *m_paletteStyleSelect = nullptr;
+
+    // 打开 Word 文档时: 每次询问 / 批注 / 用 Word 打开，persisted through
     // AppSettings::setWordOpenMode (0 每次询问 / 1 批注 / 2 用 Word 打开).
-    QButtonGroup *m_wordGroup = nullptr;
-    QPushButton  *m_wordSegments[3] = {};
+    SettingsSelect *m_wordSelect = nullptr;
 
     // The Word nag fix: the toggle persists AppSettings::wordNagFixEnabled and
     // the button restores according to WordConvert::nagRestoreMode() (exact

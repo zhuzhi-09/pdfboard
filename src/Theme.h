@@ -10,6 +10,8 @@
 #include <QStyleHints>
 #include <QtGlobal>
 
+#include "ThemePresets.generated.h"
+
 // Central design tokens for the application chrome: the canvas backdrop, the
 // floating island toolbar, the pen palette popover and the status bar.
 //
@@ -169,84 +171,67 @@ inline void finishPalette(Palette &c, bool dark)
     c.shadow = QColor(0x00, 0x00, 0x00);
 }
 
-inline Palette makeLightPalette()
+// 「主题色」种子与「调色板风格」预设。索引对应 ThemePresets.generated.h 里的表
+// （见 tools/md3-presets），改表或加种子时两边一起改。
+enum class PaletteStyle { Fidelity = 0, TonalSpot = 1, Neutral = 2, Monochrome = 3 };
+constexpr int kDefaultPreset = 0;                        // 品牌蓝
+constexpr int kDefaultStyle  = int(PaletteStyle::Fidelity);   // 投影最优的风格
+
+// MD3 调色板由 (种子, 风格, 明暗) 三者决定；这里只做查表 + 派生旧语义名。
+inline Palette makePalette(bool dark, int preset, int style)
 {
+    preset = qBound(0, preset, ThemePresets::kSeedCount - 1);
+    style  = qBound(0, style,  ThemePresets::kStyleCount - 1);
+    const ThemePresets::Scheme &d = ThemePresets::kSchemes[preset][style][dark ? 1 : 0];
+    const auto col = [](const ThemePresets::Rgb &v) { return QColor(v.r, v.g, v.b); };
+
     Palette c;
-    c.primary                 = QColor(0x00, 0x5B, 0xBF);
-    c.onPrimary               = QColor(0xFF, 0xFF, 0xFF);
-    c.primaryContainer        = QColor(0x1A, 0x73, 0xE8);
-    c.onPrimaryContainer      = QColor(0xFF, 0xFF, 0xFF);
-    c.secondary               = QColor(0x47, 0x5E, 0x8C);
-    c.onSecondary             = QColor(0xFF, 0xFF, 0xFF);
-    c.secondaryContainer      = QColor(0xB2, 0xC9, 0xFE);
-    c.onSecondaryContainer    = QColor(0x3D, 0x54, 0x81);
-    c.tertiary                = QColor(0x9E, 0x43, 0x00);
-    c.onTertiary              = QColor(0xFF, 0xFF, 0xFF);
-    c.tertiaryContainer       = QColor(0xC5, 0x55, 0x00);
-    c.onTertiaryContainer     = QColor(0x0E, 0x02, 0x00);
-    c.error                   = QColor(0xBA, 0x1A, 0x1A);
-    c.onError                 = QColor(0xFF, 0xFF, 0xFF);
-    c.errorContainer          = QColor(0xFF, 0xDA, 0xD6);
-    c.onErrorContainer        = QColor(0x93, 0x00, 0x0A);
+    c.primary              = col(d.primary);
+    c.onPrimary            = col(d.onPrimary);
+    c.primaryContainer     = col(d.primaryContainer);
+    c.onPrimaryContainer   = col(d.onPrimaryContainer);
+    c.secondary            = col(d.secondary);
+    c.onSecondary          = col(d.onSecondary);
+    c.secondaryContainer   = col(d.secondaryContainer);
+    c.onSecondaryContainer = col(d.onSecondaryContainer);
+    c.tertiary             = col(d.tertiary);
+    c.onTertiary           = col(d.onTertiary);
+    c.tertiaryContainer    = col(d.tertiaryContainer);
+    c.onTertiaryContainer  = col(d.onTertiaryContainer);
+    c.error                = col(d.error);
+    c.onError              = col(d.onError);
+    c.errorContainer       = col(d.errorContainer);
+    c.onErrorContainer     = col(d.onErrorContainer);
+    c.surfaceDim              = col(d.surfaceDim);
+    c.surfaceBright           = col(d.surfaceBright);
+    c.surfaceContainerLowest  = col(d.surfaceContainerLowest);
+    c.surfaceContainerLow     = col(d.surfaceContainerLow);
+    c.surfaceContainer        = col(d.surfaceContainer);
+    c.surfaceContainerHigh    = col(d.surfaceContainerHigh);
+    c.surfaceContainerHighest = col(d.surfaceContainerHighest);
+    c.onSurface          = col(d.onSurface);
+    c.onSurfaceVariant   = col(d.onSurfaceVariant);
+    c.outline            = col(d.outline);
+    c.outlineVariant     = col(d.outlineVariant);
+    c.inverseSurface     = col(d.inverseSurface);
+    c.inverseOnSurface   = col(d.inverseOnSurface);
+    c.inversePrimary     = col(d.inversePrimary);
+    c.scrim              = col(d.scrim);
 
-    c.surfaceDim              = QColor(0xD8, 0xD9, 0xE3);
-    c.surfaceBright           = QColor(0xF9, 0xF9, 0xFF);
-    c.surfaceContainerLowest  = QColor(0xFF, 0xFF, 0xFF);
-    c.surfaceContainerLow     = QColor(0xF2, 0xF3, 0xFD);
-    c.surfaceContainer        = QColor(0xEC, 0xED, 0xF7);
-    c.surfaceContainerHigh    = QColor(0xE6, 0xE8, 0xF2);
-    c.surfaceContainerHighest = QColor(0xE0, 0xE2, 0xEC);
-    c.onSurface               = QColor(0x19, 0x1C, 0x23);
-    c.onSurfaceVariant        = QColor(0x41, 0x47, 0x54);
-    c.outline                 = QColor(0x72, 0x77, 0x85);
-    c.outlineVariant          = QColor(0xC1, 0xC6, 0xD6);
-    c.inverseSurface          = QColor(0x2D, 0x30, 0x38);
-    c.inverseOnSurface        = QColor(0xEF, 0xF0, 0xFA);
-    c.inversePrimary          = QColor(0xAD, 0xC7, 0xFF);
-    c.scrim                   = QColor(0x00, 0x00, 0x00);
-
-    finishPalette(c, false);
+    finishPalette(c, dark);
     return c;
 }
 
-inline Palette makeDarkPalette()
+// The factories keep (preset, style) defaulted so every existing caller compiles
+// unchanged and starts on 品牌蓝 / fidelity - the look the app shipped with.
+inline Palette makeLightPalette(int preset = kDefaultPreset, int style = kDefaultStyle)
 {
-    Palette c;
-    c.primary                 = QColor(0xAD, 0xC7, 0xFF);
-    c.onPrimary               = QColor(0x00, 0x2E, 0x68);
-    c.primaryContainer        = QColor(0x1A, 0x73, 0xE8);
-    c.onPrimaryContainer      = QColor(0xFF, 0xFF, 0xFF);
-    c.secondary               = QColor(0xAF, 0xC7, 0xFB);
-    c.onSecondary             = QColor(0x15, 0x30, 0x5B);
-    c.secondaryContainer      = QColor(0x2E, 0x46, 0x73);
-    c.onSecondaryContainer    = QColor(0xD6, 0xE2, 0xFF);   // lifted from 9EB5E8 for projector contrast
-    c.tertiary                = QColor(0xFF, 0xB6, 0x91);
-    c.onTertiary              = QColor(0x55, 0x21, 0x00);
-    c.tertiaryContainer       = QColor(0xC5, 0x55, 0x00);
-    c.onTertiaryContainer     = QColor(0x0E, 0x02, 0x00);
-    c.error                   = QColor(0xFF, 0xB4, 0xAB);
-    c.onError                 = QColor(0x69, 0x00, 0x05);
-    c.errorContainer          = QColor(0x93, 0x00, 0x0A);
-    c.onErrorContainer        = QColor(0xFF, 0xDA, 0xD6);
+    return makePalette(false, preset, style);
+}
 
-    c.surfaceDim              = QColor(0x10, 0x13, 0x1A);
-    c.surfaceBright           = QColor(0x36, 0x39, 0x41);
-    c.surfaceContainerLowest  = QColor(0x0B, 0x0E, 0x15);
-    c.surfaceContainerLow     = QColor(0x19, 0x1C, 0x23);
-    c.surfaceContainer        = QColor(0x1D, 0x20, 0x27);
-    c.surfaceContainerHigh    = QColor(0x27, 0x2A, 0x31);
-    c.surfaceContainerHighest = QColor(0x32, 0x35, 0x3C);
-    c.onSurface               = QColor(0xE0, 0xE2, 0xEC);
-    c.onSurfaceVariant        = QColor(0xC1, 0xC6, 0xD6);
-    c.outline                 = QColor(0x8B, 0x90, 0x9F);
-    c.outlineVariant          = QColor(0x41, 0x47, 0x54);
-    c.inverseSurface          = QColor(0xE0, 0xE2, 0xEC);
-    c.inverseOnSurface        = QColor(0x2D, 0x30, 0x38);
-    c.inversePrimary          = QColor(0x00, 0x5B, 0xC0);
-    c.scrim                   = QColor(0x00, 0x00, 0x00);
-
-    finishPalette(c, true);
-    return c;
+inline Palette makeDarkPalette(int preset = kDefaultPreset, int style = kDefaultStyle)
+{
+    return makePalette(true, preset, style);
 }
 
 // How the appearance is chosen.
@@ -272,6 +257,20 @@ inline Mode &modeRef() { return g_mode; }
 
 inline Mode mode() { return modeRef(); }
 
+// 「主题色」种子 / 「调色板风格」的运行时状态 (indexes into the generated table,
+// see makePalette above). The setters re-apply immediately, like setMode does.
+inline int g_preset = kDefaultPreset;
+inline int g_style  = kDefaultStyle;
+
+inline int preset() { return g_preset; }
+inline int style()  { return g_style; }
+
+// applyTheme is defined just below; declared first so the setters can re-apply.
+inline void applyTheme();
+
+inline void setPreset(int p) { g_preset = qBound(0, p, ThemePresets::kSeedCount - 1); applyTheme(); }
+inline void setStyle(int s)  { g_style  = qBound(0, s,  ThemePresets::kStyleCount - 1); applyTheme(); }
+
 // What the OS asks for right now (Qt 6.5+ colour scheme).
 inline Mode systemMode()
 {
@@ -285,12 +284,13 @@ inline Mode resolvedMode()
     return m == Mode::System ? systemMode() : m;
 }
 
-// Swaps the palette to match resolvedMode(). Call at startup before any widget
-// is built, and again whenever the setting or the OS scheme changes.
+// Swaps the palette to match resolvedMode() with the current (preset, style).
+// Call at startup before any widget is built, and again whenever the setting or
+// the OS scheme changes.
 inline void applyTheme()
 {
-    g_palette = (resolvedMode() == Mode::Dark) ? makeDarkPalette()
-                                               : makeLightPalette();
+    g_palette = (resolvedMode() == Mode::Dark) ? makeDarkPalette(g_preset, g_style)
+                                               : makeLightPalette(g_preset, g_style);
 }
 
 inline void setMode(Mode m)
@@ -306,6 +306,17 @@ inline void setMode(Mode m)
 inline void applyStoredMode(int stored)
 {
     setMode(static_cast<Mode>(qBound(0, stored, 2)));
+}
+
+// Applies the STORED preferences (mode 0/1/2, preset, style) in one shot. Every
+// path that re-applies the theme must go through a function like this: the
+// settings page only persists the values, so the runtime state has to be re-synced.
+inline void applyStoredTheme(int storedMode, int storedPreset, int storedStyle)
+{
+    modeRef() = static_cast<Mode>(qBound(0, storedMode, 2));
+    g_preset  = qBound(0, storedPreset, ThemePresets::kSeedCount - 1);
+    g_style   = qBound(0, storedStyle,  ThemePresets::kStyleCount - 1);
+    applyTheme();
 }
 
 // ---------------------------------------------------------------------------

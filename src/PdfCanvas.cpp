@@ -1,6 +1,8 @@
 #include "PdfCanvas.h"
 #include "AppLog.h"
+#include "AppSettings.h"
 #include "CrashLog.h"
+#include "GlViewport.h"
 #include "IconPainter.h"
 #include "InkDirty.h"
 #include "InkToolbar.h"
@@ -9,6 +11,9 @@
 
 #include <QPdfDocument>
 #include <QApplication>
+#include <QOffscreenSurface>
+#include <QOpenGLContext>
+#include <QOpenGLFunctions>
 #include <QPainter>
 #include <QPainterPath>
 #include <QDateTime>
@@ -31,6 +36,51 @@
 #include <QTabletEvent>
 #include <QWheelEvent>
 #include <QtMath>
+
+namespace {
+
+// True when a REAL OpenGL driver can be used. The raster path stays the default
+// and the fallback, so this refuses the software rasterisers (Mesa's llvmpipe /
+// softpipe, GDI Generic, Windows' "basic render driver"): they answer the GL API
+// but execute on the CPU, i.e. strictly slower than the engine they would
+// replace. Probed once - a driver does not appear mid-session.
+bool gpuRenderAvailable()
+{
+    static const bool available = [] {
+        QOpenGLContext ctx;
+        if (!ctx.create())
+            return false;
+        QOffscreenSurface surface;
+        surface.setFormat(ctx.format());
+        surface.create();
+        if (!surface.isValid())
+            return false;
+        if (!ctx.makeCurrent(&surface))
+            return false;
+        QOpenGLFunctions fn(&ctx);
+        fn.initializeOpenGLFunctions();
+        const auto *gl = fn.glGetString(GL_RENDERER);
+        const QString renderer =
+            gl ? QString::fromLatin1(reinterpret_cast<const char *>(gl)) : QString();
+        ctx.doneCurrent();
+
+        const QStringList software = {
+            QStringLiteral("llvmpipe"), QStringLiteral("softpipe"),
+            QStringLiteral("swrast"),   QStringLiteral("gdi generic"),
+            QStringLiteral("microsoft basic render"),
+        };
+        for (const QString &needle : software) {
+            if (renderer.contains(needle, Qt::CaseInsensitive))
+                return false;
+        }
+        AppLog::write(QStringLiteral("view"),
+                      QStringLiteral("硬件加速可用（OpenGL 渲染器 %1）").arg(renderer));
+        return true;
+    }();
+    return available;
+}
+
+}   // namespace
 
 namespace {
 // Input/gesture diagnostics - a no-op unless the opt-in log is enabled.
@@ -232,6 +282,15 @@ QString scrollSheet()
 PdfCanvas::PdfCanvas(QWidget *parent)
     : QAbstractScrollArea(parent)
 {
+    // 硬件加速（实验性）: hand the canvas a GPU-backed viewport when the user
+    // switched it on AND a real OpenGL driver exists. Chosen before anything
+    // touches viewport(), so every attribute set below lands on whichever
+    // viewport won.
+    if (AppSettings::gpuAcceleration() && gpuRenderAvailable()) {
+        m_gpu = true;
+        setViewport(new GlViewport(this));
+    }
+
     viewport()->setAttribute(Qt::WA_OpaquePaintEvent, true);
     viewport()->setMouseTracking(true);
     viewport()->setCursor(Qt::CrossCursor);
@@ -1073,7 +1132,37 @@ struct PaintDepthGuard {
 int PdfCanvas::testMaxPaintDepth() const { return s_paintMaxDepth; }
 void PdfCanvas::testResetMaxPaintDepth() { s_paintMaxDepth = s_paintDepth; }
 
+// GPU path (硬件加速) 自测钩子：与构造器查询同一个驱动探针、报告真正装上的
+// viewport（true = 装了 OpenGL 表面）。
+bool PdfCanvas::testGpuRenderAvailable() { return gpuRenderAvailable(); }
+bool PdfCanvas::testViewportIsGl() const
+{ return qobject_cast<QOpenGLWidget *>(viewport()) != nullptr; }
+
+// The GPU surface paints itself: Qt calls paintGL() on the widget that IS the
+// viewport, and the pass it runs is byte-for-byte the CPU one below.
+GlViewport::GlViewport(PdfCanvas *canvas, QWidget *parent)
+    : QOpenGLWidget(parent)
+    , m_canvas(canvas)
+{
+}
+
+void GlViewport::paintGL()
+{
+    if (!m_canvas)
+        return;
+    QPainter p(this);
+    m_canvas->paintForViewport(p);
+}
+
 void PdfCanvas::paintEvent(QPaintEvent *)
+{
+    if (m_gpu)
+        return;                       // GlViewport::paintGL paints instead
+    QPainter p(viewport());
+    paintForViewport(p);
+}
+
+void PdfCanvas::paintForViewport(QPainter &p)
 {
     if (s_paintDepth > 0) {
         // Already painting: this is exactly the recursion the guard is for.
@@ -1094,7 +1183,6 @@ void PdfCanvas::paintEvent(QPaintEvent *)
             AppLog::write(QStringLiteral("probe"), line);
     }
 
-    QPainter p(viewport());
     paintBackdrop(p);
 
     if (m_geom.isEmpty()) {
@@ -1158,6 +1246,28 @@ void PdfCanvas::paintEvent(QPaintEvent *)
     // and drawn only here, which is why it can never reach an exported PDF or PNG.
     if (eraserIndicatorVisible())
         drawEraserIndicator(p, m_eraserHoverPos, activeEraseRadius());
+}
+
+QPixmap PdfCanvas::freezeFramePixmap()
+{
+    // The raster path grabs exactly; only the GL viewport needs a re-render.
+    if (!m_gpu)
+        return grab();
+
+    const qreal dpr = devicePixelRatioF();
+    QPixmap pm(size() * dpr);
+    if (pm.isNull())
+        return grab();                  // pathological size: fall back, never blank
+    pm.setDevicePixelRatio(dpr);
+    pm.fill(Qt::transparent);
+
+    QPainter p(&pm);
+    // paintForViewport paints in viewport-local coordinates and paintBackdrop()
+    // fills viewport()->rect() (always origin-anchored), so shifting by the
+    // viewport's position lands the frame exactly where grab() would.
+    p.translate(viewport()->pos());
+    paintForViewport(p);
+    return pm;
 }
 
 QPointF PdfCanvas::toNormalized(int page, const QPointF &viewportPos) const
@@ -2196,6 +2306,13 @@ bool PdfCanvas::event(QEvent *e)
 
 bool PdfCanvas::viewportEvent(QEvent *e)
 {
+    // With the GPU viewport, painting belongs to the QOpenGLWidget itself: routing
+    // the paint event to the scroll area (the default) would paint through a GL
+    // context that is not current, and the widget's own frame would never be
+    // composited. Let it through so QOpenGLWidget::paintGL() runs instead.
+    if (m_gpu && e->type() == QEvent::Paint)
+        return false;
+
     switch (e->type()) {
     case QEvent::ContextMenu:
         // "Press and hold" on a touch panel arrives as a context menu request; during
