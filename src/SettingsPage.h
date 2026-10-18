@@ -66,6 +66,10 @@ private slots:
     void onOpenLogDir();
     void onThemePicked(int mode);
     void onWordModePicked(int mode);
+    void onWordEnginePicked(int engine);
+    void onChooseSoffice();
+    void onClearSoffice();
+    void onOpenSofficePage();
     void onToolbarStylePicked(int style);
     void onThemePresetPicked(int preset);
     void onPaletteStylePicked(int style);
@@ -81,6 +85,8 @@ private:
     void refreshWordNag();
     void syncThemeSelect();
     void syncWordSelect();
+    void syncWordEngineSelect();
+    void refreshLibreOfficeStatus();
     void syncToolbarStyleSelect();
     void syncThemePreset();
     void syncPaletteStyleSelect();
@@ -119,6 +125,11 @@ private:
     // 打开 Word 文档时: 每次询问 / 批注 / 用 Word 打开，persisted through
     // AppSettings::setWordOpenMode (0 每次询问 / 1 批注 / 2 用 Word 打开).
     SettingsSelect *m_wordSelect = nullptr;
+    SettingsSelect *m_wordEngineSelect = nullptr;
+    QLabel *m_libreOfficeStatus = nullptr;   // LibreOffice 附加包的检测状态
+    QPushButton *m_chooseSoffice = nullptr;
+    QPushButton *m_clearSoffice = nullptr;
+    QPushButton *m_openSofficePage = nullptr;
 
     // The Word nag fix: the toggle persists AppSettings::wordNagFixEnabled and
     // the button restores according to WordConvert::nagRestoreMode() (exact

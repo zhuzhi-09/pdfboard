@@ -63,6 +63,16 @@ bool setThemeMode(int mode, QString *errorOut = nullptr);
 int  wordOpenMode();
 bool setWordOpenMode(int mode, QString *errorOut = nullptr);
 
+// Word 文档的转换引擎：0 = 自动（优先 Word/WPS，缺失时降级 LibreOffice），
+// 1 = 仅 Word/WPS，2 = 仅 LibreOffice。Anything else stored reads back as 0.
+int  wordConvertEngine();
+bool setWordConvertEngine(int engine, QString *errorOut = nullptr);
+
+// 用户手动指定的 LibreOffice soffice.exe（空 = 未指定，走自动检测：程序目录的
+// 便携包 → 环境变量 → PATH → 标准安装目录）。
+QString libreOfficePath();
+bool    setLibreOfficePath(const QString &path, QString *errorOut = nullptr);
+
 // The Word nag fix: ON by default, because a conversion on a machine where
 // this app owns .docx would otherwise fail behind Word's "not the default
 // program" dialog. When ON, a conversion first writes Word's own two option

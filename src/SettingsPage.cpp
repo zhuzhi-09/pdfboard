@@ -945,6 +945,81 @@ void SettingsPage::buildUi()
                                             m_wordSelect, Theme::Space4, Theme::Space4));
         wordOpen.col->addWidget(makeRowSeparator(wordOpen.frame));
 
+        // 转换引擎：自动（优先 Word，缺失时降级 LibreOffice）/ 仅 Word / 仅 LibreOffice。
+        m_wordEngineSelect = new SettingsSelect(
+            { QStringLiteral("自动（优先 Word）"), QStringLiteral("仅 Word"),
+              QStringLiteral("仅 LibreOffice") },
+            wordOpen.frame);
+        m_wordEngineSelect->setFont(Theme::chromeFont(font()));
+        m_wordEngineSelect->setToolTip(QStringLiteral("没有 Word 时自动改用 LibreOffice"));
+        connect(m_wordEngineSelect, &SettingsSelect::changed,
+                this, &SettingsPage::onWordEnginePicked);
+        syncWordEngineSelect();
+        wordOpen.col->addWidget(makeTextRow(
+            wordOpen.frame,
+            QStringLiteral("转换引擎"),
+            QStringLiteral("自动（优先 Word，缺失时用 LibreOffice）/ 仅 Word / 仅 LibreOffice"),
+            m_wordEngineSelect, Theme::Space4, Theme::Space4));
+        wordOpen.col->addWidget(makeRowSeparator(wordOpen.frame));
+
+        // LibreOffice 可选附加包：检测状态 + 选择 / 清除 soffice.exe + 下载页。
+        // 查找顺序见 WordConvert::libreOfficePath()：用户指定 → 程序目录便携包 →
+        // 环境变量 → PATH → 标准安装目录。
+        wordOpen.col->addWidget(makeRowSeparator(wordOpen.frame));
+
+        auto *loRow = new QWidget(wordOpen.frame);
+        auto *lh = new QHBoxLayout(loRow);
+        lh->setContentsMargins(Theme::Space4, Theme::Space3, Theme::Space4, Theme::Space3);
+        lh->setSpacing(Theme::Space4);
+
+        auto *loTexts = new QVBoxLayout;
+        loTexts->setContentsMargins(0, 0, 0, 0);
+        loTexts->setSpacing(Theme::Space1);
+        auto *loTitle = new QLabel(QStringLiteral("LibreOffice（可选附加包）"), loRow);
+        loTitle->setFont(Theme::chromeFont(loRow->font()));
+        loTitle->setWordWrap(true);
+        loTexts->addWidget(loTitle);
+
+        m_libreOfficeStatus = new QLabel(loRow);
+        m_libreOfficeStatus->setObjectName(QStringLiteral("settingsRowBody"));
+        m_libreOfficeStatus->setFont(Theme::scaledFont(loRow->font(), 0.95, QFont::Normal));
+        m_libreOfficeStatus->setWordWrap(true);
+        loTexts->addWidget(m_libreOfficeStatus);
+        loTexts->addStretch(1);   // 标题 + 状态贴顶，别被右侧三颗按钮拉成上下分居
+        lh->addLayout(loTexts, 1);
+
+        auto *loButtons = new QWidget(loRow);
+        auto *lv = new QVBoxLayout(loButtons);
+        lv->setContentsMargins(0, 0, 0, 0);
+        lv->setSpacing(Theme::Space2);
+
+        m_chooseSoffice = new QPushButton(QStringLiteral("选择 soffice.exe…"), loButtons);
+        m_chooseSoffice->setCursor(Qt::PointingHandCursor);
+        m_chooseSoffice->setFont(Theme::chromeFont(font()));
+        m_chooseSoffice->setMinimumHeight(m.touch);
+        lv->addWidget(m_chooseSoffice);
+
+        m_clearSoffice = new QPushButton(QStringLiteral("清除"), loButtons);
+        m_clearSoffice->setCursor(Qt::PointingHandCursor);
+        m_clearSoffice->setFont(Theme::chromeFont(font()));
+        m_clearSoffice->setMinimumHeight(m.touch);
+        lv->addWidget(m_clearSoffice);
+
+        m_openSofficePage = new QPushButton(QStringLiteral("打开下载页"), loButtons);
+        m_openSofficePage->setCursor(Qt::PointingHandCursor);
+        m_openSofficePage->setFont(Theme::chromeFont(font()));
+        m_openSofficePage->setMinimumHeight(m.touch);
+        lv->addWidget(m_openSofficePage);
+
+        lh->addWidget(loButtons, 0, Qt::AlignVCenter);
+        wordOpen.col->addWidget(loRow);
+
+        connect(m_chooseSoffice, &QPushButton::clicked, this, &SettingsPage::onChooseSoffice);
+        connect(m_clearSoffice, &QPushButton::clicked, this, &SettingsPage::onClearSoffice);
+        connect(m_openSofficePage, &QPushButton::clicked, this, &SettingsPage::onOpenSofficePage);
+        refreshLibreOfficeStatus();
+        wordOpen.col->addWidget(makeRowSeparator(wordOpen.frame));
+
         // The nag fix: a toggle that persists AppSettings::wordNagFixEnabled,
         // with the 恢复 button right below it. The row's state line and the
         // button's tooltip follow WordConvert::nagRestoreMode(), so the restore
@@ -1481,8 +1556,8 @@ void SettingsPage::refreshTheme()
     }
 
     // 四个下拉：弹出层的卡片皮肤按新调色板重生成。
-    for (SettingsSelect *select : { m_wordSelect, m_themeSelect, m_toolbarStyleSelect,
-                                    m_paletteStyleSelect }) {
+    for (SettingsSelect *select : { m_wordSelect, m_wordEngineSelect, m_themeSelect,
+                                    m_toolbarStyleSelect, m_paletteStyleSelect }) {
         if (select)
             select->refreshTheme();
     }
@@ -1612,6 +1687,82 @@ void SettingsPage::syncWordSelect()
         return;
     const QSignalBlocker block(m_wordSelect);
     m_wordSelect->setCurrentIndex(AppSettings::wordOpenMode());
+}
+
+void SettingsPage::syncWordEngineSelect()
+{
+    if (!m_wordEngineSelect)
+        return;
+    const QSignalBlocker block(m_wordEngineSelect);
+    m_wordEngineSelect->setCurrentIndex(AppSettings::wordConvertEngine());
+}
+
+void SettingsPage::onWordEnginePicked(int engine)
+{
+    QString err;
+    if (!AppSettings::setWordConvertEngine(engine, &err)) {
+        QMessageBox::warning(this, QStringLiteral("设置失败"), err);
+        syncWordEngineSelect();       // show the value that is really stored
+        return;
+    }
+    syncWordEngineSelect();
+    emit statusMessage(QStringLiteral("Word 转换引擎已切换，重新打开文档后生效"));
+}
+
+void SettingsPage::refreshLibreOfficeStatus()
+{
+    if (!m_libreOfficeStatus)
+        return;
+    const QString detected = WordConvert::libreOfficePath();
+    if (detected.isEmpty()) {
+        m_libreOfficeStatus->setText(
+            QStringLiteral("未检测到。可下载 LibreOffice（或便携版）后用「选择 soffice.exe…」指定；"
+                           "也可把便携版解压到程序目录的 libreoffice\\ 下。"));
+    } else {
+        m_libreOfficeStatus->setText(QStringLiteral("已检测到：%1").arg(detected));
+    }
+    if (m_clearSoffice)
+        m_clearSoffice->setEnabled(!AppSettings::libreOfficePath().isEmpty());
+}
+
+void SettingsPage::onChooseSoffice()
+{
+    const QString current = AppSettings::libreOfficePath();
+    const QString start = current.isEmpty() ? QString() : QFileInfo(current).absolutePath();
+    const QString chosen = QFileDialog::getOpenFileName(
+        this, QStringLiteral("选择 LibreOffice 的 soffice.exe"), start,
+        QStringLiteral("soffice.exe (soffice.exe);;可执行文件 (*.exe)"));
+    if (chosen.isEmpty())
+        return;
+    if (QFileInfo(chosen).fileName().compare(QStringLiteral("soffice.exe"),
+                                             Qt::CaseInsensitive) != 0) {
+        QMessageBox::warning(this, QStringLiteral("选择失败"),
+                             QStringLiteral("请选择 LibreOffice 的 soffice.exe，通常位于 program 目录下"));
+        return;
+    }
+    QString err;
+    if (!AppSettings::setLibreOfficePath(chosen, &err)) {
+        QMessageBox::warning(this, QStringLiteral("保存失败"), err);
+        return;
+    }
+    refreshLibreOfficeStatus();
+    emit statusMessage(QStringLiteral("LibreOffice 路径已保存"));
+}
+
+void SettingsPage::onClearSoffice()
+{
+    QString err;
+    if (!AppSettings::setLibreOfficePath(QString(), &err)) {
+        QMessageBox::warning(this, QStringLiteral("保存失败"), err);
+        return;
+    }
+    refreshLibreOfficeStatus();
+    emit statusMessage(QStringLiteral("已清除 LibreOffice 路径"));
+}
+
+void SettingsPage::onOpenSofficePage()
+{
+    QDesktopServices::openUrl(QUrl(QStringLiteral("https://www.libreoffice.org/download/")));
 }
 
 void SettingsPage::onWordModePicked(int mode)

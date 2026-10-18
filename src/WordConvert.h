@@ -26,6 +26,24 @@ bool isWordDoc(const QString &path);
 // registration lookup only - the application is never launched to probe.
 bool hasConverter();
 
+// True when LibreOffice's `soffice` is installed. Probed once per process with a
+// file-system lookup only - LibreOffice is never launched to probe.
+bool hasLibreOffice();
+
+// Path to soffice.exe (empty when LibreOffice is not installed). PDFBOARD_SOFFICE
+// overrides it for portable installs / testing.
+QString libreOfficePath();
+
+// True when EITHER Word/WPS or LibreOffice can convert a Word document.
+bool hasAnyConverter();
+
+// Which engine a conversion will actually use, given the stored preference
+// (AppSettings::wordConvertEngine: 0 auto / 1 Word only / 2 LibreOffice only)
+// and what is installed. Auto prefers Word's own layout and falls back to
+// LibreOffice when Word/WPS is absent.
+enum class Engine { None, Word, LibreOffice };
+Engine resolvedEngine();
+
 // True when .docx is actually associated with Word. Word shows its modal
 // "not the default program" dialog - the one that blocks Open/Export and
 // refuses Quit - exactly in the opposite case, so this only makes the failure

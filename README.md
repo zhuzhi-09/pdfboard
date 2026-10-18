@@ -12,6 +12,9 @@
 - 纵向**连续滚动**翻阅（像 Word），适宽自动缩放
 - **图片直接打开**：png / jpg / jpeg / bmp / gif / ico 按**原像素**导入为一页文档，
   之后的一切与 PDF 完全相同（缩放、批注、保存 `.dpz`、导出）——原图只读，不会被改写
+- **Word 文档直接打开**：`.doc` / `.docx` 先转成 PDF 再进入批注流程（原文件只读、不改动）。
+  转换引擎可在 **设置 →「Word 文档」** 切换：**自动（优先 Word/WPS，缺失时用 LibreOffice）/
+  仅 Word / 仅 LibreOffice**；没装 Word 时可用可选的 **LibreOffice 附加包**（见下方同名章节）。
 - **双指捏合缩放**（以两指中心为锚点，横纵都不漂移）；**大触摸屏的双指抖动做了抑制**：
   手指按住阅读时画面完全静止，只有真正在捏合/平移时才跟手
 - **双指拖动平移**（含横向），单指/鼠标滚动
@@ -348,6 +351,22 @@ docs/                 开发文档（见下）
   GitHub 的 `releases/latest` 页面（安装版与便携版都在里面）。软件自身不发任何请求。
 - 「关于」里的「项目主页」按钮同理，只是把链接交给浏览器。
 - 主页的每日一句改为**纯本地内置**的诗词名句（随机显示），不再访问 hitokoto。
+
+## LibreOffice 附加包（可选）
+
+本软件打开 `.doc` / `.docx` 靠「先转 PDF」。没有 Microsoft Word/WPS 的机器可以装免费的
+[LibreOffice](https://www.libreoffice.org/)，或直接使用我们提供的**便携附加包**
+（Release 里的 `PDFBoard-LibreOffice-portable.zip`，约 275 MB）。
+
+用法（二选一）：
+- **便携**：把压缩包里的 `libreoffice` 文件夹解压到 **PDFBoard 程序目录**下，
+  即 `<程序目录>\libreoffice\program\soffice.exe`，程序自动检测，无需设置。
+- **指定**：把 `libreoffice` 解压到任意位置，然后在
+  **设置 →「Word 文档」→「LibreOffice（可选附加包）」→「选择 soffice.exe…」** 指定。
+
+附加包是 LibreOffice 的未修改副本，按 **MPL-2.0** 分发（包内附 `license.txt` / `NOTICE`
+与源码获取地址）；「LibreOffice」是 The Document Foundation 的商标，本项目与 TDF 无关、
+不代表其背书。删除程序目录下的 `libreoffice` 文件夹即可卸载。
 
 ## 已知限制
 

@@ -21,6 +21,8 @@ const QString kSavePathValue = QStringLiteral("DefaultSavePath");
 const QString kDebugLogValue = QStringLiteral("DebugLog");
 const QString kThemeModeValue = QStringLiteral("ThemeMode");
 const QString kWordOpenModeValue = QStringLiteral("WordOpenMode");
+const QString kWordConvertEngineValue = QStringLiteral("WordConvertEngine");
+const QString kLibreOfficePathValue = QStringLiteral("LibreOfficePath");
 const QString kWordNagFixValue = QStringLiteral("WordNagFix");
 const QString kPalmEraserValue = QStringLiteral("PalmEraser");
 const QString kToolbarStyleValue = QStringLiteral("ToolbarStyle");
@@ -303,6 +305,56 @@ bool AppSettings::setWordOpenMode(int mode, QString *errorOut)
     if (s.status() != QSettings::NoError) {
         if (errorOut)
             *errorOut = QStringLiteral("无法写入注册表（Word 文档打开方式）");
+        return false;
+    }
+    if (errorOut)
+        errorOut->clear();
+    return true;
+}
+
+// 转换引擎：0 = 自动（优先 Word/WPS，缺失时用 LibreOffice），1 = 仅 Word/WPS，
+// 2 = 仅 LibreOffice。越界读回 0。
+int AppSettings::wordConvertEngine()
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    const int engine = s.value(kWordConvertEngineValue, 0).toInt();
+    return (engine >= 0 && engine <= 2) ? engine : 0;
+}
+
+bool AppSettings::setWordConvertEngine(int engine, QString *errorOut)
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    s.setValue(kWordConvertEngineValue, qBound(0, engine, 2));
+    s.sync();
+
+    if (s.status() != QSettings::NoError) {
+        if (errorOut)
+            *errorOut = QStringLiteral("无法写入注册表（Word 转换引擎）");
+        return false;
+    }
+    if (errorOut)
+        errorOut->clear();
+    return true;
+}
+
+QString AppSettings::libreOfficePath()
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    return s.value(kLibreOfficePathValue).toString();
+}
+
+bool AppSettings::setLibreOfficePath(const QString &path, QString *errorOut)
+{
+    QSettings s(kAppKey, QSettings::NativeFormat);
+    if (path.isEmpty())
+        s.remove(kLibreOfficePathValue);
+    else
+        s.setValue(kLibreOfficePathValue, QDir::toNativeSeparators(path));
+    s.sync();
+
+    if (s.status() != QSettings::NoError) {
+        if (errorOut)
+            *errorOut = QStringLiteral("无法写入注册表（LibreOffice 路径）");
         return false;
     }
     if (errorOut)

@@ -1991,6 +1991,63 @@ static int runThemeSelfTest()
         raw.remove(QStringLiteral("ReduceMotion"));
     raw.sync();
 
+    // Word 转换引擎：默认 0（自动）、越界回 0、往返；并核对 resolvedEngine 与实际
+    // 装了什么一致（本机相关，所以按 hasConverter/hasLibreOffice 断言）。
+    {
+        const QVariant savedEngine = raw.value(QStringLiteral("WordConvertEngine"));
+        raw.remove(QStringLiteral("WordConvertEngine"));
+        raw.sync();
+        check("word engine: default is auto", AppSettings::wordConvertEngine(), 0);
+        raw.setValue(QStringLiteral("WordConvertEngine"), 9);
+        raw.sync();
+        check("word engine: out-of-range reads auto", AppSettings::wordConvertEngine(), 0);
+        check("word engine: set 2 succeeds",
+              AppSettings::setWordConvertEngine(2, nullptr) ? 1 : 0, 1);
+        check("word engine: stored 2 reads back", AppSettings::wordConvertEngine(), 2);
+        check("word engine: LibreOffice-only needs LO",
+              int(WordConvert::resolvedEngine()
+                  == (WordConvert::hasLibreOffice() ? WordConvert::Engine::LibreOffice
+                                                    : WordConvert::Engine::None)), 1);
+        AppSettings::setWordConvertEngine(1, nullptr);
+        check("word engine: Word-only needs Word",
+              int(WordConvert::resolvedEngine()
+                  == (WordConvert::hasConverter() ? WordConvert::Engine::Word
+                                                  : WordConvert::Engine::None)), 1);
+        AppSettings::setWordConvertEngine(0, nullptr);
+        const WordConvert::Engine autoEngineExpected =
+            WordConvert::hasConverter() ? WordConvert::Engine::Word
+            : WordConvert::hasLibreOffice() ? WordConvert::Engine::LibreOffice
+                                            : WordConvert::Engine::None;
+        check("word engine: auto prefers Word",
+              int(WordConvert::resolvedEngine() == autoEngineExpected), 1);
+        if (savedEngine.isValid())
+            raw.setValue(QStringLiteral("WordConvertEngine"), savedEngine);
+        else
+            raw.remove(QStringLiteral("WordConvertEngine"));
+        raw.sync();
+    }
+
+    // LibreOffice 路径：默认空、往返、清除。
+    {
+        const QVariant savedLo = raw.value(QStringLiteral("LibreOfficePath"));
+        raw.remove(QStringLiteral("LibreOfficePath"));
+        raw.sync();
+        check("libreoffice: default is empty", AppSettings::libreOfficePath().isEmpty() ? 1 : 0, 1);
+        check("libreoffice: set succeeds",
+              AppSettings::setLibreOfficePath(QStringLiteral("C:\\dev\\soffice.exe"), nullptr) ? 1 : 0, 1);
+        check("libreoffice: stored path reads back",
+              AppSettings::libreOfficePath() == QStringLiteral("C:\\dev\\soffice.exe") ? 1 : 0, 1);
+        check("libreoffice: clear succeeds",
+              AppSettings::setLibreOfficePath(QString(), nullptr) ? 1 : 0, 1);
+        check("libreoffice: cleared reads empty",
+              AppSettings::libreOfficePath().isEmpty() ? 1 : 0, 1);
+        if (savedLo.isValid())
+            raw.setValue(QStringLiteral("LibreOfficePath"), savedLo);
+        else
+            raw.remove(QStringLiteral("LibreOfficePath"));
+        raw.sync();
+    }
+
     // MD3 roles: the legacy names must stay derived from them.
     const Theme::Palette md = Theme::makeLightPalette();
     check("md3: accent is primary", md.accent == md.primary ? 1 : 0, 1);

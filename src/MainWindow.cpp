@@ -948,11 +948,11 @@ void MainWindow::openPath(const QString &path)
         // The .docx itself is never touched: Word/WPS renders a PDF into the
         // temp cache (reused while path+size+mtime are unchanged) and that PDF
         // is what the normal pipeline sees from here on.
-        if (!WordConvert::hasConverter()) {
+        if (!WordConvert::hasAnyConverter()) {
             AppLog::write(QStringLiteral("open"),
-                          QStringLiteral("Word 文档打开失败：未检测到 Word/WPS（%1）").arg(path));
+                          QStringLiteral("Word 文档打开失败：未检测到 Word/WPS 或 LibreOffice（%1）").arg(path));
             statusBar()->showMessage(
-                QStringLiteral("未检测到 Word/WPS，无法打开该 Word 文档（可先另存为 PDF）"),
+                QStringLiteral("未检测到 Word/WPS 或 LibreOffice，无法打开该 Word 文档（可先另存为 PDF）"),
                 8000);
             return;
         }

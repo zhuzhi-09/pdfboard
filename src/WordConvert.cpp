@@ -3,14 +3,18 @@
 #include "AppSettings.h"
 
 #include <QCryptographicHash>
+#include <QCoreApplication>
 #include <QDateTime>
 #include <QDir>
 #include <QElapsedTimer>
 #include <QFile>
 #include <QFileInfo>
 #include <QJsonDocument>
+#include <QProcess>
 #include <QSettings>
+#include <QStandardPaths>
 #include <QStringList>
+#include <QUrl>
 
 #include <oaidl.h>
 #include <objbase.h>
@@ -557,6 +561,130 @@ bool WordConvert::hasConverter()
     return available;
 }
 
+// LibreOffice's install root from its uninstall registration. Users install it
+// anywhere (D:\LibreOffice is common when C: is small), so the fixed
+// "Program Files" list alone misses real installs; the uninstall entry always
+// records where it went.
+static QString sofficeFromUninstallRegistry()
+{
+    const QStringList roots = {
+        QStringLiteral("HKEY_LOCAL_MACHINE\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall"),
+        QStringLiteral("HKEY_LOCAL_MACHINE\\Software\\WOW6432Node\\Microsoft\\Windows\\CurrentVersion\\Uninstall"),
+        QStringLiteral("HKEY_CURRENT_USER\\Software\\Microsoft\\Windows\\CurrentVersion\\Uninstall"),
+    };
+    for (const QString &root : roots) {
+        QSettings s(root, QSettings::NativeFormat);
+        const QStringList entries = s.childGroups();   // registry subkeys
+        for (const QString &entry : entries) {
+            s.beginGroup(entry);
+            const QString display = s.value(QStringLiteral("DisplayName")).toString();
+            if (display.startsWith(QStringLiteral("LibreOffice"), Qt::CaseInsensitive)) {
+                const QString install =
+                    s.value(QStringLiteral("InstallLocation")).toString();
+                if (!install.isEmpty()) {
+                    const QString candidate =
+                        QDir(install).filePath(QStringLiteral("program/soffice.exe"));
+                    if (QFileInfo::exists(candidate)) {
+                        s.endGroup();
+                        return candidate;
+                    }
+                }
+                // DisplayIcon is usually "<...>\program\soffice.exe,0".
+                QString icon = s.value(QStringLiteral("DisplayIcon")).toString();
+                if (!icon.isEmpty()) {
+                    const int comma = icon.lastIndexOf(QLatin1Char(','));
+                    if (comma > 0)
+                        icon.truncate(comma);
+                    icon.remove(QLatin1Char('"'));
+                    if (QFileInfo(icon).fileName().compare(QStringLiteral("soffice.exe"),
+                                                           Qt::CaseInsensitive) == 0
+                        && QFileInfo::exists(icon)) {
+                        s.endGroup();
+                        return icon;
+                    }
+                }
+            }
+            s.endGroup();
+        }
+    }
+    return QString();
+}
+
+QString WordConvert::libreOfficePath()
+{
+    // Re-checked on every call (cheap file-existence probes) instead of cached:
+    // the user can point us at a portable install from the settings page, and
+    // that has to take effect without a restart.
+
+    // 1) the soffice.exe the user picked in 设置 → Word 文档
+    const QString chosen = AppSettings::libreOfficePath();
+    if (!chosen.isEmpty() && QFileInfo::exists(chosen))
+        return QDir::toNativeSeparators(chosen);
+
+    // 2) an optional portable add-on dropped into the app folder:
+    //    <app>/libreoffice/program/soffice.exe
+    const QString local = QDir(QCoreApplication::applicationDirPath())
+                              .filePath(QStringLiteral("libreoffice/program/soffice.exe"));
+    if (QFileInfo::exists(local))
+        return QDir::toNativeSeparators(local);
+
+    // 3) explicit override (portable install, or a test machine)
+    const QString env = qEnvironmentVariable("PDFBOARD_SOFFICE");
+    if (!env.isEmpty() && QFileInfo::exists(env))
+        return QDir::toNativeSeparators(env);
+
+    // 4) PATH
+    const QString onPath = QStandardPaths::findExecutable(QStringLiteral("soffice"));
+    if (!onPath.isEmpty())
+        return QDir::toNativeSeparators(onPath);
+
+    // 5) the standard install roots
+    const QStringList candidates = {
+        qEnvironmentVariable("ProgramFiles") + QStringLiteral("/LibreOffice/program/soffice.exe"),
+        qEnvironmentVariable("ProgramW6432") + QStringLiteral("/LibreOffice/program/soffice.exe"),
+        qEnvironmentVariable("ProgramFiles(x86)") + QStringLiteral("/LibreOffice/program/soffice.exe"),
+        qEnvironmentVariable("LOCALAPPDATA") + QStringLiteral("/Programs/LibreOffice/program/soffice.exe"),
+    };
+    for (const QString &candidate : candidates)
+        if (!candidate.isEmpty() && QFileInfo::exists(candidate))
+            return QDir::toNativeSeparators(candidate);
+
+    // 6) wherever it was actually installed: LibreOffice's uninstall entry keeps
+    //    InstallLocation / DisplayIcon, so a custom drive (D:\LibreOffice is
+    //    common on machines with a small C:) is found too.
+    const QString installed = sofficeFromUninstallRegistry();
+    if (!installed.isEmpty())
+        return QDir::toNativeSeparators(installed);
+
+    return QString();
+}
+
+bool WordConvert::hasLibreOffice()
+{
+    return !libreOfficePath().isEmpty();
+}
+
+bool WordConvert::hasAnyConverter()
+{
+    return hasConverter() || hasLibreOffice();
+}
+
+WordConvert::Engine WordConvert::resolvedEngine()
+{
+    switch (AppSettings::wordConvertEngine()) {
+    case 1:   // 仅 Word
+        return hasConverter() ? Engine::Word : Engine::None;
+    case 2:   // 仅 LibreOffice
+        return hasLibreOffice() ? Engine::LibreOffice : Engine::None;
+    default:  // 自动：优先 Word 自己的排版，缺失时降级 LibreOffice
+        if (hasConverter())
+            return Engine::Word;
+        if (hasLibreOffice())
+            return Engine::LibreOffice;
+        return Engine::None;
+    }
+}
+
 QJsonObject WordConvert::encodeNagBackup(const QVariantMap &recorded)
 {
     QJsonObject backup;
@@ -754,6 +882,72 @@ bool WordConvert::wordNagSilenced()
     return checked > 0;
 }
 
+namespace {
+
+// Runs `soffice --headless` and writes the PDF to `part`.
+//
+// A private user profile per run: if the user already has LibreOffice open, a
+// headless instance without its own profile hands the request to the running
+// one and exits before writing anything. Profile and output both live under our
+// temp dir, so the user's LibreOffice settings are never touched.
+QString runLibreOfficeExport(const QString &exe, const QString &src, const QString &part)
+{
+    const QString stamp = QString::number(QCoreApplication::applicationPid())
+                          + QLatin1Char('-')
+                          + QString::number(QDateTime::currentMSecsSinceEpoch());
+    const QString profile = QDir(tempDir()).filePath(QStringLiteral("lo-profile-") + stamp);
+    const QString outDir  = QDir(tempDir()).filePath(QStringLiteral("lo-out-") + stamp);
+    if (!QDir().mkpath(profile) || !QDir().mkpath(outDir))
+        return QStringLiteral("无法创建 LibreOffice 临时目录");
+
+    QProcess proc;
+    proc.setProgram(exe);
+    proc.setArguments({
+        QStringLiteral("-env:UserInstallation=%1")
+            .arg(QUrl::fromLocalFile(profile).toString()),
+        QStringLiteral("--headless"),
+        QStringLiteral("--norestore"),
+        QStringLiteral("--nolockcheck"),
+        QStringLiteral("--nodefault"),
+        QStringLiteral("--nofirststartwizard"),
+        QStringLiteral("--convert-to"), QStringLiteral("pdf"),
+        QStringLiteral("--outdir"), QDir::toNativeSeparators(outDir),
+        QDir::toNativeSeparators(src),
+    });
+    proc.setProcessChannelMode(QProcess::SeparateChannels);
+
+    QString failure;
+    proc.start();
+    if (!proc.waitForStarted(15000)) {
+        failure = QStringLiteral("无法启动 LibreOffice（%1）").arg(exe);
+    } else if (!proc.waitForFinished(180000)) {
+        proc.kill();
+        proc.waitForFinished(5000);
+        failure = QStringLiteral("LibreOffice 转换超时");
+    }
+
+    if (failure.isEmpty()) {
+        const QString produced =
+            QDir(outDir).filePath(QFileInfo(src).completeBaseName() + QStringLiteral(".pdf"));
+        if (!QFileInfo::exists(produced)) {
+            const QString stderrText =
+                QString::fromLocal8Bit(proc.readAllStandardError()).trimmed();
+            failure = QStringLiteral("LibreOffice 未生成 PDF（退出码 %1%2）")
+                          .arg(proc.exitCode())
+                          .arg(stderrText.isEmpty() ? QString()
+                                                    : QStringLiteral("：") + stderrText.left(200));
+        } else if (!QFile::rename(produced, part)) {
+            failure = QStringLiteral("无法写入缓存文件：%1").arg(part);
+        }
+    }
+
+    QDir(profile).removeRecursively();
+    QDir(outDir).removeRecursively();
+    return failure;
+}
+
+}   // namespace
+
 bool WordConvert::convertToPdf(const QString &src, QString *pdfOut, QString *errorOut)
 {
     auto fail = [errorOut](const QString &message) {
@@ -766,11 +960,25 @@ bool WordConvert::convertToPdf(const QString &src, QString *pdfOut, QString *err
 
     if (!isWordDoc(src))
         return fail(QStringLiteral("不是 Word 文档：%1").arg(src));
-    if (!hasConverter())
-        return fail(QStringLiteral("未检测到 Word/WPS"));
+
+    const Engine engine = resolvedEngine();
+    if (engine == Engine::None) {
+        // The message follows the stored preference: with 仅 Word / 仅 LibreOffice
+        // exactly one engine is missing; on 自动 both are.
+        switch (AppSettings::wordConvertEngine()) {
+        case 1:
+            return fail(QStringLiteral("未检测到 Word/WPS"));
+        case 2:
+            return fail(QStringLiteral("未检测到 LibreOffice"));
+        default:
+            return fail(QStringLiteral("未检测到 Word/WPS 或 LibreOffice"));
+        }
+    }
 
     const QFileInfo info(src);
-    const QString out = tempPdfPathFor(src, info.size(), info.lastModified().toMSecsSinceEpoch());
+    QString out = tempPdfPathFor(src, info.size(), info.lastModified().toMSecsSinceEpoch());
+    if (engine == Engine::LibreOffice)
+        out.insert(out.length() - 4, QStringLiteral("-lo"));   // 每个引擎各自的缓存
     if (QFileInfo::exists(out)) {
         // Path + size + mtime are all unchanged, so this is still Word's exact
         // layout for the current file: no re-export.
@@ -806,15 +1014,17 @@ bool WordConvert::convertToPdf(const QString &src, QString *pdfOut, QString *err
     // can undo it from the settings page; the toggle there can also turn the
     // whole thing off. Best effort: when the write fails the conversion still
     // runs and reports its own reason.
-    if (AppSettings::wordNagFixEnabled()) {
+    if (engine == Engine::Word && AppSettings::wordNagFixEnabled()) {
         QString nagError;
         if (!silenceWordNag(&nagError))
             AppLog::write(QStringLiteral("open"),
                           QStringLiteral("Word 提醒开关未写入：%1").arg(nagError));
     }
 
-    QString failure = runExport(src, part);
-    if (!failure.isEmpty()) {
+    QString failure = (engine == Engine::LibreOffice)
+                          ? runLibreOfficeExport(libreOfficePath(), src, part)
+                          : runExport(src, part);
+    if (engine == Engine::Word && !failure.isEmpty()) {
         // One retry: on a machine where Word nagged with its "not the default
         // program" dialog, the attempt above has just cleared that option, so
         // the second run gets through. Cheap (only on failure) and it turns a
@@ -836,8 +1046,10 @@ bool WordConvert::convertToPdf(const QString &src, QString *pdfOut, QString *err
     }
 
     AppLog::write(QStringLiteral("open"),
-                  QStringLiteral("Word 转换完成：%1 → %2（%3 ms）")
-                      .arg(QFileInfo(src).fileName(), QFileInfo(out).fileName())
+                  QStringLiteral("%1 转换完成：%2 → %3（%4 ms）")
+                      .arg(engine == Engine::LibreOffice ? QStringLiteral("LibreOffice")
+                                                         : QStringLiteral("Word"),
+                           QFileInfo(src).fileName(), QFileInfo(out).fileName())
                       .arg(timer.elapsed()));
     if (pdfOut)
         *pdfOut = out;
