@@ -19,6 +19,7 @@
 #include "SettingsPage.h"
 #include "Theme.h"
 #include "TouchProbe.h"
+#include "UpdateCheck.h"
 #include "WordConvert.h"
 #include "ZoomBar.h"
 
@@ -61,6 +62,7 @@
 #include <QPdfWriter>
 #include <QPageSize>
 #include <QPointF>
+#include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
 #include <QSharedPointer>
@@ -2641,17 +2643,53 @@ static void captureUiReviewImages()
     QCoreApplication::processEvents();
 
     if (auto *page = window.findChild<SettingsPage *>()) {
-        // 把窗口撑到内容高度，让全部分组一次装进滚动区：抓出来的整页图里
-        // 不会出现滚动条把「更新 / 关于」截掉。
-        for (int i = 0; i < 4 && page->verticalScrollBar()->isVisible(); ++i) {
-            window.resize(window.width(),
-                          window.height() + page->verticalScrollBar()->maximum() + 40);
+        // One shot per category. The window is stretched to the category's
+        // content height first, so no scroll bar cuts the last cards off.
+        for (int c = 0; c < page->testCategoryCount(); ++c) {
+            window.resize(1440, 1000);
+            page->testShowCategory(c);
             QCoreApplication::processEvents();
+            QScrollArea *scroll = page->testCurrentScroll();
+            for (int i = 0; scroll && i < 4 && scroll->verticalScrollBar()->isVisible(); ++i) {
+                window.resize(window.width(),
+                              window.height() + scroll->verticalScrollBar()->maximum() + 40);
+                QCoreApplication::processEvents();
+            }
+            const QString path = dir + QStringLiteral("/settings-page-%1.png").arg(c);
+            const bool saved = page->grab().save(path, "PNG");
+            out(QStringLiteral("[selftest] 设置页截图（%1）：%2（%3）")
+                    .arg(page->testCategoryName(c), path,
+                         saved ? QStringLiteral("已写出") : QStringLiteral("写出失败")));
         }
-        const QString path = dir + QStringLiteral("/settings-page.png");
+        // Narrow window: the rail folds to icons only.
+        window.resize(820, 900);
+        page->testShowCategory(1);
+        QCoreApplication::processEvents();
+        const QString path = dir + QStringLiteral("/settings-page-compact.png");
         const bool saved = page->grab().save(path, "PNG");
-        out(QStringLiteral("[selftest] 设置页截图：%1（%2）")
-                .arg(path, saved ? QStringLiteral("已写出") : QStringLiteral("写出失败")));
+        out(QStringLiteral("[selftest] 设置页截图（窄窗口，导航%1）：%2（%3）")
+                .arg(page->testRailCompact() ? QStringLiteral("已收起") : QStringLiteral("未收起"),
+                     path, saved ? QStringLiteral("已写出") : QStringLiteral("写出失败")));
+
+        // The other theme too (in memory only - nothing is written to the
+        // registry), then back to the stored one.
+        const bool dark = Theme::mode() == Theme::Mode::Dark
+                          || (Theme::mode() == Theme::Mode::System
+                              && Theme::systemMode() == Theme::Mode::Dark);
+        Theme::setMode(dark ? Theme::Mode::Light : Theme::Mode::Dark);
+        page->refreshTheme();
+        window.resize(1440, 1000);
+        for (int c : { 1, 5 }) {
+            page->testShowCategory(c);
+            QCoreApplication::processEvents();
+            const QString other = dir + QStringLiteral("/settings-page-%1-%2.png")
+                                            .arg(dark ? QStringLiteral("light")
+                                                      : QStringLiteral("dark"))
+                                            .arg(c);
+            page->grab().save(other, "PNG");
+        }
+        Theme::applyStoredMode(AppSettings::themeMode());
+        page->refreshTheme();
     }
 }
 
@@ -2808,6 +2846,36 @@ static int runTabStripSelfTest()
 // Pure maths, no widgets: the island metrics must shrink to 80% (font and
 // floors together), and the drag clamp must keep the bar inside the viewport
 // even when the host is smaller than the island.
+// Online update check:  pdfboard.exe --selftest-update [currentVersion]
+// Runs the real 检查更新 request against github.com once (a direct connection,
+// like the button) and prints what the settings page would show. Not part of
+// CI: it needs the network.
+static int runUpdateSelfTest(const QString &current)
+{
+    UpdateCheck::Checker checker;
+    UpdateCheck::Result result;
+    bool done = false;
+    QEventLoop loop;
+    QObject::connect(&checker, &UpdateCheck::Checker::finished, &loop,
+                     [&](const UpdateCheck::Result &r) {
+                         result = r;
+                         done = true;
+                         loop.quit();
+                     });
+    QElapsedTimer t;
+    t.start();
+    checker.start(current);
+    if (!done)
+        loop.exec();
+    const char *names[] = { "UpToDate", "NewerFound", "Failed" };
+    out(QStringLiteral("[update] current %1 -> %2 in %3 ms: latest %4, page %5%6")
+            .arg(current, QString::fromLatin1(names[int(result.status)]))
+            .arg(t.elapsed())
+            .arg(result.latestTag, result.pageUrl.toString())
+            .arg(result.error.isEmpty() ? QString() : QStringLiteral(", error: ") + result.error));
+    return result.status == UpdateCheck::Result::Status::Failed ? 3 : 0;
+}
+
 static int runUiSelfTest()
 {
     int failed = 0;
@@ -2837,6 +2905,62 @@ static int runUiSelfTest()
     check("clamp: host smaller -> 0,0",
           (InkToolbar::clampToolbarPos(QPoint(50, 50), QSize(800, 600), QSize(900, 700))
                == QPoint(0, 0)) ? 1 : 0, 1);
+
+    // 检查更新 decides from the /releases/latest redirect alone (offline here).
+    using UpdateCheck::Checker;
+    using UpdateStatus = UpdateCheck::Result::Status;
+    const QString tagPage = QStringLiteral("https://github.com/zhuzhi-09/pdfboard/releases/tag/v1.14.1");
+    check("update: tag from Location",
+          UpdateCheck::tagFromLocation(tagPage) == QStringLiteral("v1.14.1") ? 1 : 0, 1);
+    check("update: no tag -> empty",
+          UpdateCheck::tagFromLocation(QStringLiteral("https://github.com/zhuzhi-09/pdfboard/releases"))
+              .isEmpty() ? 1 : 0, 1);
+    check("update: 1.14.10 > 1.14.9",
+          UpdateCheck::compareVersions(QStringLiteral("v1.14.10"), QStringLiteral("1.14.9")) > 0 ? 1 : 0, 1);
+    check("update: exp suffix ignored",
+          UpdateCheck::compareVersions(QStringLiteral("1.14.2-exp"), QStringLiteral("v1.14.2")) == 0 ? 1 : 0, 1);
+    check("update: newer release found",
+          Checker::interpret(302, tagPage, QStringLiteral("1.14.0")).status == UpdateStatus::NewerFound ? 1 : 0, 1);
+    check("update: same version up to date",
+          Checker::interpret(302, tagPage, QStringLiteral("1.14.1")).status == UpdateStatus::UpToDate ? 1 : 0, 1);
+    check("update: exp build ahead is up to date",
+          Checker::interpret(302, tagPage, QStringLiteral("1.14.2")).status == UpdateStatus::UpToDate ? 1 : 0, 1);
+    check("update: relative Location resolved",
+          Checker::interpret(302, QStringLiteral("/zhuzhi-09/pdfboard/releases/tag/v2.0.0"),
+                             QStringLiteral("1.14.2")).pageUrl
+                  == QUrl(QStringLiteral("https://github.com/zhuzhi-09/pdfboard/releases/tag/v2.0.0")) ? 1 : 0, 1);
+    check("update: 200 is not an answer",
+          Checker::interpret(200, QString(), QStringLiteral("1.14.2")).status == UpdateStatus::Failed ? 1 : 0, 1);
+    check("update: no release yet fails",
+          Checker::interpret(302, QStringLiteral("https://github.com/zhuzhi-09/pdfboard/releases"),
+                             QStringLiteral("1.14.2")).status == UpdateStatus::Failed ? 1 : 0, 1);
+
+    // Settings page structure: every category builds a page, the rail folds on
+    // a narrow page and unfolds on a wide one.
+    {
+        SettingsPage page;
+        page.setAttribute(Qt::WA_DontShowOnScreen, true);
+        page.resize(1400, 900);
+        page.show();
+        QCoreApplication::processEvents();
+        check("settings: six categories", page.testCategoryCount(), 6);
+        int cards = 0;
+        for (int c = 0; c < page.testCategoryCount(); ++c) {
+            page.testShowCategory(c);
+            QCoreApplication::processEvents();
+            QScrollArea *scroll = page.testCurrentScroll();
+            const int n = scroll ? scroll->findChildren<QFrame *>(QStringLiteral("settingsCard")).size() : 0;
+            if (n > 0)
+                ++cards;
+            else
+                out(QStringLiteral("[selftest] settings: %1 has no cards").arg(page.testCategoryName(c)));
+        }
+        check("settings: every page has cards", cards, page.testCategoryCount());
+        check("settings: wide rail unfolded", page.testRailCompact() ? 1 : 0, 0);
+        page.resize(700, 900);
+        QCoreApplication::processEvents();
+        check("settings: narrow rail folded", page.testRailCompact() ? 1 : 0, 1);
+    }
 
     failed += runTabStripSelfTest();
 
@@ -5135,6 +5259,7 @@ int main(int argc, char **argv)
     const int stIdx = args.indexOf(QStringLiteral("--selftest-ink"));
     const int tileIdx = args.indexOf(QStringLiteral("--selftest-tileclip"));
     const int scrollIdx = args.indexOf(QStringLiteral("--selftest-scroll"));
+    const int updateIdx = args.indexOf(QStringLiteral("--selftest-update"));
     const int logIdx = args.indexOf(QStringLiteral("--selftest-log"));
     const int uiIdx = args.indexOf(QStringLiteral("--selftest-ui"));
     const int themeIdx = args.indexOf(QStringLiteral("--selftest-theme"));
@@ -5154,6 +5279,7 @@ int main(int argc, char **argv)
         || (stIdx >= 0 && stIdx + 1 < args.size())
         || tileIdx >= 0
         || scrollIdx >= 0
+        || updateIdx >= 0
         || logIdx >= 0
         || uiIdx >= 0
         || themeIdx >= 0
@@ -5179,6 +5305,10 @@ int main(int argc, char **argv)
     if (tileIdx >= 0)
         return runTileClipSelfTest(tileIdx + 1 < args.size() ? args.at(tileIdx + 1)
                                                              : QDir::tempPath());
+
+    if (updateIdx >= 0)
+        return runUpdateSelfTest(updateIdx + 1 < args.size() ? args.at(updateIdx + 1)
+                                                             : QStringLiteral("1.0.0"));
 
     if (scrollIdx >= 0)
         return runScrollSelfTest(scrollIdx + 1 < args.size() ? args.at(scrollIdx + 1)

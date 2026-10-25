@@ -52,6 +52,8 @@ qt_add_executable(pdfboard
   src/InkSmooth.h
   src/InkStroke.h
   src/PaperBase.h
+    src/UpdateCheck.h
+    src/UpdateCheck.cpp
 )
 
 target_link_libraries(pdfboard PRIVATE
