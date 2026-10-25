@@ -52,6 +52,7 @@
 #include <QRect>
 #include <QScreen>
 #include <QElapsedTimer>
+#include <QEventLoop>
 #include <QImage>
 #include <QPdfDocument>
 #include <QPdfDocumentRenderOptions>
@@ -1118,6 +1119,92 @@ static int runTileClipSelfTest(const QString &outDir)
                     .arg(qRound(pr.left())).arg(qRound(pr.top()))
                     .arg(canvasOk ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
             shot.save(dir.filePath(QStringLiteral("canvas.png")));
+        }
+    }
+
+    // Async path: on screen the page paints a low-res preview immediately and the
+    // tiles arrive from QPdfPageRenderer's worker. Force async on this offscreen
+    // canvas, pump the event loop until the visible tiles are in, then make sure
+    // the resulting page is the same grid (not blank / not shifted).
+    {
+        PdfCanvas canvas;
+        canvas.setAttribute(Qt::WA_DontShowOnScreen, true);
+        canvas.resize(1000, 1500);
+        canvas.show();
+        QString err;
+        if (!canvas.openPdf(pdf, &err)) {
+            out(QStringLiteral("[tileclip] async open FAILED: %1").arg(err));
+            ++failed;
+        } else {
+            canvas.testForceAsyncTiles(true);
+            const QSize vs = canvas.viewport()->size();
+            QImage shot(vs, QImage::Format_ARGB32);
+            shot.fill(Qt::white);
+            QElapsedTimer first;
+            first.start();
+            {
+                QPainter p(&shot);
+                canvas.paintForViewport(p);
+            }
+            const qint64 firstMs = first.elapsed();
+            const QRectF pr = canvas.testPageRect(0);
+            const QSize dev = canvas.testRasterDeviceSize(0);
+            const int cols = (dev.width() + 511) / 512;
+            const int rows = (dev.height() + 511) / 512;
+            const int want = qMax(1, cols) * qMax(1, rows);
+            QElapsedTimer t;
+            t.start();
+            while (t.elapsed() < 5000 && canvas.testCachedTileCount(0) < want) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+                QThread::msleep(2);
+            }
+            const int got = canvas.testCachedTileCount(0);
+            const bool asyncOk = got >= want;
+            out(QStringLiteral("[tileclip] async first paint %1 ms, tiles %2/%3 in %4 ms -> %5")
+                    .arg(firstMs).arg(got).arg(want).arg(t.elapsed())
+                    .arg(asyncOk ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+            if (!asyncOk)
+                ++failed;
+
+            shot.fill(Qt::white);
+            {
+                QPainter p(&shot);
+                canvas.paintForViewport(p);
+            }
+            bool cellsOk = !pr.isEmpty();
+            auto checkAsyncCell = [&](int cx, int cy) {
+                const QPointF n((cx + 0.5) / 10.0, (cy + 0.85) / 10.0);
+                const QPoint pt(qRound(pr.left() + pr.width() * n.x()),
+                                qRound(pr.top() + pr.height() * n.y()));
+                if (!QRect(QPoint(0, 0), shot.size()).contains(pt)) {
+                    out(QStringLiteral("[tileclip] async sample %1,%2 outside %3x%4")
+                            .arg(cx).arg(cy).arg(shot.width()).arg(shot.height()));
+                    cellsOk = false;
+                    return;
+                }
+                const QRgb gotPx = shot.pixel(pt);
+                const QColor wantPx = QColor::fromHsv((cx * 37 + cy * 53) % 360, 150, 235);
+                const int d = qMax(qAbs(qRed(gotPx) - wantPx.red()),
+                                   qMax(qAbs(qGreen(gotPx) - wantPx.green()),
+                                        qAbs(qBlue(gotPx) - wantPx.blue())));
+                if (d > 40) {
+                    out(QStringLiteral("[tileclip] async cell %1,%2: got %3,%4,%5 want %6,%7,%8 (d %9)")
+                            .arg(cx).arg(cy)
+                            .arg(qRed(gotPx)).arg(qGreen(gotPx)).arg(qBlue(gotPx))
+                            .arg(wantPx.red()).arg(wantPx.green()).arg(wantPx.blue()).arg(d));
+                    cellsOk = false;
+                }
+            };
+            checkAsyncCell(1, 1);
+            checkAsyncCell(4, 4);
+            checkAsyncCell(8, 8);
+            if (!cellsOk)
+                ++failed;
+            out(QStringLiteral("[tileclip] async canvas %1x%2 page %3x%4 -> %5")
+                    .arg(shot.width()).arg(shot.height())
+                    .arg(qRound(pr.width())).arg(qRound(pr.height()))
+                    .arg(cellsOk ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+            shot.save(dir.filePath(QStringLiteral("canvas_async.png")));
         }
     }
 

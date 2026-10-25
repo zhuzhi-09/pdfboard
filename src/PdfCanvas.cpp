@@ -11,6 +11,7 @@
 #include "Theme.h"
 
 #include <QPdfDocument>
+#include <QPdfPageRenderer>
 #include <QApplication>
 #include <QPainter>
 #include <QPainterPath>
@@ -423,6 +424,17 @@ PdfCanvas::PdfCanvas(QWidget *parent)
         m_touchInkBlocked = false;
     });
 
+    // Page tiles are rendered on a worker thread. The UI paints the low-res
+    // preview first, so opening a page or settling a zoom no longer freezes for
+    // the whole tile set (the 50-100 ms cold paint measured in docs 2.87).
+    m_tileRenderer = new QPdfPageRenderer(this);
+    m_tileRenderer->setRenderMode(QPdfPageRenderer::RenderMode::MultiThreaded);
+    connect(m_tileRenderer, &QPdfPageRenderer::pageRendered, this,
+            [this](int page, QSize size, const QImage &image,
+                   QPdfDocumentRenderOptions, quint64 requestId) {
+                onTileRendered(page, size, image, requestId);
+            });
+
     // The classroom-whiteboard style floating toolbar lives on top of the page
     // area.
     m_toolbar = new InkToolbar(this);
@@ -436,6 +448,13 @@ PdfCanvas::PdfCanvas(QWidget *parent)
 
 PdfCanvas::~PdfCanvas()
 {
+    // Stop (and join) the tile worker before the document child is destroyed:
+    // a render still holding the page must not outlive its QPdfDocument.
+    if (m_tileRenderer) {
+        m_tileRenderer->setDocument(nullptr);
+        delete m_tileRenderer;
+        m_tileRenderer = nullptr;
+    }
 #ifdef Q_OS_WIN
     if (m_nativeFilter) {
         qApp->removeNativeEventFilter(m_nativeFilter);
@@ -470,6 +489,8 @@ void PdfCanvas::applyTheme()
 
 bool PdfCanvas::openPdf(const QString &path, QString *errorOut)
 {
+    if (m_tileRenderer)
+        m_tileRenderer->setDocument(nullptr);
     if (m_doc) {
         m_doc->close();
         delete m_doc;
@@ -484,6 +505,8 @@ bool PdfCanvas::openPdf(const QString &path, QString *errorOut)
         m_doc = nullptr;
         return false;
     }
+    if (m_tileRenderer)
+        m_tileRenderer->setDocument(m_doc);
 
     m_path = path;
     m_pageSizes.clear();
@@ -519,11 +542,14 @@ bool PdfCanvas::openPdf(const QString &path, QString *errorOut)
 
 void PdfCanvas::closePdf()
 {
+    if (m_tileRenderer)
+        m_tileRenderer->setDocument(nullptr);
     if (m_doc) {
         m_doc->close();
         delete m_doc;
         m_doc = nullptr;
     }
+    invalidateRenders();
     m_path.clear();
     m_pageSizes.clear();
     m_geom.clear();
@@ -555,6 +581,11 @@ int PdfCanvas::currentPage() const
 
 void PdfCanvas::invalidateRenders()
 {
+    // Results from requests made before this point are stale (old zoom or old
+    // document) and must be dropped even if the worker is still emitting them.
+    ++m_tileGeneration;
+    m_pendingTiles.clear();
+    m_pendingTileKeys.clear();
     m_rasters.clear();
     m_rasterLru.clear();
     m_rasterBytes = 0;
@@ -843,6 +874,117 @@ QImage PdfCanvas::previewAt(int page, PageRaster &pr)
     return pr.preview;
 }
 
+// Hands one tile to the worker. The key dedups repeated paints while the result
+// is in flight, and the generation stamp lets onTileRendered() drop anything
+// that belongs to a previous zoom or document.
+void PdfCanvas::requestTile(int page, PageRaster &pr, int tx, int ty)
+{
+    if (!m_tileRenderer || !m_doc)
+        return;
+    if (tx < 0 || tx >= pr.cols || ty < 0 || ty >= pr.rows)
+        return;
+    if (!pr.tiles.at(ty * pr.cols + tx).isNull())
+        return;
+
+    const int x0 = tx * kTilePx;
+    const int y0 = ty * kTilePx;
+    const int tw = qMin(kTilePx, pr.deviceSize.width() - x0);
+    const int th = qMin(kTilePx, pr.deviceSize.height() - y0);
+    if (tw <= 0 || th <= 0)
+        return;
+    // A burst of scroll steps must not queue an unbounded backlog; the next
+    // paint simply asks again for whatever is still missing.
+    if (m_pendingTiles.size() >= 64)
+        return;
+
+    const quint64 key = (quint64(m_tileGeneration & 0xffff) << 48)
+                        | (quint64(page & 0xffff) << 32)
+                        | (quint64(tx & 0xff) << 8) | quint64(ty & 0xff);
+    if (m_pendingTileKeys.contains(key))
+        return;
+
+    QPdfDocumentRenderOptions opt;
+    opt.setScaledSize(pr.deviceSize);
+    // Same inclusive-edge correction as tileAt(): +1 pixel on the far side.
+    opt.setScaledClipRect(QRect(x0, y0, tw + 1, th + 1));
+    const quint64 id = m_tileRenderer->requestPage(page, QSize(tw, th), opt);
+    if (!id || m_pendingTiles.contains(id))
+        return;                     // the renderer deduped to a tracked request
+    m_pendingTiles.insert(id, PendingTile{page, tx, ty, int(m_tileGeneration),
+                                          pr.deviceSize, key});
+    m_pendingTileKeys.insert(key);
+}
+
+void PdfCanvas::onTileRendered(int page, const QSize &size, const QImage &image,
+                               quint64 requestId)
+{
+    const auto it = m_pendingTiles.find(requestId);
+    if (it == m_pendingTiles.end())
+        return;                     // invalidated (old zoom/document) while in flight
+    const PendingTile req = it.value();
+    m_pendingTiles.erase(it);
+    m_pendingTileKeys.remove(req.key);
+
+    if (req.generation != int(m_tileGeneration))
+        return;
+    const auto rit = m_rasters.find(page);
+    if (rit == m_rasters.end())
+        return;
+    PageRaster &pr = rit.value();
+    if (pr.deviceSize != req.deviceSize
+        || req.tx < 0 || req.tx >= pr.cols || req.ty < 0 || req.ty >= pr.rows)
+        return;
+    const int idx = req.ty * pr.cols + req.tx;
+    if (!pr.tiles.at(idx).isNull())
+        return;                     // a synchronous render won the race
+    if (image.isNull() || size.isEmpty() || image.size() != size)
+        return;
+
+    QImage tile = image;
+    tile.setDevicePixelRatio(qMax<qreal>(1.0, viewport() ? viewport()->devicePixelRatioF() : 1.0));
+    pr.tiles[idx] = tile;
+    const qint64 bytes = tile.sizeInBytes();
+    pr.bytes += bytes;
+    m_rasterBytes += bytes;
+    InputProbe::instance().addRender();
+
+    // Repaint just this tile where it currently is. If the page scrolled away in
+    // the meantime the rect is off-screen and Qt discards the update; the tile
+    // stays cached for when it comes back.
+    const QRectF r = pageRectInViewport(page);
+    if (!r.isEmpty()) {
+        const int x0 = req.tx * kTilePx;
+        const int y0 = req.ty * kTilePx;
+        const int tw = qMin(kTilePx, pr.deviceSize.width() - x0);
+        const int th = qMin(kTilePx, pr.deviceSize.height() - y0);
+        const QRectF target(
+            r.left() + qreal(x0) / pr.deviceSize.width() * r.width(),
+            r.top()  + qreal(y0) / pr.deviceSize.height() * r.height(),
+            qreal(tw) / pr.deviceSize.width() * r.width(),
+            qreal(th) / pr.deviceSize.height() * r.height());
+        viewport()->update(target.toAlignedRect().adjusted(-1, -1, 1, 1));
+    }
+}
+
+int PdfCanvas::testCachedTileCount(int page) const
+{
+    const auto it = m_rasters.constFind(page);
+    if (it == m_rasters.constEnd())
+        return 0;
+    int n = 0;
+    for (const QImage &tile : it.value().tiles) {
+        if (!tile.isNull())
+            ++n;
+    }
+    return n;
+}
+
+QSize PdfCanvas::testRasterDeviceSize(int page) const
+{
+    const auto it = m_rasters.constFind(page);
+    return it == m_rasters.constEnd() ? QSize() : it.value().deviceSize;
+}
+
 void PdfCanvas::drawPageRaster(QPainter &p, int page, const QRectF &r)
 {
     if (!m_doc || r.isEmpty())
@@ -853,6 +995,12 @@ void PdfCanvas::drawPageRaster(QPainter &p, int page, const QRectF &r)
                     qMax(1, int(qRound(r.height() * dpr))));
     PageRaster &pr = rasterFor(page, dev);
     const bool stale = m_pinchActive || m_settleNeeded || pr.deviceSize != dev;
+    // On screen the tiles arrive from the worker; offscreen canvases (paint
+    // benchmark, UI/ink self tests) keep the deterministic synchronous path. The
+    // smoke test marks the MainWindow offscreen, so check the window too.
+    const bool offscreen = testAttribute(Qt::WA_DontShowOnScreen)
+                           || (window() && window()->testAttribute(Qt::WA_DontShowOnScreen));
+    const bool async = m_asyncTiles && (!offscreen || m_forceAsyncTiles);
 
     // Only the part of the page that is on screen and inside the paint region
     // needs tiles: a live ink sample dirties ~140x90 px and must touch one tile,
@@ -886,9 +1034,9 @@ void PdfCanvas::drawPageRaster(QPainter &p, int page, const QRectF &r)
         }
     }
 
-    // Previous-scale tiles: fill their gaps with the preview instead of rendering
-    // 30+ tiles on the UI thread in the middle of a gesture / stroke.
-    if (stale && missing) {
+    // Previous-scale tiles (pinch / pending settle) and the async cold path: fill
+    // the gaps with the preview instead of blocking the UI thread on 30+ tiles.
+    if ((stale || async) && missing) {
         const QImage pv = previewAt(page, pr);
         if (!pv.isNull())
             p.drawImage(r, pv);
@@ -906,6 +1054,10 @@ void PdfCanvas::drawPageRaster(QPainter &p, int page, const QRectF &r)
             if (img.isNull()) {
                 if (stale)
                     continue;               // the preview underneath covers it
+                if (async) {
+                    requestTile(page, pr, tx, ty);
+                    continue;               // preview underneath, tile repaints later
+                }
                 img = tileAt(page, pr, tx, ty);
                 if (img.isNull())
                     continue;

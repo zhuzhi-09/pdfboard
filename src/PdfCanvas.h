@@ -11,10 +11,12 @@
 #include <QJsonObject>
 #include <QPointF>
 #include <QRectF>
+#include <QSet>
 #include <QSizeF>
 #include <QVector>
 
 class QPdfDocument;
+class QPdfPageRenderer;
 class QPainter;
 class QTouchEvent;
 class QAbstractNativeEventFilter;
@@ -220,6 +222,12 @@ public:
     qreal testFracAtViewportY(qreal y) const;
     qreal testFracX(int page, qreal x) const;
     QSize testViewportSize() const { return viewport()->size(); }
+    // Async tiles are the on-screen default; offscreen canvases (bench, UI
+    // self tests) keep the deterministic synchronous path. The tile test forces
+    // async on and pumps the event loop to prove QPdfPageRenderer delivers.
+    void testForceAsyncTiles(bool on) { m_forceAsyncTiles = on; }
+    int  testCachedTileCount(int page) const;
+    QSize testRasterDeviceSize(int page) const;
     // 静态橡皮大小：设置/读取，供自测断言"更大的档真的擦掉更多墨"以及
     // "大小随文档走、切工具/缩放不重置"。
     qreal testEraserRadius() const { return m_eraserRadius; }
@@ -357,9 +365,23 @@ private:
         QImage preview;                 // low-res underlay for pinch / stale zoom
         qint64 bytes = 0;
     };
+    // A tile requested from QPdfPageRenderer's worker thread. The generation and
+    // device size are checked on arrival: a result from a previous zoom or
+    // document must be dropped, not blitted.
+    struct PendingTile {
+        int page = 0;
+        int tx = 0;
+        int ty = 0;
+        int generation = 0;
+        QSize deviceSize;
+        quint64 key = 0;
+    };
     PageRaster &rasterFor(int page, const QSize &deviceSize);
     QImage tileAt(int page, PageRaster &pr, int tx, int ty);
     QImage previewAt(int page, PageRaster &pr);
+    void   requestTile(int page, PageRaster &pr, int tx, int ty);
+    void   onTileRendered(int page, const QSize &size, const QImage &image,
+                          quint64 requestId);
     void   noteRender(int page, qint64 ms, const QSize &size);
     void   drawPageRaster(QPainter &p, int page, const QRectF &r);
     void   trimRasters();
@@ -465,6 +487,15 @@ private:
     QVector<int>           m_rasterLru;            // least recent first
     qint64 m_rasterBytes  = 0;
     qint64 m_rasterBudget = 160LL * 1024 * 1024;   // tiles + previews
+
+    // Tiles are filled by a worker thread so the UI only ever pays for the
+    // preview (a few ms) on a cold page/zoom, not for the whole tile set.
+    QPdfPageRenderer *m_tileRenderer = nullptr;
+    QHash<quint64, PendingTile> m_pendingTiles;    // requestId -> request
+    QSet<quint64> m_pendingTileKeys;               // dedup pending requests
+    quint64 m_tileGeneration = 0;                  // bumped by invalidateRenders()
+    bool m_asyncTiles = true;
+    bool m_forceAsyncTiles = false;                // self test only
 
     InkModel m_ink;
     Stroke   m_current;
