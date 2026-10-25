@@ -2846,6 +2846,88 @@ static int runTabStripSelfTest()
 // Pure maths, no widgets: the island metrics must shrink to 80% (font and
 // floors together), and the drag clamp must keep the bar inside the viewport
 // even when the host is smaller than the island.
+// On-screen popup self test:  pdfboard.exe --selftest-popup [outdir]
+// The settings dropdown is a rounded card inside a square popup window. If the
+// window is not translucent, its square corners show around the card. This
+// opens the 颜色模式 dropdown on a real window and compares the four corner
+// pixels of the popup's rectangle with the same screen pixels before it opened.
+static int runPopupSelfTest(const QString &outDir)
+{
+    QDir().mkpath(outDir);
+    auto pump = [](int ms) {
+        QElapsedTimer t;
+        t.start();
+        while (t.elapsed() < ms) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+            QThread::msleep(2);
+        }
+    };
+
+    int failed = 0;
+    // Both themes (in memory only, nothing is stored): the stray corner showed
+    // on the light and on the dark surfaces alike.
+    for (const Theme::Mode mode : { Theme::Mode::Light, Theme::Mode::Dark }) {
+        const QString tag = mode == Theme::Mode::Light ? QStringLiteral("light")
+                                                       : QStringLiteral("dark");
+        Theme::setMode(mode);
+        SettingsPage page;
+        page.setWindowFlag(Qt::WindowStaysOnTopHint, true);
+        const QRect avail = page.screen()->availableGeometry();
+        page.resize(qMin(1200, avail.width() - 80), qMin(800, avail.height() - 80));
+        page.move(avail.topLeft() + QPoint(40, 40));
+        page.show();
+        page.raise();
+        page.activateWindow();
+        page.testShowCategory(1);
+        pump(600);
+
+        QScreen *scr = page.screen();
+        const QPoint origin = scr->geometry().topLeft();
+        const QImage before = scr->grabWindow(0).toImage();
+        QWidget *menu = page.testOpenThemeMenu();
+        pump(500);                       // the 130 ms fade-in, then settle
+        if (!menu || !menu->isVisible()) {
+            out(QStringLiteral("[popup] %1: the dropdown did not open -> FAIL").arg(tag));
+            ++failed;
+            continue;
+        }
+        const QImage after = scr->grabWindow(0).toImage();
+        const qreal dpr = scr->devicePixelRatio();
+        const QRect g = menu->frameGeometry().translated(-origin);
+        const QRect dev(qRound(g.left() * dpr), qRound(g.top() * dpr),
+                        qRound(g.width() * dpr), qRound(g.height() * dpr));
+        menu->hide();
+        pump(100);
+
+        const QPoint probes[8] = {
+            dev.topLeft() + QPoint(1, 1), dev.topRight() + QPoint(-1, 1),
+            dev.bottomLeft() + QPoint(1, -1), dev.bottomRight() + QPoint(-1, -1),
+            // Just OUTSIDE the popup: a system drop shadow would darken these.
+            QPoint(dev.right() + 3, dev.center().y()), QPoint(dev.center().x(), dev.bottom() + 3),
+            QPoint(dev.left() - 3, dev.center().y()), QPoint(dev.right() + 3, dev.bottom() + 3) };
+        const char *names[8] = { "top-left", "top-right", "bottom-left", "bottom-right",
+                                 "outside right", "outside bottom", "outside left",
+                                 "outside bottom-right" };
+        for (int i = 0; i < 8; ++i) {
+            const QRgb a = before.pixel(probes[i]);
+            const QRgb b = after.pixel(probes[i]);
+            const int d = qMax(qAbs(qRed(a) - qRed(b)),
+                               qMax(qAbs(qGreen(a) - qGreen(b)), qAbs(qBlue(a) - qBlue(b))));
+            const bool ok = d <= 6;     // a shadow or a square corner moves it by 15+
+            out(QStringLiteral("[popup] %1 %2: before %3 after %4 (d %5) -> %6")
+                    .arg(tag, QString::fromLatin1(names[i]))
+                    .arg(QColor(a).name(), QColor(b).name()).arg(d)
+                    .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+            if (!ok)
+                ++failed;
+        }
+        after.copy(dev.adjusted(-20, -20, 20, 20))
+            .save(QDir(outDir).filePath(QStringLiteral("popup-%1.png").arg(tag)));
+    }
+    out(QStringLiteral("[popup] %1").arg(failed == 0 ? QStringLiteral("OK") : QStringLiteral("FAILED")));
+    return failed == 0 ? 0 : 3;
+}
+
 // Online update check:  pdfboard.exe --selftest-update [currentVersion]
 // Runs the real 检查更新 request against github.com once (a direct connection,
 // like the button) and prints what the settings page would show. Not part of
@@ -2960,6 +3042,34 @@ static int runUiSelfTest()
         page.resize(700, 900);
         QCoreApplication::processEvents();
         check("settings: narrow rail folded", page.testRailCompact() ? 1 : 0, 1);
+
+        // Category switch: an MD3 fade through, governed by 减少动效.
+        page.resize(1400, 900);
+        QCoreApplication::processEvents();
+        const bool savedReduced = Theme::Motion::reduced();
+        Theme::Motion::setReduced(true);
+        page.testShowCategory(2);
+        check("settings: reduced motion switches instantly",
+              page.testTransitionRunning() ? 1 : 0, 0);
+        Theme::Motion::setReduced(false);
+        page.testShowCategory(3);
+        check("settings: switch animates", page.testTransitionRunning() ? 1 : 0, 1);
+        {
+            QElapsedTimer t;
+            t.start();
+            while (page.testTransitionRunning() && t.elapsed() < 2000)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        }
+        check("settings: transition lands", page.testTransitionRunning() ? 1 : 0, 0);
+        if (QDir(QStringLiteral("D:/dev/tmp")).exists()) {
+            page.testShowCategory(1);
+            for (const qreal t : { 0.15, 0.55 }) {
+                page.testSetTransitionProgress(t);
+                page.grab().save(QStringLiteral("D:/dev/tmp/settings-transition-%1.png")
+                                     .arg(int(t * 100)));
+            }
+        }
+        Theme::Motion::setReduced(savedReduced);
     }
 
     failed += runTabStripSelfTest();
@@ -5260,6 +5370,7 @@ int main(int argc, char **argv)
     const int tileIdx = args.indexOf(QStringLiteral("--selftest-tileclip"));
     const int scrollIdx = args.indexOf(QStringLiteral("--selftest-scroll"));
     const int updateIdx = args.indexOf(QStringLiteral("--selftest-update"));
+    const int popupIdx = args.indexOf(QStringLiteral("--selftest-popup"));
     const int logIdx = args.indexOf(QStringLiteral("--selftest-log"));
     const int uiIdx = args.indexOf(QStringLiteral("--selftest-ui"));
     const int themeIdx = args.indexOf(QStringLiteral("--selftest-theme"));
@@ -5280,6 +5391,7 @@ int main(int argc, char **argv)
         || tileIdx >= 0
         || scrollIdx >= 0
         || updateIdx >= 0
+        || popupIdx >= 0
         || logIdx >= 0
         || uiIdx >= 0
         || themeIdx >= 0
@@ -5305,6 +5417,10 @@ int main(int argc, char **argv)
     if (tileIdx >= 0)
         return runTileClipSelfTest(tileIdx + 1 < args.size() ? args.at(tileIdx + 1)
                                                              : QDir::tempPath());
+
+    if (popupIdx >= 0)
+        return runPopupSelfTest(popupIdx + 1 < args.size() ? args.at(popupIdx + 1)
+                                                           : QDir::tempPath());
 
     if (updateIdx >= 0)
         return runUpdateSelfTest(updateIdx + 1 < args.size() ? args.at(updateIdx + 1)

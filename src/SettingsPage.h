@@ -11,6 +11,7 @@ class QLabel;
 class QPushButton;
 class QScrollArea;
 class QStackedWidget;
+class QVariantAnimation;
 
 namespace UpdateCheck {
 class Checker;
@@ -59,6 +60,10 @@ public:
     void         testShowCategory(int index) { showCategory(index); }
     QScrollArea *testCurrentScroll() const;
     bool         testRailCompact() const { return m_railCompact; }
+    // Clicks the 颜色模式 dropdown like a user would; returns its popup menu.
+    QWidget     *testOpenThemeMenu();
+    bool         testTransitionRunning() const;
+    void         testSetTransitionProgress(qreal t);   // freeze a frame for screenshots
 
 signals:
     void themeChanged();     // an appearance mode was picked and stored
@@ -130,6 +135,9 @@ private:
     QWidget         *m_identity  = nullptr;   // app identity block on the rail
     QWidget         *m_identityText = nullptr;
     QStackedWidget  *m_stack     = nullptr;   // one scrolling page per category
+    QWidget         *m_content   = nullptr;   // breadcrumb + stack (what a switch animates)
+    QWidget         *m_transition = nullptr;  // MD3 fade-through overlay over m_content
+    QVariantAnimation *m_transitionAnim = nullptr;
     QWidget         *m_header    = nullptr;   // breadcrumb row, centred like the columns
     QLabel          *m_crumbLeaf = nullptr;   // 「设置 › <category>」
     QVector<Category> m_categories;

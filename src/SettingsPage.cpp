@@ -19,11 +19,13 @@
 #include <QEvent>
 #include <QFileDialog>
 #include <QFileInfo>
+#include <QFocusEvent>
 #include <QFrame>
 #include <QHBoxLayout>
 #include <QHideEvent>
 #include <QImage>
 #include <QMenu>
+#include <QInputDevice>
 #include <QLabel>
 #include <QPropertyAnimation>
 #include <QMessageBox>
@@ -38,6 +40,7 @@
 #include <QShowEvent>
 #include <QSignalBlocker>
 #include <QStyle>
+#include <QStyleFactory>
 #include <QToolButton>
 #include <QUrl>
 #include <QVariantAnimation>
@@ -202,10 +205,16 @@ protected:
                              track.center().y());
 
         // Hover / focus / press state layer: a 40 dp disc behind the handle.
-        if (enabled && (underMouse() || hasFocus() || isDown())) {
+        // MD3 shows focus only for KEYBOARD focus: a click also focuses the
+        // switch, and the disc used to stay on after the pointer had left. Hover
+        // is for a real pointer only: after a tap Windows parks the synthesized
+        // cursor on the switch, which would keep the disc on as well.
+        const bool hovered = underMouse() && !m_touchPress;
+        const bool keyFocus = hasFocus() && m_keyboardFocus;
+        if (enabled && (hovered || keyFocus || isDown())) {
             const qreal opacity = isDown() ? Theme::State::Pressed
-                                : hasFocus() ? Theme::State::Focus
-                                             : Theme::State::Hover;
+                                : keyFocus ? Theme::State::Focus
+                                           : Theme::State::Hover;
             const QColor layer = t > 0.5 ? pal.primary : pal.onSurface;
             p.setPen(Qt::NoPen);
             p.setBrush(Theme::withAlpha(layer, opacity));
@@ -237,6 +246,30 @@ protected:
     void leaveEvent(QEvent *e) override
     {
         QAbstractButton::leaveEvent(e);
+        m_touchPress = false;
+        update();
+    }
+
+    void mousePressEvent(QMouseEvent *e) override
+    {
+        m_touchPress = e->source() != Qt::MouseEventNotSynthesized
+                       || (e->device() && e->device()->type() != QInputDevice::DeviceType::Mouse);
+        QAbstractButton::mousePressEvent(e);
+    }
+
+    void focusInEvent(QFocusEvent *e) override
+    {
+        QAbstractButton::focusInEvent(e);
+        m_keyboardFocus = e->reason() == Qt::TabFocusReason
+                          || e->reason() == Qt::BacktabFocusReason
+                          || e->reason() == Qt::ShortcutFocusReason;
+        update();
+    }
+
+    void focusOutEvent(QFocusEvent *e) override
+    {
+        QAbstractButton::focusOutEvent(e);
+        m_keyboardFocus = false;
         update();
     }
 
@@ -249,6 +282,8 @@ private:
 
     QVariantAnimation *m_anim = nullptr;
     qreal m_pos = 0.0;
+    bool  m_keyboardFocus = false;   // focus came from Tab, not from a click
+    bool  m_touchPress = false;      // last press was a tap (synthesized mouse)
 };
 
 // 「主题色」的一枚种子色板：一个实心圆，颜色取该种子在默认风格下的 primary
@@ -690,6 +725,70 @@ private:
 
 QPainterPath segmentPath(const QRectF &r, const QString &seg);
 
+// MD3 "fade through" between two settings categories (sibling destinations
+// without a spatial relationship): the outgoing frame fades out over the first
+// 30 % with an accelerating curve, then the incoming one fades in while it
+// scales 92 % -> 100 % with the emphasized-decelerate curve. Both frames are
+// snapshots of the content area, so the animation costs two grabs and a few
+// blits; the real page underneath is already the new one and gets the clicks.
+class FadeThrough : public QWidget
+{
+public:
+    explicit FadeThrough(QWidget *parent = nullptr)
+        : QWidget(parent)
+    {
+        setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        hide();
+    }
+
+    // `background` is the page's own fill, so the fade never shows a seam.
+    void setFrames(const QPixmap &from, const QPixmap &to, const QColor &background)
+    {
+        m_from = from;
+        m_to = to;
+        m_background = background;
+    }
+
+    void setProgress(qreal t)
+    {
+        m_t = qBound<qreal>(0.0, t, 1.0);
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent *) override
+    {
+        QPainter p(this);
+        // The snapshots of the transparent content area carry no background.
+        p.fillRect(rect(), m_background);
+        p.setRenderHint(QPainter::SmoothPixmapTransform, true);
+
+        constexpr qreal kOut = 0.3;
+        if (m_t < kOut) {
+            static const QEasingCurve out =
+                Theme::Motion::curve(Theme::Motion::Easing::StandardAccelerate);
+            p.setOpacity(1.0 - out.valueForProgress(m_t / kOut));
+            p.drawPixmap(0, 0, m_from);
+            return;
+        }
+        static const QEasingCurve in =
+            Theme::Motion::curve(Theme::Motion::Easing::EmphasizedDecelerate);
+        const qreal e = in.valueForProgress((m_t - kOut) / (1.0 - kOut));
+        const qreal scale = 0.92 + 0.08 * e;
+        p.setOpacity(e);
+        p.translate(width() / 2.0, height() / 2.0);
+        p.scale(scale, scale);
+        p.translate(-width() / 2.0, -height() / 2.0);
+        p.drawPixmap(0, 0, m_to);
+    }
+
+private:
+    QPixmap m_from;
+    QPixmap m_to;
+    QColor  m_background;
+    qreal   m_t = 0.0;
+};
+
 // A card the whole of which is a button (the 许可证 expander header): pointer
 // cursor, a hover state layer laid over the card, and a callback on click.
 class ClickCard : public QFrame
@@ -1007,7 +1106,16 @@ public:
     explicit SelectMenu(QWidget *parent = nullptr)
         : QMenu(parent)
     {
-        setWindowFlags(windowFlags() | Qt::NoDropShadowWindowHint);
+        setWindowFlags(windowFlags() | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+        // 圆角卡片画在一个方形的弹出窗口里：窗口本身不透明时，圆角外的四个角会
+        // 露出方形底色。透明窗口背景让角外真正透出下面的页面。
+        setAttribute(Qt::WA_TranslucentBackground, true);
+        // Qt 的 Windows 11 风格（qmodernwindowsstyle）画菜单面板时会在窗口右下角
+        // 自带一块阴影，样式表的圆角盖不住它，圆角外就露出一个深色直角。菜单的
+        // 外观全部来自 selectMenuSheet()，所以换成不画阴影的 Fusion 作为底层样式。
+        static QStyle *const plainStyle = QStyleFactory::create(QStringLiteral("Fusion"));
+        if (plainStyle)
+            setStyle(plainStyle);
         setToolTipsVisible(true);   // 「调色板风格」每项的说明挂在 action tooltip 上
     }
 
@@ -1373,6 +1481,19 @@ void SettingsPage::buildUi()
     m_stack = new QStackedWidget(content);
     contentCol->addWidget(m_stack, 1);
     split->addWidget(content, 1);
+    m_content = content;
+
+    // Category switches: MD3 fade through (see FadeThrough). The duration comes
+    // from Theme::Motion, which is 0 while 减少动效 is on - then the switch is
+    // instant, and the toggle takes effect on the very next switch.
+    m_transition = new FadeThrough(content);
+    m_transitionAnim = new QVariantAnimation(this);
+    m_transitionAnim->setStartValue(0.0);
+    m_transitionAnim->setEndValue(1.0);   // linear: FadeThrough applies the curves
+    connect(m_transitionAnim, &QVariantAnimation::valueChanged, this, [this](const QVariant &v) {
+        static_cast<FadeThrough *>(m_transition)->setProgress(v.toReal());
+    });
+    connect(m_transitionAnim, &QAbstractAnimation::finished, m_transition, &QWidget::hide);
 
     // === 通用 =================================================================
     {
@@ -1741,18 +1862,67 @@ void SettingsPage::showCategory(int index)
 {
     if (index < 0 || index >= m_categories.size())
         return;
+    // A switch during a running transition first lands the old one.
+    if (m_transitionAnim->state() == QAbstractAnimation::Running)
+        m_transitionAnim->stop();
+    m_transition->hide();
+
+    const int ms = Theme::Motion::duration(Theme::Motion::Medium2);   // 0 under 减少动效
+    const bool animate = ms > 0 && index != m_current && m_content->isVisible()
+                         && !m_content->size().isEmpty();
+    // Grab through the page itself: it paints the page background, while the
+    // content area alone would come out on the default palette's light grey.
+    const QRect area(m_content->mapTo(this, QPoint(0, 0)), m_content->size());
+    const QPixmap from = animate ? grab(area) : QPixmap();
+
     m_current = index;
     const Category &c = m_categories.at(index);
     m_stack->setCurrentWidget(c.scroll);
     c.navItem->setChecked(true);
     m_crumbLeaf->setText(c.name);
     layoutForWidth();
+    if (!animate)
+        return;
+
+    if (QLayout *l = m_content->layout())
+        l->activate();
+    auto *overlay = static_cast<FadeThrough *>(m_transition);
+    overlay->setFrames(from, grab(area), palette().color(QPalette::Window));
+    overlay->setGeometry(m_content->rect());
+    overlay->setProgress(0.0);
+    overlay->raise();
+    overlay->show();
+    m_transitionAnim->setDuration(ms);
+    m_transitionAnim->start();
+}
+
+bool SettingsPage::testTransitionRunning() const
+{
+    return m_transition && m_transition->isVisible();
+}
+
+void SettingsPage::testSetTransitionProgress(qreal t)
+{
+    if (m_transitionAnim->state() == QAbstractAnimation::Running)
+        m_transitionAnim->pause();
+    static_cast<FadeThrough *>(m_transition)->setProgress(t);
 }
 
 QString SettingsPage::testCategoryName(int index) const
 {
     return (index >= 0 && index < m_categories.size()) ? m_categories.at(index).name
                                                       : QString();
+}
+
+QWidget *SettingsPage::testOpenThemeMenu()
+{
+    if (!m_themeSelect)
+        return nullptr;
+    const QPoint at = m_themeSelect->rect().center();
+    QMouseEvent press(QEvent::MouseButtonPress, at, m_themeSelect->mapToGlobal(at),
+                      Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QCoreApplication::sendEvent(m_themeSelect, &press);
+    return m_themeSelect->findChild<QMenu *>();
 }
 
 QScrollArea *SettingsPage::testCurrentScroll() const
@@ -1770,6 +1940,11 @@ bool SettingsPage::eventFilter(QObject *, QEvent *event)
 void SettingsPage::resizeEvent(QResizeEvent *event)
 {
     QWidget::resizeEvent(event);
+    // The transition's frames were grabbed at the old size: land it at once.
+    if (m_transitionAnim && m_transitionAnim->state() != QAbstractAnimation::Stopped) {
+        m_transitionAnim->stop();
+        m_transition->hide();
+    }
     layoutForWidth();
 }
 
