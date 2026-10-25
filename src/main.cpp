@@ -25,6 +25,7 @@
 #include <QApplication>
 #include <QByteArray>
 #include <QColor>
+#include <QCursor>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -1427,7 +1428,9 @@ static int runScrollSelfTest(const QString &outDir)
     pump(800);
 
     int failed = 0;
-    auto compare = [&](const QString &tag) {
+    // focus (logical px): a small screen-space artefact such as a ghost eraser ring
+    // vanishes in the whole-viewport average, so it is also judged on its own.
+    auto compare = [&](const QString &tag, const QRect &focus = QRect()) {
         pump(600);      // let async tiles and the settle timer land
         QWidget *vp = canvas.viewport();
         const qreal dpr = qMax<qreal>(1.0, vp->devicePixelRatioF());
@@ -1450,7 +1453,10 @@ static int runScrollSelfTest(const QString &outDir)
             mask = QRect(qFloor(r.left() * dpr), qFloor(r.top() * dpr),
                          qCeil(r.width() * dpr), qCeil(r.height() * dpr));
         }
-        qint64 sum = 0, bad = 0, n = 0;
+        const QRect focusDev = focus.isNull() ? QRect()
+            : QRect(qFloor(focus.left() * dpr), qFloor(focus.top() * dpr),
+                    qCeil(focus.width() * dpr), qCeil(focus.height() * dpr));
+        qint64 sum = 0, bad = 0, n = 0, focusBad = 0, focusN = 0;
         int badRows = 0;
         for (int y = 0; y < onScreen.height() && y < ref.height(); ++y) {
             const QRgb *a = reinterpret_cast<const QRgb *>(onScreen.constScanLine(y));
@@ -1480,6 +1486,11 @@ static int runScrollSelfTest(const QString &outDir)
                 sum += d;
                 ++n;
                 ++rowN;
+                if (focusDev.contains(x, y)) {
+                    ++focusN;
+                    if (d > 24)
+                        ++focusBad;
+                }
                 if (d > 24) {
                     ++bad;
                     ++rowBad;
@@ -1490,10 +1501,13 @@ static int runScrollSelfTest(const QString &outDir)
         }
         const double mean = n ? double(sum) / n : 999.0;
         const double badPct = n ? 100.0 * bad / n : 100.0;
-        const bool ok = onScreen.size() == ref.size() && mean < 2.0 && badPct < 1.0;
-        out(QStringLiteral("[scroll] %1 @%2 (dpr %3): mean %4, >24 %5%, bad rows %6 -> %7")
+        const double focusPct = focusN ? 100.0 * focusBad / focusN : 0.0;
+        const bool ok = onScreen.size() == ref.size() && mean < 2.0 && badPct < 1.0
+                        && focusPct < 1.0;
+        out(QStringLiteral("[scroll] %1 @%2 (dpr %3): mean %4, >24 %5%, bad rows %6, focus %7% -> %8")
                 .arg(tag).arg(canvas.verticalScrollBar()->value()).arg(dpr, 0, 'f', 2)
                 .arg(mean, 0, 'f', 2).arg(badPct, 0, 'f', 2).arg(badRows)
+                .arg(focusPct, 0, 'f', 2)
                 .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
         onScreen.save(dir.filePath(tag + QStringLiteral("_screen.png")));
         ref.save(dir.filePath(tag + QStringLiteral("_ref.png")));
@@ -1535,6 +1549,47 @@ static int runScrollSelfTest(const QString &outDir)
         pump(16);
     }
     compare(QStringLiteral("idle"));
+
+    // The eraser ring is screen-space: the blit carries its pixels along, and a
+    // ring left behind at (dx, dy) used to stay until the pointer moved again.
+    canvas.setTool(PdfCanvas::InkTool::Eraser);
+    const QPointF ringAt(canvas.viewport()->width() * 0.3, canvas.viewport()->height() * 0.4);
+    // The canvas polls the real cursor (trackPointer) and drops the hover when it
+    // is elsewhere, so park the real cursor on the ring for this leg.
+    const QPoint cursorWas = QCursor::pos();
+    QCursor::setPos(canvas.viewport()->mapToGlobal(ringAt.toPoint()));
+    canvas.testSetEraserHover(ringAt);
+    pump(50);
+    for (int i = 0; i < 20; ++i) {
+        vs->setValue(vs->value() + (i < 10 ? 37 : -23));
+        pump(16);
+    }
+    // The ghosts trail along the ring's column (every step shifts the earlier ones).
+    const int ringCol = 60;
+    compare(QStringLiteral("eraser"),
+            QRect(int(ringAt.x()) - ringCol, 0, 2 * ringCol, canvas.viewport()->height()));
+    canvas.testClearEraserHover();
+    canvas.setTool(PdfCanvas::InkTool::Pen);
+    QCursor::setPos(cursorWas);
+
+    // A dragged island stays where the user put it - including its y. Every scroll
+    // calls reposition(), which used to drop it back to the bottom dock.
+    if (InkToolbar *tb = canvas.toolbar()) {
+        tb->moveBy(QPoint(-80, 30 - tb->y()));
+        pump(50);
+        const QPoint placed = tb->pos();
+        for (int i = 0; i < 20; ++i) {
+            vs->setValue(vs->value() + 31);
+            pump(16);
+        }
+        const bool kept = tb->pos() == placed;
+        out(QStringLiteral("[scroll] dragged island %1,%2 -> %3,%4 -> %5")
+                .arg(placed.x()).arg(placed.y()).arg(tb->x()).arg(tb->y())
+                .arg(kept ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+        if (!kept)
+            ++failed;
+        compare(QStringLiteral("island"));
+    }
 
     out(QStringLiteral("[scroll] %1").arg(failed == 0 ? QStringLiteral("OK")
                                                         : QStringLiteral("FAILED")));
@@ -2311,6 +2366,12 @@ static int runInkSelfTest(const QString &path)
         out(QStringLiteral("[selftest] collapse: dragged island x %1 -> %2 (y %3 -> %4)")
                 .arg(draggedAt.x()).arg(bar->pos().x()).arg(draggedAt.y()).arg(bar->pos().y()));
         check("collapse: a dragged island is not re-homed", bar->pos().x(), draggedAt.x());
+        // ...and neither is its y: dragged up, it must not drop back to the dock
+        // on the next reposition() (every scroll calls it).
+        bar->moveBy(QPoint(0, -100));
+        const int raisedY = bar->pos().y();
+        bar->reposition();
+        check("collapse: a dragged island keeps its y", bar->pos().y(), raisedY);
     }
 
     // Default anchor on a FRESH canvas (never dragged): the island sits at the

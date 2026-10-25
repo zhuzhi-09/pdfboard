@@ -1814,10 +1814,14 @@ void PdfCanvas::scrollContentsBy(int dx, int dy)
     // (not to the document), so it must not travel with the blit.
     const int strip = int(qCeil(qMax<qreal>(12.0, m_ui.icon * 1.4)));
     QRegion repaint(QRect(0, 0, viewport()->width(), strip));
-    // The eraser ring is screen-space (it follows the pointer, not the page), so
-    // put it back where it was instead of letting the blit carry it away.
-    if (m_eraserHover)
-        repaint += eraserIndicatorBounds(m_eraserHoverPos, activeEraseRadius());
+    // The eraser ring is screen-space (it follows the pointer, not the page): the
+    // blit carried its pixels by (dx, dy), so wipe that copy and redraw the ring
+    // where it belongs.
+    if (m_eraserHover) {
+        const QRect ring = eraserIndicatorBounds(m_eraserHoverPos, activeEraseRadius());
+        repaint += ring;
+        repaint += ring.translated(dx, dy);
+    }
     viewport()->update(repaint);
 }
 

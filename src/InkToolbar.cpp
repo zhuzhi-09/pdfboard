@@ -1769,6 +1769,13 @@ QPoint InkToolbar::clampToolbarPos(const QPoint &pos, const QSize &host, const Q
     return QPoint(qBound(0, pos.x(), maxX), qBound(0, pos.y(), maxY));
 }
 
+int InkToolbar::dockY(const QWidget *host) const
+{
+    if (m_dragged)
+        return qBound(0, m_userPos.y(), qMax(0, host->height() - height()));
+    return qMax(0, host->height() - m_metrics.barBottom - height() + m_metrics.shadowRoom);
+}
+
 void InkToolbar::moveBy(const QPoint &delta)
 {
     QWidget *host = parentWidget();
@@ -2010,7 +2017,7 @@ void InkToolbar::applyDrawerWidth(int wide)
     const int w = qMax(1, wide);
     // x 完全由锚导出：宽度动多少，x 就反向动多少 —— 铆钉的右缘逐帧不动。
     const int x = qBound(0, m_pinRight - w, qMax(0, host->width() - w));
-    const int y = host->height() - m_metrics.barBottom - height() + m_metrics.shadowRoom;
+    const int y = dockY(host);
     if (width() != w)
         resize(w, height());     // resizeEvent -> reposition（动画期间只跟锚点与 y）
     if (m_chip && m_drawerChipWidth > 0) {
@@ -2066,7 +2073,7 @@ void InkToolbar::reposition()
             m_pinRight = (host->width() - base) / 2 + base;
         }
         const int x = qBound(0, m_pinRight - width(), qMax(0, host->width() - width()));
-        const int y = host->height() - m_metrics.barBottom - height() + m_metrics.shadowRoom;
+        const int y = dockY(host);
         move(x, qMax(0, y));
     } else {
         refreshLayoutChain();
@@ -2093,7 +2100,7 @@ void InkToolbar::reposition()
 
         int x = m_pinRight - width();
         x = qBound(0, x, qMax(0, host->width() - width()));
-        const int y = host->height() - m_metrics.barBottom - height() + m_metrics.shadowRoom;
+        const int y = dockY(host);
         move(x, qMax(0, y));
     }
     raise();
