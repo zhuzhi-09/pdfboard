@@ -19,6 +19,12 @@ class QTimer;
 class QVariantAnimation;
 class PageTransitionLayer;   // the frozen-frame overlay (defined in MainWindow.cpp)
 
+// Applies the application-wide Qt style and palette for the current theme: dark
+// mode uses Fusion (the native windowsvista style cannot draw dark buttons),
+// light mode restores the platform style. Called at startup and on every theme
+// change; also used by the --selftest-dialog regression test.
+void applyAppThemeToApplication();
+
 class MainWindow : public QMainWindow
 {
     Q_OBJECT
