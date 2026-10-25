@@ -7,6 +7,9 @@
 #include "HomePage.h"
 #include "ImageImport.h"
 #include "InkDirty.h"
+#include "InkErase.h"
+#include "InkSmooth.h"
+#include "InkStroke.h"
 #include "InkToolbar.h"
 #include "InputProbe.h"
 #include "MemProbe.h"
@@ -15,12 +18,15 @@
 #include "PdfExport.h"
 #include "SettingsPage.h"
 #include "Theme.h"
+#include "TouchProbe.h"
+#include "UpdateCheck.h"
 #include "WordConvert.h"
 #include "ZoomBar.h"
 
 #include <QApplication>
 #include <QByteArray>
 #include <QColor>
+#include <QCursor>
 #include <QDateTime>
 #include <QDir>
 #include <QFile>
@@ -37,6 +43,7 @@
 #include <QStyle>
 #include <QThread>
 #include <QHash>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QLineF>
@@ -49,9 +56,15 @@
 #include <QRect>
 #include <QScreen>
 #include <QElapsedTimer>
+#include <QEventLoop>
 #include <QImage>
+#include <QtMath>
 #include <QPdfDocument>
+#include <QPdfDocumentRenderOptions>
+#include <QPdfWriter>
+#include <QPageSize>
 #include <QPointF>
+#include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
 #include <QSharedPointer>
@@ -807,6 +820,786 @@ static int runBench(const QString &path)
     return 0;
 }
 
+// Headless paint-cost benchmark:  pdfboard.exe --bench-paint <file.pdf>
+//
+// The two paints that decide handwriting latency are (a) one live sample - a small
+// dirty rect on a page that already carries a lesson's worth of ink - and (b) a full
+// viewport repaint. Run this before and after touching the paint path: at 4K the
+// page-sized clip path used to cost ~5 ms per live sample on its own.
+static int runPaintBench(const QString &path)
+{
+    out(QStringLiteral("[bench] paint: %1").arg(path));
+
+    auto measure = [&](const QSize &size, int strokes, const QRect &clip, int reps) {
+        PdfCanvas probe;
+        probe.setAttribute(Qt::WA_DontShowOnScreen, true);
+        probe.resize(size);
+        probe.show();
+        QString err;
+        if (!probe.openPdf(path, &err)) {
+            out(QStringLiteral("[bench] open FAILED: %1").arg(err));
+            return -1.0;
+        }
+        for (int i = 0; i < strokes; ++i) {
+            const qreal y = 0.20 + 0.60 * qreal(i % 30) / 30.0;
+            const qreal x0 = 0.10 + 0.02 * qreal(i % 20);
+            probe.testAddStroke(0, QPointF(x0, y), QPointF(x0 + 0.10, y),
+                                QColor(0xD3, 0x2F, 0x2F), 4.0, 40);
+        }
+        QImage frame(size, QImage::Format_ARGB32_Premultiplied);
+        frame.fill(Qt::white);
+        {
+            QPainter warm(&frame);      // the first paint renders and caches the page
+            if (!clip.isNull())
+                warm.setClipRect(clip);
+            probe.paintForViewport(warm);
+        }
+        QElapsedTimer t;
+        t.start();
+        for (int i = 0; i < reps; ++i) {
+            QPainter p(&frame);
+            if (!clip.isNull())
+                p.setClipRect(clip);
+            probe.paintForViewport(p);
+        }
+        return qreal(t.elapsed()) / reps;
+    };
+
+    const qreal live4k = measure(QSize(3840, 2160), 300, QRect(1600, 1000, 140, 90), 40);
+    const qreal full4k = measure(QSize(3840, 2160), 300, QRect(), 8);
+    const qreal live1440 = measure(QSize(2560, 1440), 300, QRect(1100, 700, 90, 60), 40);
+    // What a scroll step costs after the backing-store blit: only the newly exposed
+    // strip is repainted.
+    const qreal strip4k = measure(QSize(3840, 2160), 300, QRect(0, 2080, 3840, 80), 30);
+    const qreal stripClass = measure(QSize(1388, 712), 300, QRect(0, 632, 1388, 80), 30);
+    // The classroom panel is 1388x712 logical at DPR 2.5, i.e. 3470x1780 device
+    // pixels, and a scroll step exposes a ~200-device-px strip. Measured at DPR 1
+    // here, which is the same pixel count the classroom repaints.
+    const qreal strip25 = measure(QSize(3470, 1780), 300, QRect(0, 1580, 3470, 200), 20);
+    const qreal full25 = measure(QSize(3470, 1780), 300, QRect(), 6);
+
+    // Cold paint: the first frame after opening a page or after the zoom settle.
+    // It renders every visible tile, which is the one-off hitch tiling has to keep
+    // bounded (the old whole-page bitmap took 60-185 ms on the classroom panel).
+    auto cold = [&](const QSize &size) {
+        PdfCanvas probe;
+        probe.setAttribute(Qt::WA_DontShowOnScreen, true);
+        probe.resize(size);
+        probe.show();
+        QString err;
+        if (!probe.openPdf(path, &err))
+            return -1.0;
+        QImage frame(size, QImage::Format_ARGB32_Premultiplied);
+        frame.fill(Qt::white);
+        QElapsedTimer t;
+        t.start();
+        {
+            QPainter p(&frame);
+            probe.paintForViewport(p);
+        }
+        return qreal(t.elapsed());
+    };
+    const qreal cold4k = cold(QSize(3840, 2160));
+    const qreal cold25 = cold(QSize(3470, 1780));
+
+    out(QStringLiteral("[bench] live sample   4K: %1 ms").arg(live4k, 0, 'f', 2));
+    out(QStringLiteral("[bench] full repaint  4K: %1 ms").arg(full4k, 0, 'f', 2));
+    out(QStringLiteral("[bench] live sample 1440p: %1 ms").arg(live1440, 0, 'f', 2));
+    out(QStringLiteral("[bench] scroll strip  4K: %1 ms").arg(strip4k, 0, 'f', 2));
+    out(QStringLiteral("[bench] scroll strip1388: %1 ms").arg(stripClass, 0, 'f', 2));
+    out(QStringLiteral("[bench] scroll strip 3470: %1 ms").arg(strip25, 0, 'f', 2));
+    out(QStringLiteral("[bench] full repaint 3470: %1 ms").arg(full25, 0, 'f', 2));
+    out(QStringLiteral("[bench] cold full    4K: %1 ms").arg(cold4k, 0, 'f', 2));
+    out(QStringLiteral("[bench] cold full  3470: %1 ms").arg(cold25, 0, 'f', 2));
+    return 0;
+}
+
+// Headless tile-render self test:  pdfboard.exe --selftest-tileclip [outdir]
+//
+// The tiled renderer depends on QPdfDocumentRenderOptions::setScaledClipRect()
+// meaning "a rectangle in the SCALED page image", with the returned image being
+// exactly that rectangle. That is undocumented, so this test pins it down: it
+// generates a PDF with a labelled grid, renders the page once at 2x, then renders
+// tiles (including an edge tile and a full composite) and compares pixels.
+static int runTileClipSelfTest(const QString &outDir)
+{
+    QDir dir(outDir);
+    if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
+        out(QStringLiteral("[tileclip] cannot create %1").arg(outDir));
+        return 2;
+    }
+    const QString pdf = dir.filePath(QStringLiteral("tileclip.pdf"));
+
+    {
+        QPdfWriter w(pdf);
+        w.setPageSize(QPageSize(QPageSize::A4));
+        w.setResolution(72);
+        w.setTitle(QStringLiteral("tileclip"));
+        QPainter p(&w);
+        const QRectF page(0, 0, w.width(), w.height());
+        p.fillRect(page, Qt::white);
+        for (int y = 0; y < 10; ++y) {
+            for (int x = 0; x < 10; ++x) {
+                const QRectF cell(page.left() + x * page.width() / 10.0,
+                                  page.top() + y * page.height() / 10.0,
+                                  page.width() / 10.0, page.height() / 10.0);
+                p.fillRect(cell, QColor::fromHsv((x * 37 + y * 53) % 360, 150, 235));
+                p.setPen(QPen(Qt::black, 0.8));
+                p.drawRect(cell);
+                p.setPen(Qt::black);
+                p.setFont(QFont(QStringLiteral("Arial"), 9));
+                p.drawText(cell.adjusted(3, 3, -3, -3), Qt::AlignLeft | Qt::AlignTop,
+                           QStringLiteral("%1,%2").arg(x).arg(y));
+            }
+        }
+        // A red line disappears over the red/pink cells (and made the tiling look
+        // broken in screenshots); a white halo + black core stays visible on every
+        // cell colour, so a page seam would be obvious.
+        p.setPen(QPen(Qt::white, 7));
+        p.drawLine(page.topLeft(), page.bottomRight());
+        p.drawLine(page.topRight(), page.bottomLeft());
+        p.setPen(QPen(Qt::black, 3));
+        p.drawLine(page.topLeft(), page.bottomRight());
+        p.drawLine(page.topRight(), page.bottomLeft());
+        p.end();
+    }
+
+    QPdfDocument doc;
+    if (doc.load(pdf) != QPdfDocument::Error::None || doc.pageCount() < 1) {
+        out(QStringLiteral("[tileclip] load FAILED: %1").arg(pdf));
+        return 2;
+    }
+    const QSizeF pt = doc.pagePointSize(0);
+    const QSize full(qRound(pt.width() * 2.0), qRound(pt.height() * 2.0));
+    const QImage all = doc.render(0, full);
+    out(QStringLiteral("[tileclip] page %1x%2 -> %3x%4")
+            .arg(pt.width()).arg(pt.height()).arg(full.width()).arg(full.height()));
+
+    auto renderTile = [&](const QRect &clip) {
+        QPdfDocumentRenderOptions opt;
+        opt.setScaledSize(full);
+        // Qt builds the matrix from clip.right()/bottom(), which are inclusive, so a
+        // clip of exactly W pixels renders at (W-1)/W of the requested scale. One
+        // extra pixel on the far edge makes the matrix exactly 1:1; the extra row /
+        // column falls outside the output image.
+        opt.setScaledClipRect(QRect(clip.x(), clip.y(), clip.width() + 1, clip.height() + 1));
+        return doc.render(0, clip.size(), opt);
+    };
+
+    auto stats = [](const QImage &a, const QImage &b, double *mean, int *mx, double *badPct) {
+        qint64 sum = 0;
+        qint64 bad = 0;
+        int worst = 0;
+        const qint64 n = qint64(a.width()) * a.height();
+        for (int y = 0; y < a.height() && y < b.height(); ++y) {
+            const QRgb *pa = reinterpret_cast<const QRgb *>(a.constScanLine(y));
+            const QRgb *pb = reinterpret_cast<const QRgb *>(b.constScanLine(y));
+            for (int x = 0; x < a.width() && x < b.width(); ++x) {
+                const int d = qMax(qAbs(qRed(pa[x]) - qRed(pb[x])),
+                                   qMax(qAbs(qGreen(pa[x]) - qGreen(pb[x])),
+                                        qAbs(qBlue(pa[x]) - qBlue(pb[x]))));
+                sum += d;
+                if (d > worst)
+                    worst = d;
+                if (d > 24)
+                    ++bad;
+            }
+        }
+        *mean = n > 0 ? double(sum) / double(n) : 0.0;
+        *mx = worst;
+        *badPct = n > 0 ? 100.0 * double(bad) / double(n) : 0.0;
+    };
+
+    int failed = 0;
+    auto compare = [&](const char *name, const QRect &clip) {
+        const QImage tile = renderTile(clip);
+        const QImage ref = all.copy(clip);
+        if (tile.size() != clip.size() || ref.size() != tile.size()) {
+            out(QStringLiteral("[tileclip] %1: size %2x%3, want %4x%5 -> FAIL")
+                    .arg(QString::fromLatin1(name)).arg(tile.width()).arg(tile.height())
+                    .arg(clip.width()).arg(clip.height()));
+            ++failed;
+            return;
+        }
+        double mean = 0.0, badPct = 0.0;
+        int mx = 0;
+        stats(tile, ref, &mean, &mx, &badPct);
+        const bool ok = mean < 6.0 && mx < 160 && badPct < 1.0;
+        if (!ok)
+            ++failed;
+        out(QStringLiteral("[tileclip] %1 %2x%3@%4,%5: mean %6, max %7, >24 %8%% -> %9")
+                .arg(QString::fromLatin1(name)).arg(clip.width()).arg(clip.height())
+                .arg(clip.left()).arg(clip.top())
+                .arg(mean, 0, 'f', 2).arg(mx).arg(badPct, 0, 'f', 2)
+                .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+        tile.save(dir.filePath(QStringLiteral("%1.png").arg(QString::fromLatin1(name))));
+        ref.save(dir.filePath(QStringLiteral("%1_ref.png").arg(QString::fromLatin1(name))));
+    };
+
+    compare("tile_mid", QRect(250, 400, 512, 512));
+    compare("tile_edge", QRect(full.width() - 140, full.height() - 180, 140, 180));
+
+    // Composite the whole page out of tiles exactly the way drawPageRaster() does
+    // (integer positions, no scaling) and compare against the one-shot render.
+    QImage comp(full, QImage::Format_ARGB32);
+    comp.fill(Qt::white);
+    {
+        QPainter cp(&comp);
+        for (int ty = 0; ty < full.height(); ty += 512) {
+            for (int tx = 0; tx < full.width(); tx += 512) {
+                const QRect clip(tx, ty, qMin(512, full.width() - tx),
+                                 qMin(512, full.height() - ty));
+                cp.drawImage(clip.topLeft(), renderTile(clip));
+            }
+        }
+    }
+    // QPdfDocument::render() leaves the page background transparent. The canvas
+    // paints the paper white underneath, so compare against the same thing: the
+    // one-shot render composited onto white.
+    QImage allOnWhite(full, QImage::Format_ARGB32);
+    allOnWhite.fill(Qt::white);
+    {
+        QPainter wp(&allOnWhite);
+        wp.drawImage(0, 0, all);
+    }
+    double mean = 0.0, badPct = 0.0;
+    int mx = 0;
+    stats(comp, allOnWhite, &mean, &mx, &badPct);
+    const bool compOk = mean < 6.0 && mx < 160 && badPct < 1.0;
+    if (!compOk)
+        ++failed;
+    out(QStringLiteral("[tileclip] composite %1x%2: mean %3, max %4, >24 %5%% -> %6")
+            .arg(full.width()).arg(full.height())
+            .arg(mean, 0, 'f', 2).arg(mx).arg(badPct, 0, 'f', 2)
+            .arg(compOk ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+    comp.save(dir.filePath(QStringLiteral("composite.png")));
+    all.save(dir.filePath(QStringLiteral("full.png")));
+
+    // End to end: the canvas must actually put the tiled page on screen. Without
+    // this a correct tile renderer could still paint blank paper and every
+    // numerical check above would pass.
+    {
+        PdfCanvas canvas;
+        canvas.setAttribute(Qt::WA_DontShowOnScreen, true);
+        canvas.resize(1000, 1500);
+        canvas.show();
+        QString err;
+        if (!canvas.openPdf(pdf, &err)) {
+            out(QStringLiteral("[tileclip] canvas open FAILED: %1").arg(err));
+            ++failed;
+        } else {
+            const QSize vs = canvas.viewport()->size();
+            QImage shot(vs, QImage::Format_ARGB32);
+            shot.fill(Qt::white);
+            {
+                QPainter p(&shot);
+                canvas.paintForViewport(p);
+            }
+            const QRectF pr = canvas.testPageRect(0);
+            bool canvasOk = !pr.isEmpty();
+            auto checkCell = [&](int cx, int cy) {
+                const QPointF n((cx + 0.5) / 10.0, (cy + 0.85) / 10.0);
+                const QPoint pt(qRound(pr.left() + pr.width() * n.x()),
+                                qRound(pr.top() + pr.height() * n.y()));
+                if (!QRect(QPoint(0, 0), shot.size()).contains(pt)) {
+                    out(QStringLiteral("[tileclip] canvas sample %1,%2 outside %3x%4")
+                            .arg(cx).arg(cy).arg(shot.width()).arg(shot.height()));
+                    canvasOk = false;
+                    return;
+                }
+                const QRgb got = shot.pixel(pt);
+                const QColor want = QColor::fromHsv((cx * 37 + cy * 53) % 360, 150, 235);
+                const int d = qMax(qAbs(qRed(got) - want.red()),
+                                   qMax(qAbs(qGreen(got) - want.green()),
+                                        qAbs(qBlue(got) - want.blue())));
+                if (d > 40) {
+                    out(QStringLiteral("[tileclip] canvas cell %1,%2: got %3,%4,%5 want %6,%7,%8 (d %9)")
+                            .arg(cx).arg(cy)
+                            .arg(qRed(got)).arg(qGreen(got)).arg(qBlue(got))
+                            .arg(want.red()).arg(want.green()).arg(want.blue()).arg(d));
+                    canvasOk = false;
+                }
+            };
+            checkCell(1, 1);
+            checkCell(4, 4);
+            checkCell(8, 8);
+            // Whole-page pixel check: the canvas's tiled page must equal a single
+            // QPdfDocument render at the SAME device resolution (1:1 tiles, so this
+            // also runs at fractional DPRs). This catches a misplaced tile / wrong
+            // target even when the three colour samples happen to land right.
+            {
+                const qreal dpr = qMax<qreal>(1.0, canvas.viewport()->devicePixelRatioF());
+                QImage devShot(QSize(qRound(vs.width() * dpr), qRound(vs.height() * dpr)),
+                               QImage::Format_ARGB32);
+                devShot.setDevicePixelRatio(dpr);
+                devShot.fill(Qt::white);
+                {
+                    QPainter p(&devShot);
+                    canvas.paintForViewport(p);
+                }
+                const QSize pageDev = canvas.testRasterDeviceSize(0);
+                const QImage one = doc.render(0, pageDev);
+                QImage oneWhite(pageDev, QImage::Format_ARGB32);
+                oneWhite.fill(Qt::white);
+                {
+                    QPainter wp(&oneWhite);
+                    wp.drawImage(0, 0, one);
+                }
+                const QRect area(qRound(pr.left() * dpr), qRound(pr.top() * dpr),
+                                 pageDev.width(), pageDev.height());
+                const QImage pageShot = devShot.copy(area.intersected(devShot.rect()));
+                double pgMean = 0.0;
+                double pgBad = 0.0;
+                int pgMax = 0;
+                if (!pageShot.isNull() && pageShot.size() == oneWhite.size()) {
+                    stats(pageShot, oneWhite, &pgMean, &pgMax, &pgBad);
+                } else {
+                    pgMean = 999.0;
+                }
+                // Sub-pixel AA on the page edge / grid lines produces a few max-255
+                // pixels (0.2%); a real tile scramble shows up in the mean and the
+                // share of pixels over 24, so those are the criteria that matter.
+                const bool pgOk = pgMean < 1.0 && pgBad < 1.0;
+                out(QStringLiteral("[tileclip] sync page vs one-shot %1x%2 (dpr %3): mean %4, max %5, >24 %6%% -> %7")
+                        .arg(pageDev.width()).arg(pageDev.height())
+                        .arg(dpr, 0, 'f', 1)
+                        .arg(pgMean, 0, 'f', 2).arg(pgMax).arg(pgBad, 0, 'f', 2)
+                        .arg(pgOk ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+                if (!pgOk)
+                    ++failed;
+            }
+            if (!canvasOk)
+                ++failed;
+            out(QStringLiteral("[tileclip] canvas paint %1x%2, page %3x%4@%5,%6 -> %7")
+                    .arg(shot.width()).arg(shot.height())
+                    .arg(qRound(pr.width())).arg(qRound(pr.height()))
+                    .arg(qRound(pr.left())).arg(qRound(pr.top()))
+                    .arg(canvasOk ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+            shot.save(dir.filePath(QStringLiteral("canvas.png")));
+        }
+    }
+
+    // Async path: on screen the page paints a low-res preview immediately and the
+    // tiles arrive from QPdfPageRenderer's worker. Force async on this offscreen
+    // canvas, pump the event loop until the visible tiles are in, then make sure
+    // the resulting page is the same grid (not blank / not shifted).
+    {
+        PdfCanvas canvas;
+        canvas.setAttribute(Qt::WA_DontShowOnScreen, true);
+        canvas.resize(1000, 1500);
+        canvas.show();
+        QString err;
+        if (!canvas.openPdf(pdf, &err)) {
+            out(QStringLiteral("[tileclip] async open FAILED: %1").arg(err));
+            ++failed;
+        } else {
+            canvas.testForceAsyncTiles(true);
+            const QSize vs = canvas.viewport()->size();
+            QImage shot(vs, QImage::Format_ARGB32);
+            shot.fill(Qt::white);
+            QElapsedTimer first;
+            first.start();
+            {
+                QPainter p(&shot);
+                canvas.paintForViewport(p);
+            }
+            const qint64 firstMs = first.elapsed();
+            const QRectF pr = canvas.testPageRect(0);
+            const QSize dev = canvas.testRasterDeviceSize(0);
+            const int cols = (dev.width() + 511) / 512;
+            const int rows = (dev.height() + 511) / 512;
+            const int want = qMax(1, cols) * qMax(1, rows);
+            QElapsedTimer t;
+            t.start();
+            while (t.elapsed() < 5000 && canvas.testCachedTileCount(0) < want) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+                QThread::msleep(2);
+            }
+            const int got = canvas.testCachedTileCount(0);
+            const bool asyncOk = got >= want;
+            out(QStringLiteral("[tileclip] async first paint %1 ms, tiles %2/%3 in %4 ms -> %5")
+                    .arg(firstMs).arg(got).arg(want).arg(t.elapsed())
+                    .arg(asyncOk ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+            if (!asyncOk)
+                ++failed;
+
+            shot.fill(Qt::white);
+            {
+                QPainter p(&shot);
+                canvas.paintForViewport(p);
+            }
+            bool cellsOk = !pr.isEmpty();
+            auto checkAsyncCell = [&](int cx, int cy) {
+                const QPointF n((cx + 0.5) / 10.0, (cy + 0.85) / 10.0);
+                const QPoint pt(qRound(pr.left() + pr.width() * n.x()),
+                                qRound(pr.top() + pr.height() * n.y()));
+                if (!QRect(QPoint(0, 0), shot.size()).contains(pt)) {
+                    out(QStringLiteral("[tileclip] async sample %1,%2 outside %3x%4")
+                            .arg(cx).arg(cy).arg(shot.width()).arg(shot.height()));
+                    cellsOk = false;
+                    return;
+                }
+                const QRgb gotPx = shot.pixel(pt);
+                const QColor wantPx = QColor::fromHsv((cx * 37 + cy * 53) % 360, 150, 235);
+                const int d = qMax(qAbs(qRed(gotPx) - wantPx.red()),
+                                   qMax(qAbs(qGreen(gotPx) - wantPx.green()),
+                                        qAbs(qBlue(gotPx) - wantPx.blue())));
+                if (d > 40) {
+                    out(QStringLiteral("[tileclip] async cell %1,%2: got %3,%4,%5 want %6,%7,%8 (d %9)")
+                            .arg(cx).arg(cy)
+                            .arg(qRed(gotPx)).arg(qGreen(gotPx)).arg(qBlue(gotPx))
+                            .arg(wantPx.red()).arg(wantPx.green()).arg(wantPx.blue()).arg(d));
+                    cellsOk = false;
+                }
+            };
+            checkAsyncCell(1, 1);
+            checkAsyncCell(4, 4);
+            checkAsyncCell(8, 8);
+            if (!cellsOk)
+                ++failed;
+            out(QStringLiteral("[tileclip] async canvas %1x%2 page %3x%4 -> %5")
+                    .arg(shot.width()).arg(shot.height())
+                    .arg(qRound(pr.width())).arg(qRound(pr.height()))
+                    .arg(cellsOk ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+            shot.save(dir.filePath(QStringLiteral("canvas_async.png")));
+        }
+    }
+
+    // Short viewport (the classroom case: page taller than the window). The
+    // visible page is rendered synchronously and must be pixel-identical to a
+    // plain synchronous paint; the worker only prefetches the margin.
+    {
+        const QSize shortSize(1000, 600);
+        PdfCanvas *c = new PdfCanvas;
+        c->setAttribute(Qt::WA_DontShowOnScreen, true);
+        c->resize(shortSize);
+        c->show();
+        QString e;
+        if (!c->openPdf(pdf, &e)) {
+            out(QStringLiteral("[tileclip] short open FAILED: %1").arg(e));
+            ++failed;
+        } else {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            QImage syncShot(c->viewport()->size(), QImage::Format_ARGB32);
+            syncShot.fill(Qt::white);
+            {
+                QPainter p(&syncShot);
+                c->paintForViewport(p);
+            }
+
+            const QRectF pr = c->testPageRect(0);
+            const QSize dev = c->testRasterDeviceSize(0);
+            const QRectF vis = pr.intersected(QRectF(c->viewport()->rect()));
+            const int devX0 = int((vis.left() - pr.left()) / pr.width() * dev.width());
+            const int devY0 = int((vis.top() - pr.top()) / pr.height() * dev.height());
+            const int devX1 = int(qCeil((vis.right() - pr.left()) / pr.width() * dev.width()));
+            const int devY1 = int(qCeil((vis.bottom() - pr.top()) / pr.height() * dev.height()));
+            const int cols = qMax(1, (dev.width() + 511) / 512);
+            const int rows = qMax(1, (dev.height() + 511) / 512);
+            const int tx0 = qBound(0, devX0 / 512, cols - 1);
+            const int ty0 = qBound(0, devY0 / 512, rows - 1);
+            const int tx1 = qBound(0, qMax(devX0, devX1 - 1) / 512, cols - 1);
+            const int ty1 = qBound(0, qMax(devY0, devY1 - 1) / 512, rows - 1);
+            const int want = (tx1 - tx0 + 1) * (ty1 - ty0 + 1);
+
+            c->releaseCachedPages();
+            c->testForceAsyncTiles(true);
+            QImage asyncShot(c->viewport()->size(), QImage::Format_ARGB32);
+            asyncShot.fill(Qt::white);
+            QElapsedTimer first;
+            first.start();
+            {
+                QPainter p(&asyncShot);
+                c->paintForViewport(p);
+            }
+            const qint64 firstMs = first.elapsed();
+
+            QElapsedTimer t;
+            t.start();
+            while (t.elapsed() < 3000 && c->testCachedTileCount(0) <= want) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+                QThread::msleep(2);
+            }
+            const int got = c->testCachedTileCount(0);
+            bool ok = got > want && !vis.isEmpty() && !dev.isEmpty();
+            out(QStringLiteral("[tileclip] prefetch: first paint %1 ms, visible %2, cached %3 in %4 ms")
+                    .arg(firstMs).arg(want).arg(got).arg(t.elapsed()));
+
+            asyncShot.fill(Qt::white);
+            {
+                QPainter p(&asyncShot);
+                c->paintForViewport(p);
+            }
+            const QRect area = vis.toAlignedRect().intersected(
+                QRect(QPoint(0, 0), asyncShot.size()));
+            const QImage a = syncShot.copy(area);
+            const QImage b = asyncShot.copy(area);
+            double shortMean = 0.0;
+            double shortBad = 0.0;
+            int shortMax = 0;
+            if (a.size() == b.size() && !a.isNull()) {
+                stats(b, a, &shortMean, &shortMax, &shortBad);
+                if (!(shortMean < 6.0 && shortMax < 160 && shortBad < 1.0))
+                    ok = false;
+            } else {
+                ok = false;
+            }
+            out(QStringLiteral("[tileclip] prefetch page %1x%2 visible %3x%4: mean %5, max %6, >24 %7%% -> %8")
+                    .arg(qRound(pr.width())).arg(qRound(pr.height()))
+                    .arg(area.width()).arg(area.height())
+                    .arg(shortMean, 0, 'f', 2).arg(shortMax).arg(shortBad, 0, 'f', 2)
+                    .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+            if (!ok)
+                ++failed;
+            syncShot.save(dir.filePath(QStringLiteral("canvas_short_sync.png")));
+            asyncShot.save(dir.filePath(QStringLiteral("canvas_short_async.png")));
+        }
+        delete c;
+    }
+
+    out(QStringLiteral("[tileclip] %1").arg(failed == 0 ? QStringLiteral("OK")
+                                                          : QStringLiteral("FAILED")));
+    return failed == 0 ? 0 : 3;
+}
+
+// On-screen scroll self test:  pdfboard.exe --selftest-scroll [outdir]
+//
+// Every other render test paints into a QImage through paintForViewport(), which
+// never touches the window's backing store - so a broken scroll blit (stale bands
+// after dragging the page, "花屏") passed all of them. This one shows a real
+// window, scrolls it the way a drag does (several steps per frame included), then
+// grabs what is actually ON SCREEN and compares it with a fresh full paint at the
+// same scroll position.
+static int runScrollSelfTest(const QString &outDir)
+{
+    QDir dir(outDir);
+    if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
+        out(QStringLiteral("[scroll] cannot create %1").arg(outDir));
+        return 2;
+    }
+    const QString pdf = dir.filePath(QStringLiteral("scroll.pdf"));
+    {
+        // Three pages of labelled, colour-coded rows: a band left behind by a
+        // missed blit shows up as a row whose colour/label does not belong there.
+        QPdfWriter w(pdf);
+        w.setPageSize(QPageSize(QPageSize::A4));
+        w.setResolution(72);
+        QPainter p(&w);
+        for (int pg = 0; pg < 3; ++pg) {
+            if (pg > 0)
+                w.newPage();
+            const QRectF page(0, 0, w.width(), w.height());
+            constexpr int kRows = 40;
+            for (int y = 0; y < kRows; ++y) {
+                const QRectF row(0, y * page.height() / kRows, page.width(), page.height() / kRows);
+                p.fillRect(row, QColor::fromHsv((pg * 120 + y * 29) % 360, 160, 230));
+                p.setPen(Qt::black);
+                p.setFont(QFont(QStringLiteral("Arial"), 8));
+                p.drawText(row.adjusted(4, 0, -4, 0), Qt::AlignVCenter | Qt::AlignLeft,
+                           QStringLiteral("page %1 row %2").arg(pg + 1).arg(y));
+            }
+            p.setPen(QPen(Qt::black, 3));
+            p.drawLine(page.topLeft(), page.bottomRight());
+            p.drawLine(page.topRight(), page.bottomLeft());
+        }
+        p.end();
+    }
+
+    auto pump = [](int ms) {
+        QElapsedTimer t;
+        t.start();
+        while (t.elapsed() < ms) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+            QThread::msleep(2);
+        }
+    };
+
+    PdfCanvas canvas;
+    canvas.setWindowFlag(Qt::WindowStaysOnTopHint, true);
+    // The grab reads the real screen, so the whole window must be on it - at a
+    // large scale factor 1100x760 logical px no longer fits a 1080p panel.
+    const QRect avail = canvas.screen()->availableGeometry();
+    canvas.resize(qMin(1100, avail.width() - 80), qMin(760, avail.height() - 80));
+    canvas.move(avail.topLeft() + QPoint(40, 40));
+    canvas.show();
+    canvas.raise();
+    canvas.activateWindow();
+    QString err;
+    if (!canvas.openPdf(pdf, &err)) {
+        out(QStringLiteral("[scroll] open FAILED: %1").arg(err));
+        return 2;
+    }
+    pump(800);
+
+    int failed = 0;
+    // focus (logical px): a small screen-space artefact such as a ghost eraser ring
+    // vanishes in the whole-viewport average, so it is also judged on its own.
+    auto compare = [&](const QString &tag, const QRect &focus = QRect()) {
+        pump(600);      // let async tiles and the settle timer land
+        QWidget *vp = canvas.viewport();
+        const qreal dpr = qMax<qreal>(1.0, vp->devicePixelRatioF());
+        const QPoint g = vp->mapToGlobal(QPoint(0, 0));
+        QScreen *scr = canvas.screen();
+        const QPoint sg = g - scr->geometry().topLeft();
+        const QImage onScreen = scr->grabWindow(0, sg.x(), sg.y(), vp->width(), vp->height())
+                                    .toImage().convertToFormat(QImage::Format_ARGB32);
+        QImage ref(onScreen.size(), QImage::Format_ARGB32);
+        ref.setDevicePixelRatio(dpr);
+        ref.fill(Qt::white);
+        {
+            QPainter p(&ref);
+            canvas.paintForViewport(p);
+        }
+        // The floating toolbar is a child widget drawn over the page; leave it out.
+        QRect mask;
+        if (InkToolbar *tb = canvas.toolbar(); tb && tb->isVisible()) {
+            const QRect r = QRect(tb->mapTo(vp, QPoint(0, 0)), tb->size()).adjusted(-24, -24, 24, 24);
+            mask = QRect(qFloor(r.left() * dpr), qFloor(r.top() * dpr),
+                         qCeil(r.width() * dpr), qCeil(r.height() * dpr));
+        }
+        const QRect focusDev = focus.isNull() ? QRect()
+            : QRect(qFloor(focus.left() * dpr), qFloor(focus.top() * dpr),
+                    qCeil(focus.width() * dpr), qCeil(focus.height() * dpr));
+        qint64 sum = 0, bad = 0, n = 0, focusBad = 0, focusN = 0;
+        int badRows = 0;
+        for (int y = 0; y < onScreen.height() && y < ref.height(); ++y) {
+            const QRgb *a = reinterpret_cast<const QRgb *>(onScreen.constScanLine(y));
+            int rowBad = 0, rowN = 0;
+            for (int x = 0; x < onScreen.width() && x < ref.width(); ++x) {
+                if (mask.contains(x, y))
+                    continue;
+                // At a fractional DPR the viewport's origin in the window is not on
+                // a device pixel, so edges can land one pixel off the QImage
+                // reference. Accept the best match within +/-1 device px; a stale
+                // band is tens of pixels off and still fails.
+                int d = 255;
+                for (int oy = -1; oy <= 1 && d > 0; ++oy) {
+                    const int ry = y + oy;
+                    if (ry < 0 || ry >= ref.height())
+                        continue;
+                    const QRgb *br = reinterpret_cast<const QRgb *>(ref.constScanLine(ry));
+                    for (int ox = -1; ox <= 1; ++ox) {
+                        const int rx = x + ox;
+                        if (rx < 0 || rx >= ref.width())
+                            continue;
+                        d = qMin(d, qMax(qAbs(qRed(a[x]) - qRed(br[rx])),
+                                         qMax(qAbs(qGreen(a[x]) - qGreen(br[rx])),
+                                              qAbs(qBlue(a[x]) - qBlue(br[rx])))));
+                    }
+                }
+                sum += d;
+                ++n;
+                ++rowN;
+                if (focusDev.contains(x, y)) {
+                    ++focusN;
+                    if (d > 24)
+                        ++focusBad;
+                }
+                if (d > 24) {
+                    ++bad;
+                    ++rowBad;
+                }
+            }
+            if (rowN > 0 && rowBad * 10 > rowN)
+                ++badRows;
+        }
+        const double mean = n ? double(sum) / n : 999.0;
+        const double badPct = n ? 100.0 * bad / n : 100.0;
+        const double focusPct = focusN ? 100.0 * focusBad / focusN : 0.0;
+        const bool ok = onScreen.size() == ref.size() && mean < 2.0 && badPct < 1.0
+                        && focusPct < 1.0;
+        out(QStringLiteral("[scroll] %1 @%2 (dpr %3): mean %4, >24 %5%, bad rows %6, focus %7% -> %8")
+                .arg(tag).arg(canvas.verticalScrollBar()->value()).arg(dpr, 0, 'f', 2)
+                .arg(mean, 0, 'f', 2).arg(badPct, 0, 'f', 2).arg(badRows)
+                .arg(focusPct, 0, 'f', 2)
+                .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+        onScreen.save(dir.filePath(tag + QStringLiteral("_screen.png")));
+        ref.save(dir.filePath(tag + QStringLiteral("_ref.png")));
+        if (!ok)
+            ++failed;
+    };
+
+    compare(QStringLiteral("baseline"));
+
+    // Slow drag: one step per frame.
+    QScrollBar *vs = canvas.verticalScrollBar();
+    for (int i = 0; i < 40; ++i) {
+        vs->setValue(vs->value() + 23);
+        pump(16);
+    }
+    compare(QStringLiteral("down"));
+
+    // Fast drag with uncompressed touch input: several steps before a paint.
+    for (int i = 0; i < 30; ++i) {
+        vs->setValue(vs->value() + 41);
+        if (i % 3 == 0)
+            vs->setValue(vs->value() + 17);
+        pump(i % 2 ? 4 : 16);
+    }
+    compare(QStringLiteral("fast"));
+
+    for (int i = 0; i < 40; ++i) {
+        vs->setValue(vs->value() - 31);
+        pump(16);
+    }
+    compare(QStringLiteral("up"));
+
+    // The toolbar fades after kIdleTimeoutMs without input (a QGraphicsOpacityEffect
+    // on a child of the viewport) - the state the classroom screenshot was in.
+    if (InkToolbar *tb = canvas.toolbar())
+        pump(tb->testIdleTimeoutMs() + 800);
+    for (int i = 0; i < 40; ++i) {
+        vs->setValue(vs->value() + 29);
+        pump(16);
+    }
+    compare(QStringLiteral("idle"));
+
+    // The eraser ring is screen-space: the blit carries its pixels along, and a
+    // ring left behind at (dx, dy) used to stay until the pointer moved again.
+    canvas.setTool(PdfCanvas::InkTool::Eraser);
+    const QPointF ringAt(canvas.viewport()->width() * 0.3, canvas.viewport()->height() * 0.4);
+    // The canvas polls the real cursor (trackPointer) and drops the hover when it
+    // is elsewhere, so park the real cursor on the ring for this leg.
+    const QPoint cursorWas = QCursor::pos();
+    QCursor::setPos(canvas.viewport()->mapToGlobal(ringAt.toPoint()));
+    canvas.testSetEraserHover(ringAt);
+    pump(50);
+    for (int i = 0; i < 20; ++i) {
+        vs->setValue(vs->value() + (i < 10 ? 37 : -23));
+        pump(16);
+    }
+    // The ghosts trail along the ring's column (every step shifts the earlier ones).
+    const int ringCol = 60;
+    compare(QStringLiteral("eraser"),
+            QRect(int(ringAt.x()) - ringCol, 0, 2 * ringCol, canvas.viewport()->height()));
+    canvas.testClearEraserHover();
+    canvas.setTool(PdfCanvas::InkTool::Pen);
+    QCursor::setPos(cursorWas);
+
+    // A dragged island stays where the user put it - including its y. Every scroll
+    // calls reposition(), which used to drop it back to the bottom dock.
+    if (InkToolbar *tb = canvas.toolbar()) {
+        tb->moveBy(QPoint(-80, 30 - tb->y()));
+        pump(50);
+        const QPoint placed = tb->pos();
+        for (int i = 0; i < 20; ++i) {
+            vs->setValue(vs->value() + 31);
+            pump(16);
+        }
+        const bool kept = tb->pos() == placed;
+        out(QStringLiteral("[scroll] dragged island %1,%2 -> %3,%4 -> %5")
+                .arg(placed.x()).arg(placed.y()).arg(tb->x()).arg(tb->y())
+                .arg(kept ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+        if (!kept)
+            ++failed;
+        compare(QStringLiteral("island"));
+    }
+
+    out(QStringLiteral("[scroll] %1").arg(failed == 0 ? QStringLiteral("OK")
+                                                        : QStringLiteral("FAILED")));
+    return failed == 0 ? 0 : 3;
+}
+
 // Headless ink-model self test:  pdfboard.exe --selftest-ink <file.pdf>
 // Drives the ink model without any mouse input: draw -> partial erase ->
 // undo -> redo -> clear. Guards the eraser/undo behaviour against regressions.
@@ -824,6 +1617,7 @@ static int runInkSelfTest(const QString &path)
     }
     out(QStringLiteral("[selftest] file: %1").arg(path));
     out(QStringLiteral("[selftest] pages: %1").arg(canvas.pageCount()));
+
 
     int failed = 0;
     auto check = [&failed](const char *what, int got, int want) {
@@ -859,7 +1653,7 @@ static int runInkSelfTest(const QString &path)
         check("probe: input counted", line.contains(QStringLiteral("输入 1 事件")) ? 1 : 0, 1);
         check("probe: samples counted", line.contains(QStringLiteral("样本 3")) ? 1 : 0, 1);
         check("probe: paint counted", line.contains(QStringLiteral("重绘 1 帧")) ? 1 : 0, 1);
-        check("probe: render counted", line.contains(QStringLiteral("栅格化 1")) ? 1 : 0, 1);
+        check("probe: render counted", line.contains(QStringLiteral("栅格化块 1")) ? 1 : 0, 1);
         check("probe: zoom reported", line.contains(QStringLiteral("2.50x")) ? 1 : 0, 1);
         check("probe: resets counts",
               probe.take(2000).contains(QStringLiteral("输入 0 事件")) ? 1 : 0, 1);
@@ -955,6 +1749,106 @@ static int runInkSelfTest(const QString &path)
         check("overlay: ink survives the island", probe.strokeCount(), 1);
     }
 
+    // Finger writing must survive the two ways Windows interrupts it: it synthesizes
+    // mouse events for the same contact, and its own "press and hold" gesture takes the
+    // touch stream away (TouchCancel). A synthesized press used to restart the live
+    // stroke and a cancel threw it away - either one leaves a white gap in handwriting.
+    {
+        PdfCanvas probe;
+        probe.setAttribute(Qt::WA_DontShowOnScreen, true);
+        probe.resize(1000, 800);
+        probe.show();
+        QString openErr;
+        check("touch: probe opened", probe.openPdf(path, &openErr) ? 1 : 0, 1);
+
+        const QSize vp = probe.testViewportSize();
+        QPointF pagePt(0.35 * vp.width(), vp.height() / 2.0);
+        for (int i = 0; i < 60 && pagePt.y() < vp.height()
+                        && probe.testPageAtViewportY(pagePt.y()) < 0; ++i)
+            pagePt.setY(pagePt.y() + 10.0);
+        check("touch: page point found",
+              probe.testPageAtViewportY(pagePt.y()) >= 0 ? 1 : 0, 1);
+        probe.setPenColor(QColor(0x10, 0x10, 0x10));
+
+        probe.testTouchBegin(pagePt);
+        probe.testTouchMove(pagePt + QPointF(90.0, 0.0));
+        // Right button (a held finger) and a synthesized left press/release: all ignored
+        // while the finger owns the input.
+        const QPointF synth = pagePt + QPointF(160.0, 0.0);
+        QMouseEvent right(QEvent::MouseButtonPress, synth, synth, Qt::RightButton,
+                          Qt::RightButton, Qt::NoModifier);
+        QApplication::sendEvent(probe.viewport(), &right);
+        QMouseEvent press(QEvent::MouseButtonPress, synth, synth, Qt::LeftButton,
+                          Qt::LeftButton, Qt::NoModifier);
+        QApplication::sendEvent(probe.viewport(), &press);
+        QMouseEvent release(QEvent::MouseButtonRelease, synth, synth, Qt::LeftButton,
+                            Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(probe.viewport(), &release);
+        probe.testTouchMove(pagePt + QPointF(180.0, 0.0));
+        probe.testTouchEnd();
+        check("touch: synthesized mouse leaves the stroke alone", probe.strokeCount(), 1);
+        // A restart at the mouse position would move the stroke's first sample.
+        const QPointF first = probe.testStrokeFirstPoint(0, 0);
+        check("touch: stroke still starts where the finger landed",
+              (qAbs(first.x() - probe.testFracX(0, pagePt.x())) < 1e-6
+               && qAbs(first.y() - probe.testFracAtViewportY(pagePt.y())) < 1e-6) ? 1 : 0, 1);
+
+        // System-cancelled stream: keep the part that was already drawn.
+        const QPointF start2 = pagePt + QPointF(0.0, 40.0);
+        probe.testTouchBegin(start2);
+        probe.testTouchMove(start2 + QPointF(80.0, 0.0));
+        probe.testTouchCancel();
+        check("touch: a cancelled stroke keeps what was drawn", probe.strokeCount(), 2);
+        check("touch: the cancelled stroke is a real stroke",
+              probe.testStrokePoints(0, 1) > 2 ? 1 : 0, 1);
+
+        // The page's rounded corners must survive the "only clip when a corner is
+        // touched" shortcut: a full paint and a corner-touching repaint both show the
+        // background through the arc (white paper would mean the clip was skipped).
+        {
+            const QRectF pr = probe.testPageRect(0);
+            const QPoint corner(int(pr.left()) + 1, int(pr.top()) + 1);
+            auto cornerPixel = [&](const QRect &clip) {
+                QImage img(vp, QImage::Format_ARGB32_Premultiplied);
+                img.fill(Qt::white);
+                QPainter p(&img);
+                if (!clip.isNull())
+                    p.setClipRect(clip);
+                probe.paintForViewport(p);
+                return img.pixelColor(corner);
+            };
+            check("page: a full paint rounds the corner",
+                  cornerPixel(QRect()) != Theme::light().paper ? 1 : 0, 1);
+            check("page: a corner repaint rounds the corner",
+                  cornerPixel(QRect(corner.x() - 4, corner.y() - 4, 20, 20))
+                          != Theme::light().paper ? 1 : 0, 1);
+        }
+
+        // Every live sample repaints only a small rect, and drawInk() now skips strokes
+        // whose cached bounding box cannot touch it. The stroke that IS inside the
+        // repainted rect must still be painted: count its dark pixels.
+        QImage frame(probe.testViewportSize(), QImage::Format_ARGB32_Premultiplied);
+        frame.fill(Qt::white);
+        {
+            QPainter p(&frame);
+            const QRect clip(int(pagePt.x()) - 20, int(pagePt.y()) - 20, 200, 60);
+            p.setClipRect(clip);
+            probe.paintForViewport(p);
+            int ink = 0;
+            for (int y = clip.top(); y <= clip.bottom() && y < frame.height(); ++y) {
+                if (y < 0)
+                    continue;
+                for (int x = clip.left(); x <= clip.right() && x < frame.width(); ++x) {
+                    if (x < 0)
+                        continue;
+                    if (qGray(frame.pixel(x, y)) < 100)
+                        ++ink;
+                }
+            }
+            check("touch: a partial repaint still shows the stroke", int(ink > 20), 1);
+        }
+    }
+
     // Wheel zoom rules. Ctrl+wheel zooms at the pointer, the plain wheel keeps
     // scrolling, and while a touch gesture runs (or just ended) the wheel is ignored
     // - a two-finger PAN reaches the app as a wheel event and must never zoom.
@@ -1010,6 +1904,162 @@ static int runInkSelfTest(const QString &path)
         probe.testWheelAt(at, 120, /*ctrl=*/true);
         check("wheel: still ignored right after touch",
               qFuzzyCompare(probe.testZoom(), during) ? 1 : 0, 1);
+    }
+
+    // Finger smoothing: the panel's report rate is the ceiling, so the samples it does
+    // send are filtered instead. A hairy straight line must come out straighter, the
+    // filter may only cost the one sample of lookahead a centred window needs, and a
+    // jump between path sources must restart it rather than dragging a curve across
+    // the page.
+    {
+        InkSmoother smooth;
+        QPointF last;
+        qreal maxDeviation = 0.0;
+        for (int i = 0; i <= 80; ++i) {
+            // 4 px per 8 ms sample = 500 px/s: ordinary classroom handwriting.
+            const QPointF raw(500.0 + (i % 2 ? 3.0 : -3.0), 100.0 + 4.0 * i);
+            last = smooth.push(raw);
+            if (i > 1)
+                maxDeviation = qMax(maxDeviation, qAbs(last.x() - 500.0));
+        }
+        // Alternating +-3 px through a centred 3-average comes out at +-1 px.
+        check("smooth: panel jitter is reduced", int(maxDeviation < 1.6), 1);
+        // One sample of lag, never more: the output is centred on sample 79.
+        check("smooth: exactly one sample of lookahead",
+              int(qAbs(last.y() - (100.0 + 4.0 * 79)) < 0.5), 1);
+        // The held-back raw sample lets the ink reach the finger on lift-off.
+        check("smooth: flush returns the newest raw sample",
+              int(smooth.flush() == QPointF(500.0 - 3.0, 100.0 + 4.0 * 80)), 1);
+
+        const QPointF jump = smooth.push(QPointF(900.0, 700.0));
+        check("smooth: a jump restarts the filter",
+              int(jump == QPointF(900.0, 700.0)), 1);
+        smooth.reset();
+        check("smooth: reset starts raw",
+              int(smooth.push(QPointF(12.0, 34.0)) == QPointF(12.0, 34.0)), 1);
+    }
+
+    // Contact-area eraser size (Seewo-style "adaptive" wiping): the chosen step is a
+    // floor, a wider contact grows the wipe, and no area data leaves it untouched.
+    {
+        check("erase radius: no area keeps the selected step",
+              qFuzzyCompare(adaptiveEraseRadius(26.0, 0.0, 14.0, 88.0), 26.0) ? 1 : 0, 1);
+        check("erase radius: a wider contact grows it",
+              int(adaptiveEraseRadius(14.0, 60.0, 14.0, 88.0) > 14.0), 1);
+        check("erase radius: the chosen step is a floor",
+              qFuzzyCompare(adaptiveEraseRadius(44.0, 40.0, 14.0, 88.0), 44.0) ? 1 : 0, 1);
+        check("erase radius: clamped at the ceiling",
+              qFuzzyCompare(adaptiveEraseRadius(14.0, 1000.0, 14.0, 88.0), 88.0) ? 1 : 0, 1);
+    }
+
+    // Contact-area widths (pure-touch "pressure"): per-point factors must survive
+    // serialization, stay parallel to the points through erasing, and change the
+    // exported pixels. A panel that reports no contact size leaves them empty and the
+    // stroke stays uniform.
+    {
+        {
+            const QVector<QPointF> line{QPointF(0, 0), QPointF(100, 0)};
+            const QPainterPath thin = inkOutlinePath(line, QVector<qreal>{1.0, 1.0}, 10.0);
+            const QPainterPath thick = inkOutlinePath(line, QVector<qreal>{2.0, 2.0}, 10.0);
+            check("ink outline: base width",
+                  int(qAbs(thin.boundingRect().height() - 10.0) < 1.0), 1);
+            check("ink outline: a factor scales the thickness",
+                  int(thick.boundingRect().height() > thin.boundingRect().height() + 8.0), 1);
+            check("ink outline: round caps extend past the ends",
+                  int(thin.boundingRect().width() > 100.0), 1);
+        }
+
+        PdfCanvas weighted;
+        weighted.setAttribute(Qt::WA_DontShowOnScreen, true);
+        weighted.resize(900, 700);
+        weighted.show();
+        QString we;
+        check("width factor: canvas opens the page", int(weighted.openPdf(path, &we)), 1);
+
+        const int N = 60;
+        QJsonArray pts;
+        QJsonArray wf;
+        for (int i = 0; i < N; ++i) {
+            pts.append(0.25 + 0.50 * qreal(i) / qreal(N - 1));
+            pts.append(0.50);
+            wf.append(1.0 + 0.8 * qreal(i) / qreal(N - 1));
+        }
+        QJsonObject stroke;
+        stroke.insert(QStringLiteral("c"), QStringLiteral("#102030"));
+        stroke.insert(QStringLiteral("w"), 0.02);
+        stroke.insert(QStringLiteral("p"), pts);
+        stroke.insert(QStringLiteral("wf"), wf);
+        QJsonObject pages;
+        pages.insert(QStringLiteral("0"), QJsonArray{stroke});
+        QJsonObject root;
+        root.insert(QStringLiteral("version"), 1);
+        root.insert(QStringLiteral("pages"), pages);
+        weighted.importInk(root);
+        check("width factor: imported", weighted.testStrokeWidthCount(0, 0), N);
+        check("width factor: parallel to the points", weighted.testStrokePoints(0, 0), N);
+
+        const QJsonObject back = weighted.exportInk();
+        const QJsonArray backPage = back.value(QStringLiteral("pages")).toObject()
+                                        .value(QStringLiteral("0")).toArray();
+        check("width factor: exported",
+              int(backPage.first().toObject().value(QStringLiteral("wf")).toArray().size()), N);
+
+        weighted.testEraseAtNormalized(0, QPointF(0.5, 0.5));
+        bool parallel = true;
+        for (int i = 0; i < weighted.strokeCount(); ++i) {
+            const int n = weighted.testStrokePoints(0, i);
+            const int w = weighted.testStrokeWidthCount(0, i);
+            if (w != 0 && w != n)
+                parallel = false;
+        }
+        check("width factor: erasing keeps them parallel", parallel ? 1 : 0, 1);
+
+        // The export honours them: the same stroke with thicker factors must paint a
+        // taller run of ink pixels.
+        PdfCanvas render;
+        render.setAttribute(Qt::WA_DontShowOnScreen, true);
+        render.resize(900, 700);
+        render.show();
+        check("width factor: render canvas opens", int(render.openPdf(path, &we)), 1);
+        auto inkRunPx = [&render, &we](qreal factor) {
+            QJsonArray p2;
+            p2.append(0.25);
+            p2.append(0.50);
+            p2.append(0.75);
+            p2.append(0.50);
+            QJsonArray w2;
+            w2.append(factor);
+            w2.append(factor);
+            QJsonObject s2;
+            s2.insert(QStringLiteral("c"), QStringLiteral("#102030"));
+            s2.insert(QStringLiteral("w"), 0.02);
+            s2.insert(QStringLiteral("p"), p2);
+            s2.insert(QStringLiteral("wf"), w2);
+            QJsonObject pages2;
+            pages2.insert(QStringLiteral("0"), QJsonArray{s2});
+            QJsonObject ink2;
+            ink2.insert(QStringLiteral("version"), 1);
+            ink2.insert(QStringLiteral("pages"), pages2);
+            render.importInk(ink2);
+
+            const QImage img = PdfExport::renderPageWithInk(&render, 0, 120, &we);
+            if (img.isNull())
+                return -1;
+            const int x = img.width() / 2;
+            const int cy = img.height() / 2;
+            int run = 0;
+            for (int y = cy - 60; y <= cy + 60; ++y) {
+                if (y < 0 || y >= img.height())
+                    continue;
+                if (qGray(img.pixel(x, y)) < 120)
+                    ++run;
+            }
+            return run;
+        };
+        const int runThin = inkRunPx(1.0);
+        const int runThick = inkRunPx(1.8);
+        check("width factor: the export paints thicker",
+              int(runThin > 0 && runThick > runThin + 4), 1);
     }
 
     // The status-bar zoom control's slider mapping is pure, so it is asserted here
@@ -1320,6 +2370,12 @@ static int runInkSelfTest(const QString &path)
         out(QStringLiteral("[selftest] collapse: dragged island x %1 -> %2 (y %3 -> %4)")
                 .arg(draggedAt.x()).arg(bar->pos().x()).arg(draggedAt.y()).arg(bar->pos().y()));
         check("collapse: a dragged island is not re-homed", bar->pos().x(), draggedAt.x());
+        // ...and neither is its y: dragged up, it must not drop back to the dock
+        // on the next reposition() (every scroll calls it).
+        bar->moveBy(QPoint(0, -100));
+        const int raisedY = bar->pos().y();
+        bar->reposition();
+        check("collapse: a dragged island keeps its y", bar->pos().y(), raisedY);
     }
 
     // Default anchor on a FRESH canvas (never dragged): the island sits at the
@@ -1589,17 +2645,53 @@ static void captureUiReviewImages()
     QCoreApplication::processEvents();
 
     if (auto *page = window.findChild<SettingsPage *>()) {
-        // 把窗口撑到内容高度，让全部分组一次装进滚动区：抓出来的整页图里
-        // 不会出现滚动条把「更新 / 关于」截掉。
-        for (int i = 0; i < 4 && page->verticalScrollBar()->isVisible(); ++i) {
-            window.resize(window.width(),
-                          window.height() + page->verticalScrollBar()->maximum() + 40);
+        // One shot per category. The window is stretched to the category's
+        // content height first, so no scroll bar cuts the last cards off.
+        for (int c = 0; c < page->testCategoryCount(); ++c) {
+            window.resize(1440, 1000);
+            page->testShowCategory(c);
             QCoreApplication::processEvents();
+            QScrollArea *scroll = page->testCurrentScroll();
+            for (int i = 0; scroll && i < 4 && scroll->verticalScrollBar()->isVisible(); ++i) {
+                window.resize(window.width(),
+                              window.height() + scroll->verticalScrollBar()->maximum() + 40);
+                QCoreApplication::processEvents();
+            }
+            const QString path = dir + QStringLiteral("/settings-page-%1.png").arg(c);
+            const bool saved = page->grab().save(path, "PNG");
+            out(QStringLiteral("[selftest] 设置页截图（%1）：%2（%3）")
+                    .arg(page->testCategoryName(c), path,
+                         saved ? QStringLiteral("已写出") : QStringLiteral("写出失败")));
         }
-        const QString path = dir + QStringLiteral("/settings-page.png");
+        // Narrow window: the rail folds to icons only.
+        window.resize(820, 900);
+        page->testShowCategory(1);
+        QCoreApplication::processEvents();
+        const QString path = dir + QStringLiteral("/settings-page-compact.png");
         const bool saved = page->grab().save(path, "PNG");
-        out(QStringLiteral("[selftest] 设置页截图：%1（%2）")
-                .arg(path, saved ? QStringLiteral("已写出") : QStringLiteral("写出失败")));
+        out(QStringLiteral("[selftest] 设置页截图（窄窗口，导航%1）：%2（%3）")
+                .arg(page->testRailCompact() ? QStringLiteral("已收起") : QStringLiteral("未收起"),
+                     path, saved ? QStringLiteral("已写出") : QStringLiteral("写出失败")));
+
+        // The other theme too (in memory only - nothing is written to the
+        // registry), then back to the stored one.
+        const bool dark = Theme::mode() == Theme::Mode::Dark
+                          || (Theme::mode() == Theme::Mode::System
+                              && Theme::systemMode() == Theme::Mode::Dark);
+        Theme::setMode(dark ? Theme::Mode::Light : Theme::Mode::Dark);
+        page->refreshTheme();
+        window.resize(1440, 1000);
+        for (int c : { 1, 5 }) {
+            page->testShowCategory(c);
+            QCoreApplication::processEvents();
+            const QString other = dir + QStringLiteral("/settings-page-%1-%2.png")
+                                            .arg(dark ? QStringLiteral("light")
+                                                      : QStringLiteral("dark"))
+                                            .arg(c);
+            page->grab().save(other, "PNG");
+        }
+        Theme::applyStoredMode(AppSettings::themeMode());
+        page->refreshTheme();
     }
 }
 
@@ -1756,6 +2848,118 @@ static int runTabStripSelfTest()
 // Pure maths, no widgets: the island metrics must shrink to 80% (font and
 // floors together), and the drag clamp must keep the bar inside the viewport
 // even when the host is smaller than the island.
+// On-screen popup self test:  pdfboard.exe --selftest-popup [outdir]
+// The settings dropdown is a rounded card inside a square popup window. If the
+// window is not translucent, its square corners show around the card. This
+// opens the 颜色模式 dropdown on a real window and compares the four corner
+// pixels of the popup's rectangle with the same screen pixels before it opened.
+static int runPopupSelfTest(const QString &outDir)
+{
+    QDir().mkpath(outDir);
+    auto pump = [](int ms) {
+        QElapsedTimer t;
+        t.start();
+        while (t.elapsed() < ms) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+            QThread::msleep(2);
+        }
+    };
+
+    int failed = 0;
+    // Both themes (in memory only, nothing is stored): the stray corner showed
+    // on the light and on the dark surfaces alike.
+    for (const Theme::Mode mode : { Theme::Mode::Light, Theme::Mode::Dark }) {
+        const QString tag = mode == Theme::Mode::Light ? QStringLiteral("light")
+                                                       : QStringLiteral("dark");
+        Theme::setMode(mode);
+        SettingsPage page;
+        page.setWindowFlag(Qt::WindowStaysOnTopHint, true);
+        const QRect avail = page.screen()->availableGeometry();
+        page.resize(qMin(1200, avail.width() - 80), qMin(800, avail.height() - 80));
+        page.move(avail.topLeft() + QPoint(40, 40));
+        page.show();
+        page.raise();
+        page.activateWindow();
+        page.testShowCategory(1);
+        pump(600);
+
+        QScreen *scr = page.screen();
+        const QPoint origin = scr->geometry().topLeft();
+        const QImage before = scr->grabWindow(0).toImage();
+        QWidget *menu = page.testOpenThemeMenu();
+        pump(500);                       // the 130 ms fade-in, then settle
+        if (!menu || !menu->isVisible()) {
+            out(QStringLiteral("[popup] %1: the dropdown did not open -> FAIL").arg(tag));
+            ++failed;
+            continue;
+        }
+        const QImage after = scr->grabWindow(0).toImage();
+        const qreal dpr = scr->devicePixelRatio();
+        const QRect g = menu->frameGeometry().translated(-origin);
+        const QRect dev(qRound(g.left() * dpr), qRound(g.top() * dpr),
+                        qRound(g.width() * dpr), qRound(g.height() * dpr));
+        menu->hide();
+        pump(100);
+
+        const QPoint probes[8] = {
+            dev.topLeft() + QPoint(1, 1), dev.topRight() + QPoint(-1, 1),
+            dev.bottomLeft() + QPoint(1, -1), dev.bottomRight() + QPoint(-1, -1),
+            // Just OUTSIDE the popup: a system drop shadow would darken these.
+            QPoint(dev.right() + 3, dev.center().y()), QPoint(dev.center().x(), dev.bottom() + 3),
+            QPoint(dev.left() - 3, dev.center().y()), QPoint(dev.right() + 3, dev.bottom() + 3) };
+        const char *names[8] = { "top-left", "top-right", "bottom-left", "bottom-right",
+                                 "outside right", "outside bottom", "outside left",
+                                 "outside bottom-right" };
+        for (int i = 0; i < 8; ++i) {
+            const QRgb a = before.pixel(probes[i]);
+            const QRgb b = after.pixel(probes[i]);
+            const int d = qMax(qAbs(qRed(a) - qRed(b)),
+                               qMax(qAbs(qGreen(a) - qGreen(b)), qAbs(qBlue(a) - qBlue(b))));
+            const bool ok = d <= 6;     // a shadow or a square corner moves it by 15+
+            out(QStringLiteral("[popup] %1 %2: before %3 after %4 (d %5) -> %6")
+                    .arg(tag, QString::fromLatin1(names[i]))
+                    .arg(QColor(a).name(), QColor(b).name()).arg(d)
+                    .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+            if (!ok)
+                ++failed;
+        }
+        after.copy(dev.adjusted(-20, -20, 20, 20))
+            .save(QDir(outDir).filePath(QStringLiteral("popup-%1.png").arg(tag)));
+    }
+    out(QStringLiteral("[popup] %1").arg(failed == 0 ? QStringLiteral("OK") : QStringLiteral("FAILED")));
+    return failed == 0 ? 0 : 3;
+}
+
+// Online update check:  pdfboard.exe --selftest-update [currentVersion]
+// Runs the real 检查更新 request against github.com once (a direct connection,
+// like the button) and prints what the settings page would show. Not part of
+// CI: it needs the network.
+static int runUpdateSelfTest(const QString &current)
+{
+    UpdateCheck::Checker checker;
+    UpdateCheck::Result result;
+    bool done = false;
+    QEventLoop loop;
+    QObject::connect(&checker, &UpdateCheck::Checker::finished, &loop,
+                     [&](const UpdateCheck::Result &r) {
+                         result = r;
+                         done = true;
+                         loop.quit();
+                     });
+    QElapsedTimer t;
+    t.start();
+    checker.start(current);
+    if (!done)
+        loop.exec();
+    const char *names[] = { "UpToDate", "NewerFound", "Failed" };
+    out(QStringLiteral("[update] current %1 -> %2 in %3 ms: latest %4, page %5%6")
+            .arg(current, QString::fromLatin1(names[int(result.status)]))
+            .arg(t.elapsed())
+            .arg(result.latestTag, result.pageUrl.toString())
+            .arg(result.error.isEmpty() ? QString() : QStringLiteral(", error: ") + result.error));
+    return result.status == UpdateCheck::Result::Status::Failed ? 3 : 0;
+}
+
 static int runUiSelfTest()
 {
     int failed = 0;
@@ -1785,6 +2989,90 @@ static int runUiSelfTest()
     check("clamp: host smaller -> 0,0",
           (InkToolbar::clampToolbarPos(QPoint(50, 50), QSize(800, 600), QSize(900, 700))
                == QPoint(0, 0)) ? 1 : 0, 1);
+
+    // 检查更新 decides from the /releases/latest redirect alone (offline here).
+    using UpdateCheck::Checker;
+    using UpdateStatus = UpdateCheck::Result::Status;
+    const QString tagPage = QStringLiteral("https://github.com/zhuzhi-09/pdfboard/releases/tag/v1.14.1");
+    check("update: tag from Location",
+          UpdateCheck::tagFromLocation(tagPage) == QStringLiteral("v1.14.1") ? 1 : 0, 1);
+    check("update: no tag -> empty",
+          UpdateCheck::tagFromLocation(QStringLiteral("https://github.com/zhuzhi-09/pdfboard/releases"))
+              .isEmpty() ? 1 : 0, 1);
+    check("update: 1.14.10 > 1.14.9",
+          UpdateCheck::compareVersions(QStringLiteral("v1.14.10"), QStringLiteral("1.14.9")) > 0 ? 1 : 0, 1);
+    check("update: exp suffix ignored",
+          UpdateCheck::compareVersions(QStringLiteral("1.14.2-exp"), QStringLiteral("v1.14.2")) == 0 ? 1 : 0, 1);
+    check("update: newer release found",
+          Checker::interpret(302, tagPage, QStringLiteral("1.14.0")).status == UpdateStatus::NewerFound ? 1 : 0, 1);
+    check("update: same version up to date",
+          Checker::interpret(302, tagPage, QStringLiteral("1.14.1")).status == UpdateStatus::UpToDate ? 1 : 0, 1);
+    check("update: exp build ahead is up to date",
+          Checker::interpret(302, tagPage, QStringLiteral("1.14.2")).status == UpdateStatus::UpToDate ? 1 : 0, 1);
+    check("update: relative Location resolved",
+          Checker::interpret(302, QStringLiteral("/zhuzhi-09/pdfboard/releases/tag/v2.0.0"),
+                             QStringLiteral("1.14.2")).pageUrl
+                  == QUrl(QStringLiteral("https://github.com/zhuzhi-09/pdfboard/releases/tag/v2.0.0")) ? 1 : 0, 1);
+    check("update: 200 is not an answer",
+          Checker::interpret(200, QString(), QStringLiteral("1.14.2")).status == UpdateStatus::Failed ? 1 : 0, 1);
+    check("update: no release yet fails",
+          Checker::interpret(302, QStringLiteral("https://github.com/zhuzhi-09/pdfboard/releases"),
+                             QStringLiteral("1.14.2")).status == UpdateStatus::Failed ? 1 : 0, 1);
+
+    // Settings page structure: every category builds a page, the rail folds on
+    // a narrow page and unfolds on a wide one.
+    {
+        SettingsPage page;
+        page.setAttribute(Qt::WA_DontShowOnScreen, true);
+        page.resize(1400, 900);
+        page.show();
+        QCoreApplication::processEvents();
+        check("settings: six categories", page.testCategoryCount(), 6);
+        int cards = 0;
+        for (int c = 0; c < page.testCategoryCount(); ++c) {
+            page.testShowCategory(c);
+            QCoreApplication::processEvents();
+            QScrollArea *scroll = page.testCurrentScroll();
+            const int n = scroll ? scroll->findChildren<QFrame *>(QStringLiteral("settingsCard")).size() : 0;
+            if (n > 0)
+                ++cards;
+            else
+                out(QStringLiteral("[selftest] settings: %1 has no cards").arg(page.testCategoryName(c)));
+        }
+        check("settings: every page has cards", cards, page.testCategoryCount());
+        check("settings: wide rail unfolded", page.testRailCompact() ? 1 : 0, 0);
+        page.resize(700, 900);
+        QCoreApplication::processEvents();
+        check("settings: narrow rail folded", page.testRailCompact() ? 1 : 0, 1);
+
+        // Category switch: an MD3 fade through, governed by 减少动效.
+        page.resize(1400, 900);
+        QCoreApplication::processEvents();
+        const bool savedReduced = Theme::Motion::reduced();
+        Theme::Motion::setReduced(true);
+        page.testShowCategory(2);
+        check("settings: reduced motion switches instantly",
+              page.testTransitionRunning() ? 1 : 0, 0);
+        Theme::Motion::setReduced(false);
+        page.testShowCategory(3);
+        check("settings: switch animates", page.testTransitionRunning() ? 1 : 0, 1);
+        {
+            QElapsedTimer t;
+            t.start();
+            while (page.testTransitionRunning() && t.elapsed() < 2000)
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+        }
+        check("settings: transition lands", page.testTransitionRunning() ? 1 : 0, 0);
+        if (QDir(QStringLiteral("D:/dev/tmp")).exists()) {
+            page.testShowCategory(1);
+            for (const qreal t : { 0.15, 0.55 }) {
+                page.testSetTransitionProgress(t);
+                page.grab().save(QStringLiteral("D:/dev/tmp/settings-transition-%1.png")
+                                     .arg(int(t * 100)));
+            }
+        }
+        Theme::Motion::setReduced(savedReduced);
+    }
 
     failed += runTabStripSelfTest();
 
@@ -2177,95 +3465,6 @@ static int runThemeSelfTest()
         : !raw.contains(QStringLiteral("ThemeMode"));
     check("stored preference restored", restored ? 1 : 0, 1);
     check("theme mode restored", Theme::mode() == savedMode ? 1 : 0, 1);
-
-    out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")
-                    : QStringLiteral("[selftest] %1 CHECK(S) FAILED").arg(failed));
-    return failed == 0 ? 0 : 3;
-}
-
-// Headless GPU self test:  pdfboard.exe --selftest-gpu
-// Locks the startup rules of the experimental 硬件加速 path: the stored
-// preference defaults to OFF and round-trips, the driver probe is stable within
-// a session, and a canvas installs the OpenGL viewport only when the setting is
-// ON *and* a real driver exists. With a software rasteriser the request is
-// refused and the plain raster viewport stays, so a page can never go black.
-// The registry value is snapshotted and restored exactly as found.
-static int runGpuSelfTest()
-{
-    int failed = 0;
-    auto check = [&failed](const char *what, int got, int want) {
-        const bool ok = (got == want);
-        if (!ok)
-            ++failed;
-        out(QStringLiteral("[selftest] %1: got %2 want %3 -> %4")
-                .arg(QString::fromLatin1(what), -28)
-                .arg(got).arg(want)
-                .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
-    };
-
-    QSettings raw(QStringLiteral("HKEY_CURRENT_USER\\Software\\PDFBoard"),
-                  QSettings::NativeFormat);
-    const QVariant savedValue = raw.value(QStringLiteral("GpuAcceleration"));
-
-    raw.remove(QStringLiteral("GpuAcceleration"));
-    raw.sync();
-    check("gpu: default is off", AppSettings::gpuAcceleration() ? 1 : 0, 0);
-
-    check("gpu: set on succeeds", AppSettings::setGpuAcceleration(true, nullptr) ? 1 : 0, 1);
-    check("gpu: stored on reads back", AppSettings::gpuAcceleration() ? 1 : 0, 1);
-    check("gpu: set off succeeds", AppSettings::setGpuAcceleration(false, nullptr) ? 1 : 0, 1);
-
-    // The driver probe is cached for the session: two calls must agree. The
-    // value itself is machine-dependent (a VM without a GPU answers 0), so it
-    // is reported, not asserted.
-    const bool gl1 = PdfCanvas::testGpuRenderAvailable();
-    const bool gl2 = PdfCanvas::testGpuRenderAvailable();
-    check("gpu: probe is stable", gl1 == gl2 ? 1 : 0, 1);
-    out(QStringLiteral("[selftest] gpu: OpenGL renderer available = %1").arg(gl1 ? 1 : 0));
-
-    // OFF: a fresh canvas must stay on the CPU raster viewport.
-    {
-        PdfCanvas c;
-        c.setAttribute(Qt::WA_DontShowOnScreen, true);
-        c.resize(1000, 800);
-        c.show();
-        check("gpu: off keeps the raster viewport", c.gpuAccelerated() ? 1 : 0, 0);
-        check("gpu: off installs no GL widget", c.testViewportIsGl() ? 1 : 0, 0);
-        const QPixmap fz = c.freezeFramePixmap();
-        const QSize fzLogical(fz.isNull() ? 0 : qRound(fz.width() / fz.devicePixelRatio()),
-                              fz.isNull() ? 0 : qRound(fz.height() / fz.devicePixelRatio()));
-        check("gpu: freeze frame is full size",
-              (fzLogical == c.size()) ? 1 : 0, 1);
-    }
-
-    // ON: the canvas follows the probe. With a real driver the GL surface is
-    // installed; with only a software rasteriser the request is refused and the
-    // plain viewport stays (no black page) - both sides of the invariant.
-    AppSettings::setGpuAcceleration(true, nullptr);
-    {
-        PdfCanvas c2;
-        c2.setAttribute(Qt::WA_DontShowOnScreen, true);
-        c2.resize(1000, 800);
-        c2.show();
-        check("gpu: on follows the probe", c2.gpuAccelerated() ? 1 : 0, gl1 ? 1 : 0);
-        check("gpu: viewport matches the flag",
-              c2.testViewportIsGl() ? 1 : 0, c2.gpuAccelerated() ? 1 : 0);
-        const QPixmap fz = c2.freezeFramePixmap();
-        const QSize fzLogical(fz.isNull() ? 0 : qRound(fz.width() / fz.devicePixelRatio()),
-                              fz.isNull() ? 0 : qRound(fz.height() / fz.devicePixelRatio()));
-        check("gpu: gpu freeze frame is full size",
-              (fzLogical == c2.size()) ? 1 : 0, 1);
-    }
-
-    if (savedValue.isValid())
-        raw.setValue(QStringLiteral("GpuAcceleration"), savedValue);
-    else
-        raw.remove(QStringLiteral("GpuAcceleration"));
-    raw.sync();
-    const bool restored = savedValue.isValid()
-        ? (raw.value(QStringLiteral("GpuAcceleration")) == savedValue)
-        : !raw.contains(QStringLiteral("GpuAcceleration"));
-    check("gpu: stored preference restored", restored ? 1 : 0, 1);
 
     out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")
                     : QStringLiteral("[selftest] %1 CHECK(S) FAILED").arg(failed));
@@ -3436,6 +4635,63 @@ static int runImageSelfTest()
                       int(rr.mode == PdfCanvas::TouchClass::Writing), 1);
             }
 
+            // 接触面积规则（纯触摸）：手掌/手背比手指大得多。最小接触是“手指
+            // 基准”，所以不写死 DPI/单位；手掌单独出现才擦，手掌 + 手指时手指照写。
+            {
+                using T = PdfCanvas::TouchClass;
+                PdfCanvas::TouchClassState s;
+                PdfCanvas::TouchClassResult sizeR =
+                    PdfCanvas::classifyTouch({QPointF(400, 300)}, {26.0}, s, true);
+                check("size: a single finger writes",
+                      int(sizeR.mode == T::Writing && sizeR.hasWritePos), 1);
+                // A single contact is NEVER a palm by size: a felt pen and a finger are
+                // the same signal, and a harder press must not turn ink into an eraser.
+                sizeR = PdfCanvas::classifyTouch({QPointF(320, 420)}, {200.0}, s, true);
+                check("size: a single contact is never a palm",
+                      int(sizeR.mode == T::Writing && sizeR.hasWritePos), 1);
+                // A palm is reported as several contacts (or a multi-point cluster).
+                sizeR = PdfCanvas::classifyTouch(
+                    {QPointF(300, 400), QPointF(370, 430)}, {120.0, 118.0}, s, true);
+                check("size: a palm-only frame waits one frame",
+                      int(sizeR.mode == T::Writing && !sizeR.hasWritePos), 1);
+                sizeR = PdfCanvas::classifyTouch(
+                    {QPointF(300, 400), QPointF(370, 430)}, {120.0, 118.0}, s, true);
+                check("size: a palm enters the eraser", int(sizeR.mode == T::PalmEraser), 1);
+                check("size: the radius follows the contact area",
+                      int(sizeR.radiusPx >= 60.0 && sizeR.radiusPx <= 132.0), 1);
+
+                PdfCanvas::TouchClassState s2;
+                PdfCanvas::classifyTouch({QPointF(400, 300)}, {26.0}, s2, true);
+                sizeR = PdfCanvas::classifyTouch({QPointF(300, 400), QPointF(620, 520)},
+                                                 {120.0, 28.0}, s2, true);
+                check("size: palm + finger writes at the finger",
+                      int(sizeR.mode == T::Writing && sizeR.hasWritePos), 1);
+                check("size: the write point is the finger",
+                      int(QLineF(sizeR.writePos, QPointF(620, 520)).length() < 0.01), 1);
+
+                PdfCanvas::TouchClassState s3;
+                sizeR = PdfCanvas::classifyTouch({QPointF(300, 300), QPointF(700, 300)},
+                                                 {26.0, 26.0}, s3, true);
+                check("size: two finger contacts stay a pinch",
+                      int(sizeR.mode == T::Pinch), 1);
+
+                // 面板不上报接触面积（全 0）：退回点数/聚簇规则，行为与以前一致。
+                PdfCanvas::TouchClassState s4;
+                sizeR = PdfCanvas::classifyTouch(palmTight,
+                                                 QVector<qreal>(palmTight.size(), 0.0), s4, true);
+                check("size: unknown sizes fall back to the old rule",
+                      int(sizeR.mode == T::Writing && !sizeR.hasWritePos), 1);
+
+                PdfCanvas::TouchClassState s5;
+                PdfCanvas::classifyTouch({QPointF(400, 300)}, {26.0}, s5, true);
+                PdfCanvas::classifyTouch({QPointF(300, 400), QPointF(370, 430)},
+                                         {120.0, 118.0}, s5, false);
+                sizeR = PdfCanvas::classifyTouch({QPointF(300, 400), QPointF(370, 430)},
+                                                 {120.0, 118.0}, s5, false);
+                check("size: off, a palm neither erases nor draws",
+                      int(sizeR.mode == T::Writing && !sizeR.hasWritePos), 1);
+            }
+
             // 开关：关掉后同一簇不再判成掌擦；打开时照旧判成掌擦。
             // 两条一起才算证明开关真的管用（只测一条的话，写死返回值也能过）。
             {
@@ -3560,7 +4816,7 @@ static int runImageSelfTest()
                 QString pe;
                 check("palm canvas: opens the page", int(palm.openPdf(pdfPath, &pe)), 1);
                 palm.setTool(PdfCanvas::InkTool::Pen);
-                palm.setPalmEraserEnabled(true);   // 这块测掌擦本身：显式打开，与出厂默认（关）无关
+                palm.setPalmEraserEnabled(true);   // 这块测掌擦本身：显式打开，不依赖出厂默认
 
                 // 在页面上找一个视口位置，并在它上面画一条横线。
                 const QSize vp = palm.testViewportSize();
@@ -4215,7 +5471,13 @@ int main(int argc, char **argv)
                           .arg(scr->geometry().height())
                           .arg(scr->devicePixelRatio()));
     const int benchIdx = args.indexOf(QStringLiteral("--bench"));
+    const int paintBenchIdx = args.indexOf(QStringLiteral("--bench-paint"));
+    const int probeIdx = args.indexOf(QStringLiteral("--probe-touch"));
     const int stIdx = args.indexOf(QStringLiteral("--selftest-ink"));
+    const int tileIdx = args.indexOf(QStringLiteral("--selftest-tileclip"));
+    const int scrollIdx = args.indexOf(QStringLiteral("--selftest-scroll"));
+    const int updateIdx = args.indexOf(QStringLiteral("--selftest-update"));
+    const int popupIdx = args.indexOf(QStringLiteral("--selftest-popup"));
     const int logIdx = args.indexOf(QStringLiteral("--selftest-log"));
     const int uiIdx = args.indexOf(QStringLiteral("--selftest-ui"));
     const int dialogIdx = args.indexOf(QStringLiteral("--selftest-dialog"));
@@ -4225,14 +5487,19 @@ int main(int argc, char **argv)
     const int imageIdx = args.indexOf(QStringLiteral("--selftest-image"));
     const int smokeIdx = args.indexOf(QStringLiteral("--selftest-smoke"));
     const int crashIdx = args.indexOf(QStringLiteral("--selftest-crash"));
-    const int gpuIdx = args.indexOf(QStringLiteral("--selftest-gpu"));
 
     // The shipping build is a GUI executable (no console window when the user
     // double-clicks it). The console-based modes still need their output, so
     // attach to the launching terminal - but only when stdout was NOT already
     // redirected, otherwise we would clobber the caller's capture.
     if ((benchIdx >= 0 && benchIdx + 1 < args.size())
+        || (paintBenchIdx >= 0 && paintBenchIdx + 1 < args.size())
+        || probeIdx >= 0
         || (stIdx >= 0 && stIdx + 1 < args.size())
+        || tileIdx >= 0
+        || scrollIdx >= 0
+        || updateIdx >= 0
+        || popupIdx >= 0
         || logIdx >= 0
         || uiIdx >= 0
         || dialogIdx >= 0
@@ -4240,16 +5507,37 @@ int main(int argc, char **argv)
         || homeIdx >= 0
         || docxIdx >= 0
         || imageIdx >= 0
-        || gpuIdx >= 0
         || (smokeIdx >= 0 && smokeIdx + 1 < args.size())) {
         attachConsoleForCli();
     }
 
+    if (probeIdx >= 0)
+        return runTouchProbe();
+
     if (benchIdx >= 0 && benchIdx + 1 < args.size())
         return runBench(args.at(benchIdx + 1));
 
+    if (paintBenchIdx >= 0 && paintBenchIdx + 1 < args.size())
+        return runPaintBench(args.at(paintBenchIdx + 1));
+
     if (stIdx >= 0 && stIdx + 1 < args.size())
         return runInkSelfTest(args.at(stIdx + 1));
+
+    if (tileIdx >= 0)
+        return runTileClipSelfTest(tileIdx + 1 < args.size() ? args.at(tileIdx + 1)
+                                                             : QDir::tempPath());
+
+    if (popupIdx >= 0)
+        return runPopupSelfTest(popupIdx + 1 < args.size() ? args.at(popupIdx + 1)
+                                                           : QDir::tempPath());
+
+    if (updateIdx >= 0)
+        return runUpdateSelfTest(updateIdx + 1 < args.size() ? args.at(updateIdx + 1)
+                                                             : QStringLiteral("1.0.0"));
+
+    if (scrollIdx >= 0)
+        return runScrollSelfTest(scrollIdx + 1 < args.size() ? args.at(scrollIdx + 1)
+                                                             : QDir::tempPath());
 
     if (logIdx >= 0)
         return runLogSelfTest();
@@ -4262,9 +5550,6 @@ int main(int argc, char **argv)
 
     if (themeIdx >= 0)
         return runThemeSelfTest();
-
-    if (gpuIdx >= 0)
-        return runGpuSelfTest();
 
     if (homeIdx >= 0)
         return runHomeSelfTest();

@@ -74,15 +74,16 @@
 - **Material Design 3 设计语言**：界面按 MD3 组织，颜色角色 / 状态层 / 形状 / 动效令牌集中在 `Theme.h`；**PDF 纸面始终保持白色**这条不变（投影可读性优先）。设置里可选「减少动效」
 - 页面缩略图网格跳页（点击页码）
 - 笔调色板浮层
-- **WinUI 风格全屏设置页**（作为标签页，含「关于」与 MIT 许可证）
+- **全屏设置页**（作为标签页）：左侧 MD3 导航抽屉分「通用 / 外观 / Word 文档 / 保存与文件 / 调试 / 关于」，窗口窄时收成导航栏（Navigation rail）；每类一页，MD3 分段列表
 - 自绘矢量图标，随 DPI 缩放，无图片资源依赖
-- **不联网**：软件自身不检查更新、不下载、不访问任何服务器；设置 →「更新」只把下载页交给系统浏览器打开
+- **默认不联网**：只有在「设置 → 关于 → 检查更新」**点击时**才直连 github.com（不走代理，不用 API，读一次 `/releases/latest` 的跳转，不上传任何数据）；发现新版本后由系统浏览器打开发布页下载，程序自己不下载
 
 ### 工程
-- **内存有界**：整页位图 LRU 缓存，上限 128 MB；单页位图超 100 MB 自动降采样；多文档切换时释放非活动文档的位图
-- **确定性自测**：`--selftest-ink` 覆盖墨迹模型 / 局部擦除 / 撤销重做 / 缩放锚点 / 笔迹缩放等，共 30+ 项断言
-- **渲染基准**：`--bench <pdf>` 输出逐页渲染耗时与进程内存
-- **硬件加速（实验性）**：设置里可开启，用 GPU 渲染页面；**仅在显卡驱动可用时生效**（软件 OpenGL 会被忽略），**重新打开文档后生效**；默认关闭
+- **页面瓦片渲染**：512×512 **设备像素**瓦片、按当前缩放 **1:1** 渲染（4K 不再把整页压到 48 MB），只渲染可见块；跨页滚动只补新露出的一条
+- **页块预取**：可见块始终同步 1:1 渲染（页面任何时刻都清晰），周边 ±2 块由 `QPdfPageRenderer` 后台预取；打开/缩放仍有一次 ~30–80ms 首帧
+- **内存有界**：瓦片 LRU，全局 160 MB、单页 96 MB（高倍率平移只保留当前可见范围）；多文档切换时释放非活动文档的位图
+- **确定性自测**：`--selftest-ink` 覆盖墨迹模型 / 局部擦除 / 撤销重做 / 缩放锚点 / 笔迹缩放等，共 30+ 项断言；`--selftest-tileclip` 用合成网格 PDF 校验瓦片裁剪 / 拼合 / 画布 / 短视口预取端到端
+- **渲染基准**：`--bench <pdf>` 输出逐页渲染耗时与进程内存；`--bench-paint <pdf>` 输出局部重绘、整页、滚动窄条与冷启动耗时
 - 构建零警告（MSVC `/W4`）
 
 ---
@@ -159,7 +160,7 @@ PDFBoard-1.12.4-setup.exe /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /TASKS=""
 - 发布前会先跑 `--selftest-log` 自测作为门禁
 - **发布说明（Release body）就是标签注解（tag message）本身**：把这一版的更新日志写进**注解标签**（`git tag -a`）即可，不用改 workflow 里的文案
 - 标签注解为空（轻量标签）时，自动回退到 GitHub 自动生成的变更列表
-- 应用**不再读取 Release**（无联网）：更新日志只供人在 GitHub 发布页阅读，写成**易读的中文散文或简单的 `- ` 列表**即可，不要写 JSON / HTML
+- 应用只在用户点「检查更新」时读取 **最新 Release 的 tag**（`vX.Y.Z`，用于比较版本），**不读 Release 内容**：更新日志只供人在 GitHub 发布页阅读，写成**易读的中文散文或简单的 `- ` 列表**即可，不要写 JSON / HTML
 
 发版流程：
 
@@ -283,11 +284,14 @@ build\pdfboard.exe --selftest-dialog
 # 图片导入 + PNG 导出的端到端断言（自造图片、1:1 像素回环，全离线）
 build\pdfboard.exe --selftest-image
 
-# 硬件加速开关与驱动探测的确定性断言（不改动你的设置）
-build\pdfboard.exe --selftest-gpu
+# 瓦片裁剪 / 拼合 / 画布 / 短视口预取端到端断言（自造网格 PDF，全离线）
+build\pdfboard.exe --selftest-tileclip
 
 # 渲染耗时与内存基准
 build\pdfboard.exe --bench path\to\test.pdf
+
+# 绘制热路径基准：局部重绘 / 整页 / 滚动窄条 / 冷启动
+build\pdfboard.exe --bench-paint path\to\test.pdf
 ```
 
 ## 快捷键
@@ -330,7 +334,7 @@ xxx.dpz
 
 ```
 src/
-  main.cpp            入口；--bench / --selftest-ink
+  main.cpp            入口；--bench / --bench-paint / --selftest-ink / --selftest-tileclip
   MainWindow.*        窗口、多文档标签、保存/另存为、拖放、状态栏
   PdfCanvas.*         连续滚动视图：渲染、缓存、墨迹模型、触控/缩放
   InkToolbar.*        底部工具岛 + 笔调色板浮层

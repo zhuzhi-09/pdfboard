@@ -399,6 +399,232 @@ void glyphBadge(QPainter &p, const Grid &g, const QColor &badge)
     p.setBrush(Qt::NoBrush);
 }
 
+// --- settings page glyphs ----------------------------------------------------
+// Same 24-unit grid and the same 3.5 .. 20.5 outer band as the gear/house, so
+// the navigation rail and the setting cards read as one icon family.
+
+void fillDot(QPainter &p, const Grid &g, const QColor &c, qreal x, qreal y, qreal r)
+{
+    p.save();
+    p.setPen(Qt::NoPen);
+    p.setBrush(c);
+    p.drawEllipse(g.p(x, y), r * g.s, r * g.s);
+    p.restore();
+}
+
+// Breadcrumb separator.
+void glyphChevronRight(QPainter &p, const Grid &g, const QColor &c, qreal w)
+{
+    setStroke(p, c, w);
+    QPainterPath chevron;
+    chevron.moveTo(g.p(9.0, 5.6));
+    chevron.lineTo(g.p(15.4, 12.0));
+    chevron.lineTo(g.p(9.0, 18.4));
+    p.drawPath(chevron);
+}
+
+// Painter's palette: a disc with a thumb hole and three paint dots - 外观 / 主题色.
+void glyphPalette(QPainter &p, const Grid &g, const QColor &c, qreal w)
+{
+    setStroke(p, c, w);
+    QPainterPath disc;
+    disc.addEllipse(g.p(12.0, 12.0), 8.6 * g.s, 8.6 * g.s);
+    QPainterPath hole;
+    hole.addEllipse(g.p(15.6, 15.4), 2.1 * g.s, 2.1 * g.s);
+    p.drawPath(disc);
+    p.drawPath(hole);
+    fillDot(p, g, c, 8.0, 10.6, 1.4);
+    fillDot(p, g, c, 11.4, 7.4, 1.4);
+    fillDot(p, g, c, 15.6, 8.6, 1.4);
+}
+
+// Circled "i" - 关于.
+void glyphInfo(QPainter &p, const Grid &g, const QColor &c, qreal w)
+{
+    setStroke(p, c, w);
+    p.drawEllipse(g.p(12.0, 12.0), 8.6 * g.s, 8.6 * g.s);
+    p.drawLine(g.p(12.0, 11.0), g.p(12.0, 16.6));
+    fillDot(p, g, c, 12.0, 7.7, 1.25);
+}
+
+// Power symbol - 开机自动启动.
+void glyphPower(QPainter &p, const Grid &g, const QColor &c, qreal w)
+{
+    setStroke(p, c, w);
+    const QRectF ring = g.r(4.2, 5.0, 15.6, 15.6);
+    // Open at the top: 300 degrees starting just right of 12 o'clock.
+    p.drawArc(ring, (90 - 35) * 16, -(360 - 70) * 16);
+    p.drawLine(g.p(12.0, 3.4), g.p(12.0, 11.6));
+}
+
+// Open hand - 手掌当橡皮.
+void glyphHand(QPainter &p, const Grid &g, const QColor &c, qreal w)
+{
+    setStroke(p, c, w);
+    p.drawLine(g.p(8.2, 12.2), g.p(8.2, 6.6));
+    p.drawLine(g.p(11.2, 11.0), g.p(11.2, 4.0));
+    p.drawLine(g.p(14.2, 11.0), g.p(14.2, 4.8));
+    p.drawLine(g.p(17.2, 12.4), g.p(17.2, 7.4));
+    QPainterPath palm;
+    palm.moveTo(g.p(8.2, 12.2));
+    palm.lineTo(g.p(8.2, 14.6));
+    palm.lineTo(g.p(5.6, 12.4));     // thumb
+    palm.cubicTo(g.p(4.4, 11.4), g.p(3.2, 12.8), g.p(4.2, 14.2));
+    palm.cubicTo(g.p(6.4, 17.6), g.p(8.4, 20.6), g.p(12.6, 20.6));
+    palm.cubicTo(g.p(16.2, 20.6), g.p(17.2, 18.0), g.p(17.2, 15.4));
+    palm.lineTo(g.p(17.2, 12.4));
+    p.drawPath(palm);
+}
+
+// Four-point sparkle - 减少动效.
+void glyphSparkle(QPainter &p, const Grid &g, const QColor &c, qreal w)
+{
+    setStroke(p, c, w);
+    QPainterPath star;
+    star.moveTo(g.p(12.0, 3.4));
+    star.quadTo(g.p(12.6, 11.4), g.p(20.6, 12.0));
+    star.quadTo(g.p(12.6, 12.6), g.p(12.0, 20.6));
+    star.quadTo(g.p(11.4, 12.6), g.p(3.4, 12.0));
+    star.quadTo(g.p(11.4, 11.4), g.p(12.0, 3.4));
+    p.drawPath(star);
+}
+
+// Two chain links - 默认打开方式 / 项目主页.
+void glyphLink(QPainter &p, const Grid &g, const QColor &c, qreal w)
+{
+    setStroke(p, c, w);
+    p.save();
+    p.translate(g.p(12.0, 12.0));
+    p.rotate(-45.0);
+    const qreal s = g.s;
+    p.drawRoundedRect(QRectF(-9.6 * s, -3.4 * s, 10.4 * s, 6.8 * s), 3.4 * s, 3.4 * s);
+    p.drawRoundedRect(QRectF(-0.8 * s, -3.4 * s, 10.4 * s, 6.8 * s), 3.4 * s, 3.4 * s);
+    p.restore();
+}
+
+// Arrow into a tray - 检查更新.
+void glyphDownload(QPainter &p, const Grid &g, const QColor &c, qreal w)
+{
+    setStroke(p, c, w);
+    p.drawLine(g.p(12.0, 3.6), g.p(12.0, 14.8));
+    QPainterPath head;
+    head.moveTo(g.p(7.4, 10.4));
+    head.lineTo(g.p(12.0, 15.0));
+    head.lineTo(g.p(16.6, 10.4));
+    p.drawPath(head);
+    QPainterPath tray;
+    tray.moveTo(g.p(4.2, 15.6));
+    tray.lineTo(g.p(4.2, 20.2));
+    tray.lineTo(g.p(19.8, 20.2));
+    tray.lineTo(g.p(19.8, 15.6));
+    p.drawPath(tray);
+}
+
+// Half-filled disc - 外观（浅色 / 深色）.
+void glyphContrast(QPainter &p, const Grid &g, const QColor &c, qreal w)
+{
+    setStroke(p, c, w);
+    const QPointF centre = g.p(12.0, 12.0);
+    const qreal r = 8.6 * g.s;
+    p.drawEllipse(centre, r, r);
+    QPainterPath half;
+    half.moveTo(centre.x(), centre.y() - r);
+    half.arcTo(QRectF(centre.x() - r, centre.y() - r, 2 * r, 2 * r), 90.0, -180.0);
+    half.closeSubpath();
+    p.save();
+    p.setPen(Qt::NoPen);
+    p.setBrush(c);
+    p.drawPath(half);
+    p.restore();
+}
+
+// Bug - 调试 / 诊断日志.
+void glyphBug(QPainter &p, const Grid &g, const QColor &c, qreal w)
+{
+    setStroke(p, c, w);
+    p.drawRoundedRect(g.r(7.4, 8.0, 9.2, 12.6), 4.6 * g.s, 4.6 * g.s);
+    p.drawLine(g.p(12.0, 11.6), g.p(12.0, 20.4));
+    QPainterPath head;
+    head.moveTo(g.p(9.0, 8.4));
+    head.cubicTo(g.p(9.0, 4.6), g.p(15.0, 4.6), g.p(15.0, 8.4));
+    p.drawPath(head);
+    p.drawLine(g.p(7.4, 11.4), g.p(4.0, 9.6));
+    p.drawLine(g.p(7.4, 14.6), g.p(3.6, 14.6));
+    p.drawLine(g.p(7.6, 17.8), g.p(4.2, 19.6));
+    p.drawLine(g.p(16.6, 11.4), g.p(20.0, 9.6));
+    p.drawLine(g.p(16.6, 14.6), g.p(20.4, 14.6));
+    p.drawLine(g.p(16.4, 17.8), g.p(19.8, 19.6));
+}
+
+// Isometric box - LibreOffice 附加包.
+void glyphPackage(QPainter &p, const Grid &g, const QColor &c, qreal w)
+{
+    setStroke(p, c, w);
+    QPainterPath box;
+    box.moveTo(g.p(12.0, 3.4));
+    box.lineTo(g.p(19.8, 7.6));
+    box.lineTo(g.p(19.8, 16.4));
+    box.lineTo(g.p(12.0, 20.6));
+    box.lineTo(g.p(4.2, 16.4));
+    box.lineTo(g.p(4.2, 7.6));
+    box.closeSubpath();
+    p.drawPath(box);
+    QPainterPath inner;
+    inner.moveTo(g.p(4.2, 7.6));
+    inner.lineTo(g.p(12.0, 11.8));
+    inner.lineTo(g.p(19.8, 7.6));
+    inner.moveTo(g.p(12.0, 11.8));
+    inner.lineTo(g.p(12.0, 20.6));
+    p.drawPath(inner);
+}
+
+// Bell with a slash - 关闭 Word 的提醒.
+void glyphBellOff(QPainter &p, const Grid &g, const QColor &c, qreal w)
+{
+    setStroke(p, c, w);
+    QPainterPath bell;
+    bell.moveTo(g.p(4.8, 17.0));
+    bell.lineTo(g.p(19.2, 17.0));
+    bell.moveTo(g.p(6.6, 17.0));
+    bell.lineTo(g.p(6.6, 11.0));
+    bell.cubicTo(g.p(6.6, 7.4), g.p(9.0, 5.0), g.p(12.0, 5.0));
+    bell.cubicTo(g.p(15.0, 5.0), g.p(17.4, 7.4), g.p(17.4, 11.0));
+    bell.lineTo(g.p(17.4, 17.0));
+    p.drawPath(bell);
+    p.drawLine(g.p(10.4, 20.0), g.p(13.6, 20.0));
+    p.drawLine(g.p(4.0, 4.0), g.p(20.0, 20.0));
+}
+
+// A pill with three buttons - 工具栏风格.
+void glyphToolbar(QPainter &p, const Grid &g, const QColor &c, qreal w)
+{
+    setStroke(p, c, w);
+    p.drawRoundedRect(g.r(3.0, 8.0, 18.0, 8.0), 4.0 * g.s, 4.0 * g.s);
+    fillDot(p, g, c, 8.0, 12.0, 1.3);
+    fillDot(p, g, c, 12.0, 12.0, 1.3);
+    fillDot(p, g, c, 16.0, 12.0, 1.3);
+}
+
+// Two arrows chasing each other - 转换引擎.
+void glyphConvert(QPainter &p, const Grid &g, const QColor &c, qreal w)
+{
+    setStroke(p, c, w);
+    QPainterPath top;
+    top.moveTo(g.p(4.4, 9.0));
+    top.lineTo(g.p(19.2, 9.0));
+    top.moveTo(g.p(15.4, 5.2));
+    top.lineTo(g.p(19.2, 9.0));
+    top.lineTo(g.p(15.4, 12.8));
+    QPainterPath bottom;
+    bottom.moveTo(g.p(19.6, 15.0));
+    bottom.lineTo(g.p(4.8, 15.0));
+    bottom.moveTo(g.p(8.6, 11.2));
+    bottom.lineTo(g.p(4.8, 15.0));
+    bottom.lineTo(g.p(8.6, 18.8));
+    p.drawPath(top);
+    p.drawPath(bottom);
+}
+
 }   // namespace
 
 namespace IconPainter {
@@ -479,6 +705,48 @@ void paintGlyph(QPainter &p, Glyph glyph, const QRectF &box,
         break;
     case Glyph::Swash:
         glyphSwash(p, g, color, w);
+        break;
+    case Glyph::ChevronRight:
+        glyphChevronRight(p, g, color, w);
+        break;
+    case Glyph::Palette:
+        glyphPalette(p, g, color, w);
+        break;
+    case Glyph::Info:
+        glyphInfo(p, g, color, w);
+        break;
+    case Glyph::Power:
+        glyphPower(p, g, color, w);
+        break;
+    case Glyph::Hand:
+        glyphHand(p, g, color, w);
+        break;
+    case Glyph::Sparkle:
+        glyphSparkle(p, g, color, w);
+        break;
+    case Glyph::Link:
+        glyphLink(p, g, color, w);
+        break;
+    case Glyph::Download:
+        glyphDownload(p, g, color, w);
+        break;
+    case Glyph::Contrast:
+        glyphContrast(p, g, color, w);
+        break;
+    case Glyph::Bug:
+        glyphBug(p, g, color, w);
+        break;
+    case Glyph::Package:
+        glyphPackage(p, g, color, w);
+        break;
+    case Glyph::BellOff:
+        glyphBellOff(p, g, color, w);
+        break;
+    case Glyph::Toolbar:
+        glyphToolbar(p, g, color, w);
+        break;
+    case Glyph::Convert:
+        glyphConvert(p, g, color, w);
         break;
     }
 

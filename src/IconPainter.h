@@ -35,6 +35,21 @@ enum class Glyph {
     Move,           // four-way arrow: free move
     Document,   // empty state: a page
     Swash,      // empty state: a hand drawn ink stroke
+    // Settings page: navigation rail and setting cards.
+    ChevronRight, // breadcrumb separator
+    Palette,      // 外观 / 主题色
+    Info,         // 关于
+    Power,        // 开机自动启动
+    Hand,         // 手掌当橡皮
+    Sparkle,      // 减少动效
+    Link,         // 默认打开方式 / 项目主页
+    Download,     // 检查更新
+    Contrast,     // 浅色 / 深色
+    Bug,          // 调试
+    Package,      // LibreOffice 附加包
+    BellOff,      // 关闭 Word 提醒
+    Toolbar,      // 工具栏风格
+    Convert,      // 转换引擎
 };
 
 // Colors of the button states the toolbar uses.

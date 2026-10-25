@@ -1870,13 +1870,9 @@ void MainWindow::switchToPage(QWidget *incoming, PdfCanvas *releaseOnLeave, int 
     }
 
     // Freeze the outgoing BEFORE the memory policy drops its rendered bitmaps:
-    // the animation must never play on a blanked canvas.
-    //
-    // A plain page (home / settings) is grabbed; a document page routes through
-    // freezeFramePixmap(), because a GPU canvas (硬件加速) must not be grabbed -
-    // QWidget::grab() cannot capture a QOpenGLWidget's GL content, and the corrupt
-    // frozen frame was the "切页花屏" report. The animation stays on for both kinds;
-    // only the frame source differs.
+    // the animation must never play on a blanked canvas. A document page routes
+    // through freezeFramePixmap() so the canvas paints its own frame; every other
+    // page is grabbed.
     const auto freezePage = [](QWidget *w) -> QPixmap {
         if (auto *c = qobject_cast<PdfCanvas *>(w))
             return c->freezeFramePixmap();

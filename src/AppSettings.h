@@ -109,13 +109,4 @@ bool setThemeStyle(int style, QString *errorOut = nullptr);
 bool reduceMotion();
 bool setReduceMotion(bool on, QString *errorOut = nullptr);
 
-// 硬件加速（实验性）: OFF by default. When ON, a newly opened document paints its
-// pages through a GPU-backed OpenGL viewport instead of the CPU raster engine.
-// The switch is read when a document's canvas is created, so it applies to
-// documents opened afterwards. It only takes effect where a real OpenGL driver
-// exists - a software rasteriser (llvmpipe / GDI Generic) is refused, because it
-// is slower than the CPU path it would replace.
-bool gpuAcceleration();
-bool setGpuAcceleration(bool on, QString *errorOut = nullptr);
-
 }   // namespace AppSettings

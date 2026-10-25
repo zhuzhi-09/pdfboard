@@ -29,7 +29,6 @@ const QString kToolbarStyleValue = QStringLiteral("ToolbarStyle");
 const QString kThemePresetValue = QStringLiteral("ThemePreset");
 const QString kThemeStyleValue  = QStringLiteral("ThemeStyle");
 const QString kReduceMotionValue = QStringLiteral("ReduceMotion");
-const QString kGpuAccelerationValue = QStringLiteral("GpuAcceleration");
 const QString kRecentFilesValue = QStringLiteral("RecentFiles");
 
 // 最近项目 keeps at most this many paths; the oldest entry is dropped first.
@@ -387,8 +386,9 @@ bool AppSettings::setWordNagFixEnabled(bool on, QString *errorOut)
 bool AppSettings::palmEraserEnabled()
 {
     QSettings s(kAppKey, QSettings::NativeFormat);
-    // 默认关：这是实验性功能，而且多指触摸会先被 Windows 自己的手势识别接走，
-    // 我们的分类器收不到完整的多指帧，所以对多数面板不可用。用户显式打开过就保留。
+    // 默认关：这是可选项。毛毡笔尖和手指在面板上是同一种信号，接触面积会随手势
+    // 从 4px 跳到 8px（真机日志），误判一次就会擦掉刚写的字。需要手掌擦除的用户
+    // 在设置里显式打开；分类器另加了「单触点不判手掌 + 序列守护」两道保险。
     return s.value(kPalmEraserValue, false).toBool();
 }
 
@@ -431,29 +431,6 @@ bool AppSettings::setReduceMotion(bool on, QString *errorOut)
     if (s.status() != QSettings::NoError) {
         if (errorOut)
             *errorOut = QStringLiteral("无法写入注册表（减少动效）");
-        return false;
-    }
-    if (errorOut)
-        errorOut->clear();
-    return true;
-}
-
-bool AppSettings::gpuAcceleration()
-{
-    QSettings s(kAppKey, QSettings::NativeFormat);
-    // 默认关：GPU 路径是实验性的，只有在真机验证过的机器上才该打开。
-    return s.value(kGpuAccelerationValue, false).toBool();
-}
-
-bool AppSettings::setGpuAcceleration(bool on, QString *errorOut)
-{
-    QSettings s(kAppKey, QSettings::NativeFormat);
-    s.setValue(kGpuAccelerationValue, on);
-    s.sync();
-
-    if (s.status() != QSettings::NoError) {
-        if (errorOut)
-            *errorOut = QStringLiteral("无法写入注册表（硬件加速）");
         return false;
     }
     if (errorOut)

@@ -80,6 +80,11 @@ public:
     // smaller than the island yields (0, 0) instead of a negative bound.
     static QPoint clampToolbarPos(const QPoint &pos, const QSize &host, const QSize &self);
 
+    // Vertical position for the current host: the bottom dock by default, or
+    // wherever the user dragged it (clamped into the host). reposition() runs on
+    // every scroll / resize, so it must not pull a dragged island back down.
+    int dockY(const QWidget *host) const;
+
     // Re-applies the theme-derived pieces (chip sheet, shadow, icons) plus the
     // pen palette and the page-grid overlay this toolbar owns.
     void applyTheme();
