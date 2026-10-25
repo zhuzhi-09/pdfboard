@@ -1070,6 +1070,13 @@ void PdfCanvas::drawPageRaster(QPainter &p, int page, const QRectF &r)
             p.drawImage(r, pv);
     }
 
+    // Fresh tiles are 1:1 device-pixel images. Smoothing them serves no purpose
+    // and can blend a tile's edge into the paper, leaving a hairline at every
+    // 512 px seam; nearest-neighbour keeps the seams exact. (The stale/pinch
+    // path above is scaled and keeps the normal hint.)
+    if (!stale)
+        p.setRenderHint(QPainter::SmoothPixmapTransform, false);
+
     for (int ty = ty0; ty <= ty1; ++ty) {
         for (int tx = tx0; tx <= tx1; ++tx) {
             const int x0 = tx * kTilePx;

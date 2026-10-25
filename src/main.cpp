@@ -947,7 +947,13 @@ static int runTileClipSelfTest(const QString &outDir)
                            QStringLiteral("%1,%2").arg(x).arg(y));
             }
         }
-        p.setPen(QPen(Qt::red, 4));
+        // A red line disappears over the red/pink cells (and made the tiling look
+        // broken in screenshots); a white halo + black core stays visible on every
+        // cell colour, so a page seam would be obvious.
+        p.setPen(QPen(Qt::white, 7));
+        p.drawLine(page.topLeft(), page.bottomRight());
+        p.drawLine(page.topRight(), page.bottomLeft());
+        p.setPen(QPen(Qt::black, 3));
         p.drawLine(page.topLeft(), page.bottomRight());
         p.drawLine(page.topRight(), page.bottomLeft());
         p.end();
@@ -1112,6 +1118,51 @@ static int runTileClipSelfTest(const QString &outDir)
             checkCell(1, 1);
             checkCell(4, 4);
             checkCell(8, 8);
+            // Whole-page pixel check: the canvas's tiled page must equal a single
+            // QPdfDocument render at the SAME device resolution (1:1 tiles, so this
+            // also runs at fractional DPRs). This catches a misplaced tile / wrong
+            // target even when the three colour samples happen to land right.
+            {
+                const qreal dpr = qMax<qreal>(1.0, canvas.viewport()->devicePixelRatioF());
+                QImage devShot(QSize(qRound(vs.width() * dpr), qRound(vs.height() * dpr)),
+                               QImage::Format_ARGB32);
+                devShot.setDevicePixelRatio(dpr);
+                devShot.fill(Qt::white);
+                {
+                    QPainter p(&devShot);
+                    canvas.paintForViewport(p);
+                }
+                const QSize pageDev = canvas.testRasterDeviceSize(0);
+                const QImage one = doc.render(0, pageDev);
+                QImage oneWhite(pageDev, QImage::Format_ARGB32);
+                oneWhite.fill(Qt::white);
+                {
+                    QPainter wp(&oneWhite);
+                    wp.drawImage(0, 0, one);
+                }
+                const QRect area(qRound(pr.left() * dpr), qRound(pr.top() * dpr),
+                                 pageDev.width(), pageDev.height());
+                const QImage pageShot = devShot.copy(area.intersected(devShot.rect()));
+                double pgMean = 0.0;
+                double pgBad = 0.0;
+                int pgMax = 0;
+                if (!pageShot.isNull() && pageShot.size() == oneWhite.size()) {
+                    stats(pageShot, oneWhite, &pgMean, &pgMax, &pgBad);
+                } else {
+                    pgMean = 999.0;
+                }
+                // Sub-pixel AA on the page edge / grid lines produces a few max-255
+                // pixels (0.2%); a real tile scramble shows up in the mean and the
+                // share of pixels over 24, so those are the criteria that matter.
+                const bool pgOk = pgMean < 1.0 && pgBad < 1.0;
+                out(QStringLiteral("[tileclip] sync page vs one-shot %1x%2 (dpr %3): mean %4, max %5, >24 %6%% -> %7")
+                        .arg(pageDev.width()).arg(pageDev.height())
+                        .arg(dpr, 0, 'f', 1)
+                        .arg(pgMean, 0, 'f', 2).arg(pgMax).arg(pgBad, 0, 'f', 2)
+                        .arg(pgOk ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+                if (!pgOk)
+                    ++failed;
+            }
             if (!canvasOk)
                 ++failed;
             out(QStringLiteral("[tileclip] canvas paint %1x%2, page %3x%4@%5,%6 -> %7")
