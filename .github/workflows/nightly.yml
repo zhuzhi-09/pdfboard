@@ -116,7 +116,7 @@ jobs:
         shell: pwsh
         run: |
           $flags = @("--selftest-log", "--selftest-theme", "--selftest-ui",
-                     "--selftest-home", "--selftest-docx",
+                     "--selftest-dialog", "--selftest-home", "--selftest-docx",
                      "--selftest-gpu", "--selftest-image")
           foreach ($flag in $flags) {
             $p = Start-Process -FilePath "dist/stage/pdfboard.exe" -ArgumentList $flag `

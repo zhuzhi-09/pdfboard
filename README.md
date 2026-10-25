@@ -277,6 +277,9 @@ build\pdfboard.exe --selftest-theme
 # 工具岛 80% 缩放比例、拖动位置钳制、拖动阈值（点击不误判为拖动）
 build\pdfboard.exe --selftest-ui
 
+# 深色模式标准对话框按钮对比度（Windows 10 原生样式回归）
+build\pdfboard.exe --selftest-dialog
+
 # 图片导入 + PNG 导出的端到端断言（自造图片、1:1 像素回环，全离线）
 build\pdfboard.exe --selftest-image
 

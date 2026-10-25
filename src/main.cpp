@@ -27,8 +27,10 @@
 #include <QFileInfo>
 #include <QGuiApplication>
 #include <QOperatingSystemVersion>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QSlider>
+#include <QStyleFactory>
 #include <QStackedWidget>
 #include <QMouseEvent>
 #include <QImageReader>
@@ -1787,6 +1789,111 @@ static int runUiSelfTest()
     failed += runTabStripSelfTest();
 
     captureUiReviewImages();
+
+    out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")
+                    : QStringLiteral("[selftest] %1 CHECK(S) FAILED").arg(failed));
+    return failed == 0 ? 0 : 3;
+}
+
+// Headless dark-dialog regression:  pdfboard.exe --selftest-dialog
+//
+// Windows 10's native windowsvista style paints its own light button background
+// and ignores QPalette::Button; with the dark palette's light ButtonText that
+// made QMessageBox buttons white-on-white. The app therefore switches to Fusion
+// in dark mode. This test renders the real "未保存的批注" button and asserts that
+// the background is dark and the label is light, so the bug cannot come back
+// unnoticed. The windowsvista render is printed for the record; it is not an
+// assertion because some Windows versions do theme that style themselves.
+static int runDialogSelfTest()
+{
+    int failed = 0;
+    auto check = [&failed](const char *what, int got, int want) {
+        const bool ok = (got == want);
+        if (!ok)
+            ++failed;
+        out(QStringLiteral("[selftest] %1: got %2 want %3 -> %4")
+                .arg(QString::fromLatin1(what), -34)
+                .arg(got).arg(want)
+                .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+    };
+
+    const int savedMode = AppSettings::themeMode();
+    const int savedPreset = AppSettings::themePreset();
+    const int savedStyle = AppSettings::themeStyle();
+
+    auto sampleButton = [](const QString &tag) {
+        QMessageBox box;
+        box.setAttribute(Qt::WA_DontShowOnScreen, true);
+        box.setWindowTitle(QStringLiteral("未保存的批注"));
+        box.setText(QStringLiteral("「测试文档」有未保存的批注。"));
+        box.setInformativeText(QStringLiteral("关闭前要保存吗？"));
+        box.addButton(QStringLiteral("保存"), QMessageBox::AcceptRole);
+        box.addButton(QStringLiteral("舍弃"), QMessageBox::DestructiveRole);
+        QPushButton *cancel = box.addButton(QStringLiteral("取消"), QMessageBox::RejectRole);
+        cancel->setMinimumSize(120, 44);
+        box.ensurePolished();
+        box.adjustSize();
+        box.show();
+        QCoreApplication::processEvents();
+        const QImage shot = cancel->grab().toImage();
+        shot.save(QDir(QDir::tempPath()).filePath(
+            QStringLiteral("pdfboard-dialog-%1.png").arg(tag)));
+        return shot;
+    };
+
+    auto measure = [](const QImage &img, double *background, double *label) {
+        qint64 dark = 0;
+        qint64 light = 0;
+        qint64 n = 0;
+        for (int y = 0; y < img.height(); ++y) {
+            const QRgb *line = reinterpret_cast<const QRgb *>(img.constScanLine(y));
+            for (int x = 0; x < img.width(); ++x) {
+                const int lum = (299 * qRed(line[x]) + 587 * qGreen(line[x])
+                                 + 114 * qBlue(line[x])) / 1000;
+                if (lum < 110)
+                    ++dark;
+                if (lum > 180)
+                    ++light;
+                ++n;
+            }
+        }
+        *background = n > 0 ? 100.0 * double(dark) / double(n) : 0.0;
+        *label = n > 0 ? 100.0 * double(light) / double(n) : 0.0;
+    };
+
+    Theme::setMode(Theme::Mode::Dark);
+    applyAppThemeToApplication();
+    check("dialog: dark mode uses Fusion",
+          qApp->style()->objectName().compare(QStringLiteral("Fusion"),
+                                              Qt::CaseInsensitive) == 0 ? 1 : 0, 1);
+
+    const QImage fixedShot = sampleButton(QStringLiteral("fusion"));
+    double bg = 0.0;
+    double fg = 0.0;
+    measure(fixedShot, &bg, &fg);
+    check("dialog: button background is dark", bg >= 30.0 ? 1 : 0, 1);
+    check("dialog: button label is light", fg >= 0.5 ? 1 : 0, 1);
+    out(QStringLiteral("[selftest] dialog: Fusion %1x%2 background %3%% label %4%%")
+            .arg(fixedShot.width()).arg(fixedShot.height())
+            .arg(bg, 0, 'f', 1).arg(fg, 0, 'f', 1));
+
+    // Reference only: the Win10 native style with the same dark palette. On the
+    // classroom machine this used to be the white-on-white button.
+    if (QStyle *vista = QStyleFactory::create(QStringLiteral("windowsvista"))) {
+        const QPalette darkPalette = qApp->palette();
+        qApp->setStyle(vista);
+        qApp->setPalette(darkPalette);
+        const QImage nativeShot = sampleButton(QStringLiteral("windowsvista"));
+        double nb = 0.0;
+        double nf = 0.0;
+        measure(nativeShot, &nb, &nf);
+        out(QStringLiteral("[selftest] dialog: windowsvista %1x%2 background %3%% label %4%%")
+                .arg(nativeShot.width()).arg(nativeShot.height())
+                .arg(nb, 0, 'f', 1).arg(nf, 0, 'f', 1));
+    }
+
+    Theme::applyStoredTheme(savedMode, savedPreset, savedStyle);
+    applyAppThemeToApplication();
 
     out(failed == 0 ? QStringLiteral("[selftest] ALL PASS")
                     : QStringLiteral("[selftest] %1 CHECK(S) FAILED").arg(failed));
@@ -4111,6 +4218,7 @@ int main(int argc, char **argv)
     const int stIdx = args.indexOf(QStringLiteral("--selftest-ink"));
     const int logIdx = args.indexOf(QStringLiteral("--selftest-log"));
     const int uiIdx = args.indexOf(QStringLiteral("--selftest-ui"));
+    const int dialogIdx = args.indexOf(QStringLiteral("--selftest-dialog"));
     const int themeIdx = args.indexOf(QStringLiteral("--selftest-theme"));
     const int homeIdx = args.indexOf(QStringLiteral("--selftest-home"));
     const int docxIdx = args.indexOf(QStringLiteral("--selftest-docx"));
@@ -4127,6 +4235,7 @@ int main(int argc, char **argv)
         || (stIdx >= 0 && stIdx + 1 < args.size())
         || logIdx >= 0
         || uiIdx >= 0
+        || dialogIdx >= 0
         || themeIdx >= 0
         || homeIdx >= 0
         || docxIdx >= 0
@@ -4147,6 +4256,9 @@ int main(int argc, char **argv)
 
     if (uiIdx >= 0)
         return runUiSelfTest();
+
+    if (dialogIdx >= 0)
+        return runDialogSelfTest();
 
     if (themeIdx >= 0)
         return runThemeSelfTest();

@@ -48,6 +48,8 @@
 #include <QScreen>
 #include <QStackedWidget>
 #include <QStatusBar>
+#include <QStyle>
+#include <QStyleFactory>
 #include <QStyleHints>
 #include <QTimer>
 #include <QVariantAnimation>
@@ -95,6 +97,17 @@ QPalette darkAppPalette()
     pal.setColor(QPalette::Highlight, c.accent);
     pal.setColor(QPalette::HighlightedText, c.onAccent);
     pal.setColor(QPalette::PlaceholderText, c.textMuted);
+    pal.setColor(QPalette::BrightText, Qt::white);
+    pal.setColor(QPalette::Link, c.accent);
+    pal.setColor(QPalette::LinkVisited, c.accent);
+    // Fusion's bevels read Light/Midlight/Mid/Dark/Shadow. They came from the
+    // native light palette before; left alone they draw pale 3D edges around a
+    // dark button.
+    pal.setColor(QPalette::Light, c.surface.lighter(135));
+    pal.setColor(QPalette::Midlight, c.surface.lighter(115));
+    pal.setColor(QPalette::Mid, c.divider);
+    pal.setColor(QPalette::Dark, c.surface.darker(135));
+    pal.setColor(QPalette::Shadow, Qt::black);
     const QPalette::ColorRole disabledRoles[] = { QPalette::WindowText, QPalette::Text,
                                                   QPalette::ButtonText };
     for (QPalette::ColorRole role : disabledRoles)
@@ -323,6 +336,43 @@ WordOpenAnswer askWordOpen(QWidget *parent, const QString &fileName)
     return WordOpenAnswer::Cancel;
 }
 }   // namespace
+
+// Applies the application-wide Qt style and palette for the current theme.
+//
+// Dark mode MUST NOT use the native Windows 10 "windowsvista" style: that style
+// paints its own light button/panel background and ignores QPalette::Button, while
+// the dark palette makes ButtonText light. The result is the reported bug - a
+// QMessageBox / QFileDialog with white labels on white buttons. Fusion draws from
+// the palette, so dark mode switches to it; light mode restores the platform style
+// and the exact palette Windows gave us at startup.
+void applyAppThemeToApplication()
+{
+    if (!qApp)
+        return;
+
+    // Captured ONCE, before the first Fusion switch, so switching back to light
+    // restores the real platform style/palette rather than Fusion's.
+    static const QPalette basePalette = baseAppPalette();
+    static const QString baseStyle = [] {
+        const QString native = qApp && qApp->style() ? qApp->style()->objectName() : QString();
+        if (!native.isEmpty())
+            return native;
+#ifdef Q_OS_WIN
+        return QStringLiteral("windowsvista");
+#else
+        return QStringLiteral("Fusion");
+#endif
+    }();
+
+    const bool dark = Theme::resolvedMode() == Theme::Mode::Dark;
+    const QString wanted = dark ? QStringLiteral("Fusion") : baseStyle;
+    if (qApp->style()
+        && wanted.compare(qApp->style()->objectName(), Qt::CaseInsensitive) != 0) {
+        if (QStyle *style = QStyleFactory::create(wanted))
+            qApp->setStyle(style);
+    }
+    qApp->setPalette(dark ? darkAppPalette() : basePalette);
+}
 
 MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent)
@@ -841,13 +891,9 @@ void MainWindow::applyTheme()
     Theme::applyStoredTheme(AppSettings::themeMode(), AppSettings::themePreset(),
                             AppSettings::themeStyle());
 
-    // Native dialogs and message boxes follow the theme too; the light modes
-    // restore the palette Windows gave us at startup.
-    if (qApp) {
-        qApp->setPalette(Theme::resolvedMode() == Theme::Mode::Dark
-                             ? darkAppPalette()
-                             : baseAppPalette());
-    }
+    // Native dialogs and message boxes follow the theme too; dark mode also swaps
+    // the style (see applyAppThemeToApplication) so their buttons are readable.
+    applyAppThemeToApplication();
 
     if (statusBar())
         statusBar()->setStyleSheet(statusSheet());
