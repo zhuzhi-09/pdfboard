@@ -79,10 +79,10 @@
 - **不联网**：软件自身不检查更新、不下载、不访问任何服务器；设置 →「更新」只把下载页交给系统浏览器打开
 
 ### 工程
-- **内存有界**：整页位图 LRU 缓存，上限 128 MB；单页位图超 100 MB 自动降采样；多文档切换时释放非活动文档的位图
-- **确定性自测**：`--selftest-ink` 覆盖墨迹模型 / 局部擦除 / 撤销重做 / 缩放锚点 / 笔迹缩放等，共 30+ 项断言
-- **渲染基准**：`--bench <pdf>` 输出逐页渲染耗时与进程内存
-- **硬件加速（实验性）**：设置里可开启，用 GPU 渲染页面；**仅在显卡驱动可用时生效**（软件 OpenGL 会被忽略），**重新打开文档后生效**；默认关闭
+- **页面瓦片渲染**：512×512 **设备像素**瓦片、按当前缩放 **1:1** 渲染（4K 不再把整页压到 48 MB），只渲染可见块；跨页滚动只补新露出的一条
+- **内存有界**：瓦片 LRU，全局 160 MB、单页 96 MB（高倍率平移只保留当前可见范围）；多文档切换时释放非活动文档的位图
+- **确定性自测**：`--selftest-ink` 覆盖墨迹模型 / 局部擦除 / 撤销重做 / 缩放锚点 / 笔迹缩放等，共 30+ 项断言；`--selftest-tileclip` 用合成网格 PDF 校验瓦片裁剪 / 拼合 / 画布端到端
+- **渲染基准**：`--bench <pdf>` 输出逐页渲染耗时与进程内存；`--bench-paint <pdf>` 输出局部重绘、整页、滚动窄条与冷启动耗时
 - 构建零警告（MSVC `/W4`）
 
 ---
@@ -280,11 +280,14 @@ build\pdfboard.exe --selftest-ui
 # 图片导入 + PNG 导出的端到端断言（自造图片、1:1 像素回环，全离线）
 build\pdfboard.exe --selftest-image
 
-# 硬件加速开关与驱动探测的确定性断言（不改动你的设置）
-build\pdfboard.exe --selftest-gpu
+# 瓦片裁剪 / 拼合 / 画布端到端断言（自造网格 PDF，全离线）
+build\pdfboard.exe --selftest-tileclip
 
 # 渲染耗时与内存基准
 build\pdfboard.exe --bench path\to\test.pdf
+
+# 绘制热路径基准：局部重绘 / 整页 / 滚动窄条 / 冷启动
+build\pdfboard.exe --bench-paint path\to\test.pdf
 ```
 
 ## 快捷键
@@ -327,7 +330,7 @@ xxx.dpz
 
 ```
 src/
-  main.cpp            入口；--bench / --selftest-ink
+  main.cpp            入口；--bench / --bench-paint / --selftest-ink / --selftest-tileclip
   MainWindow.*        窗口、多文档标签、保存/另存为、拖放、状态栏
   PdfCanvas.*         连续滚动视图：渲染、缓存、墨迹模型、触控/缩放
   InkToolbar.*        底部工具岛 + 笔调色板浮层

@@ -2,18 +2,16 @@
 #include "AppLog.h"
 #include "AppSettings.h"
 #include "CrashLog.h"
-#include "GlViewport.h"
 #include "IconPainter.h"
 #include "InkDirty.h"
+#include "InkErase.h"
+#include "InkStroke.h"
 #include "InkToolbar.h"
 #include "InputProbe.h"
 #include "Theme.h"
 
 #include <QPdfDocument>
 #include <QApplication>
-#include <QOffscreenSurface>
-#include <QOpenGLContext>
-#include <QOpenGLFunctions>
 #include <QPainter>
 #include <QPainterPath>
 #include <QDateTime>
@@ -36,51 +34,94 @@
 #include <QTabletEvent>
 #include <QWheelEvent>
 #include <QtMath>
+#include <QAbstractNativeEventFilter>
 
+#include <algorithm>
+
+#ifdef Q_OS_WIN
+// After the Qt includes: windows.h defines the min/max macros.
+#include <windows.h>
+#endif
+
+#ifdef Q_OS_WIN
 namespace {
 
-// True when a REAL OpenGL driver can be used. The raster path stays the default
-// and the fallback, so this refuses the software rasterisers (Mesa's llvmpipe /
-// softpipe, GDI Generic, Windows' "basic render driver"): they answer the GL API
-// but execute on the CPU, i.e. strictly slower than the engine they would
-// replace. Probed once - a driver does not appear mid-session.
-bool gpuRenderAvailable()
+// Windows turns a finger (or pen) held still on the glass into a right click - the
+// "press and hold" system gesture. On this canvas that is never wanted: it pops a
+// context menu AND makes the system take the touch stream away in the middle of a
+// stroke (TouchCancel), which is how a chunk of handwriting disappeared. The canvas
+// has no context menu, so this filter
+//   * answers WM_TABLET_QUERYSYSTEMGESTURESTATUS with "press and hold disabled"
+//     (also pen tap / barrel-button feedback and flicks), and
+//   * swallows every right-button and context-menu message that lands on the canvas.
+// Both the panel's own right-click emulation and Windows' gesture are covered.
+class CanvasMessageFilter : public QAbstractNativeEventFilter
 {
-    static const bool available = [] {
-        QOpenGLContext ctx;
-        if (!ctx.create())
-            return false;
-        QOffscreenSurface surface;
-        surface.setFormat(ctx.format());
-        surface.create();
-        if (!surface.isValid())
-            return false;
-        if (!ctx.makeCurrent(&surface))
-            return false;
-        QOpenGLFunctions fn(&ctx);
-        fn.initializeOpenGLFunctions();
-        const auto *gl = fn.glGetString(GL_RENDERER);
-        const QString renderer =
-            gl ? QString::fromLatin1(reinterpret_cast<const char *>(gl)) : QString();
-        ctx.doneCurrent();
+public:
+    explicit CanvasMessageFilter(PdfCanvas *canvas) : m_canvas(canvas) {}
 
-        const QStringList software = {
-            QStringLiteral("llvmpipe"), QStringLiteral("softpipe"),
-            QStringLiteral("swrast"),   QStringLiteral("gdi generic"),
-            QStringLiteral("microsoft basic render"),
-        };
-        for (const QString &needle : software) {
-            if (renderer.contains(needle, Qt::CaseInsensitive))
-                return false;
+    bool nativeEventFilter(const QByteArray &type, void *message, qintptr *result) override
+    {
+        if (!m_canvas || !message)
+            return false;
+        if (type != "windows_generic_MSG" && type != "windows_dispatcher_MSG")
+            return false;
+        const MSG *msg = static_cast<const MSG *>(message);
+        // internalWinId() does NOT create the native window (winId() does), so this is
+        // safe to call from inside message dispatch - calling winId() here created and
+        // re-entered the window while a message was being handled.
+        const HWND hwnd = reinterpret_cast<HWND>(m_canvas->window()->internalWinId());
+        if (!msg || !hwnd || msg->hwnd != hwnd)
+            return false;
+
+        // WM_TABLET_QUERYSYSTEMGESTURESTATUS. Not defined by every SDK header, so the
+        // value is spelled out: 0x1 press-and-hold, 0x8 pen tap feedback, 0x10 pen
+        // barrel feedback, 0x100 flicks.
+        constexpr UINT  kQuerySystemGestureStatus = 0x02C0u;
+        constexpr qintptr kDisabledSystemGestures = 0x1 | 0x8 | 0x10 | 0x100;
+        if (msg->message == kQuerySystemGestureStatus) {
+            if (result)
+                *result = kDisabledSystemGestures;
+            // One line in the opt-in log: it says whether this machine actually asks
+            // (and therefore whether the long-press gesture was really switched off).
+            static bool logged = false;
+            if (!logged) {
+                logged = true;
+                AppLog::write(QStringLiteral("input"),
+                              QStringLiteral("已向系统关闭长按 / 右键手势"));
+            }
+            return true;
         }
-        AppLog::write(QStringLiteral("view"),
-                      QStringLiteral("硬件加速可用（OpenGL 渲染器 %1）").arg(renderer));
-        return true;
-    }();
-    return available;
-}
+
+        if (!canvasUnderCursor())
+            return false;
+        switch (msg->message) {
+        case WM_CONTEXTMENU:
+        case WM_RBUTTONDOWN:
+        case WM_RBUTTONUP:
+        case WM_RBUTTONDBLCLK:
+            if (result)
+                *result = 0;
+            return true;
+        default:
+            return false;
+        }
+    }
+
+private:
+    bool canvasUnderCursor() const
+    {
+        if (!m_canvas->isVisible())
+            return false;
+        const QPoint local = m_canvas->viewport()->mapFromGlobal(QCursor::pos());
+        return m_canvas->viewport()->rect().contains(local);
+    }
+
+    PdfCanvas *m_canvas = nullptr;
+};
 
 }   // namespace
+#endif   // Q_OS_WIN
 
 namespace {
 // Input/gesture diagnostics - a no-op unless the opt-in log is enabled.
@@ -125,6 +166,12 @@ constexpr int   kInkMaxInterpSteps = 400;   // hard cap per input sample
 // page rect cannot be measured yet.
 constexpr qreal kInkDefaultWidthNorm = 0.004;
 
+// Contact-area brush width (pure touch): the per-sample multiplier is kept inside
+// these bounds. The upper bound is also what the dirty-rect padding and the ink
+// culling use, so a wide sample can never be clipped by a too-small repaint.
+constexpr qreal kInkMinWidthFactor = 0.80;
+constexpr qreal kInkMaxWidthFactor = 1.80;
+
 // Appends `p` to `pts`, inserting interpolated points so that no segment is
 // longer than `maxStep`.
 void appendDensified(QVector<QPointF> &pts, const QPointF &p, qreal maxStep)
@@ -151,6 +198,25 @@ void appendDensified(QVector<QPointF> &pts, const QPointF &p, qreal maxStep)
         pts.append(a + d * (qreal(i) / qreal(n)));
 }
 
+// Bounding box of a finished stroke, in the same normalized space as its samples.
+// drawInk() uses it to skip the (expensive) path building for strokes outside the
+// repainted rect; an empty box (a dot, or nothing) means "no extent worth culling on"
+// and keeps the stroke drawn, so a missing box can never hide ink.
+QRectF strokeBounds(const QVector<QPointF> &pts)
+{
+    if (pts.size() < 2)
+        return QRectF();
+    qreal l = pts.first().x(), r = l;
+    qreal t = pts.first().y(), b = t;
+    for (const QPointF &p : pts) {
+        l = qMin(l, p.x());
+        t = qMin(t, p.y());
+        r = qMax(r, p.x());
+        b = qMax(b, p.y());
+    }
+    return QRectF(l, t, r - l, b - t);
+}
+
 // 橡皮的可选档位（逻辑像素半径），三档：细 / 中 / 粗。列表只此一处，
 // 工具栏面板、擦除命中、指示环、命中测试都从这里取数。第一档 14 就是旧版本
 // 唯一的固定值（kEraserRadiusPx），所以没动过设置的安装擦除行为完全不变。
@@ -172,6 +238,15 @@ constexpr qreal kPalmRadiusDeadPx = 2.5;    // 半径死区：小于它不动（
 constexpr qreal kPalmRadiusRateCap = 14.0;  // 单帧最大半径变化（幽灵点不能一次撑大）
 constexpr qreal kPalmRestMovePx   = 5.0;    // 簇心与慢平均的距离小于它 = 静止（冻结半径）
 constexpr qreal kPalmRestAlpha    = 0.10;   // 静止检测的慢平均系数（约 10 帧）
+
+// --- 接触面积规则（纯触摸面板）---------------------------------------------
+// 有的面板会随触点上报接触椭圆（QEventPoint::ellipseDiameters，逻辑 px）。视源
+// 专利 CN119917011A 就是用物理接触面积区分手指与手掌/手背：同一帧里最小的那个
+// 接触是手指，明显更大的那个是手掌。这里不写死绝对尺寸（面板单位、DPI、缩放都
+// 不同），而是以本次使用中见过的最小接触为“手指基准”，超过它的若干倍才算手掌。
+constexpr qreal kPalmSizeRatio     = 2.2;   // 手指基准的 2.2 倍 = 手掌（进入）
+constexpr qreal kPalmSizeStayRatio = 1.6;   // 已在掌擦时降到 1.6 倍（迟滞，不来回翻）
+constexpr qreal kPalmSizePadPx     = 6.0;   // 擦除半径在接触半径之外的余量
 
 // Largest travel between two pointer samples still treated as one continuous
 // eraser stroke. Anything bigger is an input discontinuity (dropped/coalesced
@@ -282,15 +357,6 @@ QString scrollSheet()
 PdfCanvas::PdfCanvas(QWidget *parent)
     : QAbstractScrollArea(parent)
 {
-    // 硬件加速（实验性）: hand the canvas a GPU-backed viewport when the user
-    // switched it on AND a real OpenGL driver exists. Chosen before anything
-    // touches viewport(), so every attribute set below lands on whichever
-    // viewport won.
-    if (AppSettings::gpuAcceleration() && gpuRenderAvailable()) {
-        m_gpu = true;
-        setViewport(new GlViewport(this));
-    }
-
     viewport()->setAttribute(Qt::WA_OpaquePaintEvent, true);
     viewport()->setMouseTracking(true);
     viewport()->setCursor(Qt::CrossCursor);
@@ -334,6 +400,9 @@ PdfCanvas::PdfCanvas(QWidget *parent)
     m_zoomSettle->setSingleShot(true);
     m_zoomSettle->setInterval(160);
     connect(m_zoomSettle, &QTimer::timeout, this, [this]() {
+        if (!m_settleNeeded)
+            return;                 // nothing was left coarse or at the old zoom
+        m_settleNeeded = false;
         invalidateRenders();
         relayout();
         viewport()->update();
@@ -341,7 +410,7 @@ PdfCanvas::PdfCanvas(QWidget *parent)
                       QStringLiteral("缩放稳定：%1×（视口 %2×%3，缓存 %4 MB）")
                           .arg(m_zoom, 0, 'f', 2)
                           .arg(viewport()->width()).arg(viewport()->height())
-                          .arg(double(m_cacheBytes) / 1048576.0, 0, 'f', 1));
+                          .arg(double(m_rasterBytes) / 1048576.0, 0, 'f', 1));
     });
 
     // Touch input can also be forwarded as synthesized mouse events. Keep the
@@ -357,10 +426,23 @@ PdfCanvas::PdfCanvas(QWidget *parent)
     // The classroom-whiteboard style floating toolbar lives on top of the page
     // area.
     m_toolbar = new InkToolbar(this);
+
+#ifdef Q_OS_WIN
+    // Right click / "press and hold" are meaningless on the page: see CanvasMessageFilter.
+    m_nativeFilter = new CanvasMessageFilter(this);
+    qApp->installNativeEventFilter(m_nativeFilter);
+#endif
 }
 
 PdfCanvas::~PdfCanvas()
 {
+#ifdef Q_OS_WIN
+    if (m_nativeFilter) {
+        qApp->removeNativeEventFilter(m_nativeFilter);
+        delete m_nativeFilter;
+        m_nativeFilter = nullptr;
+    }
+#endif
     setDrawing(false);   // a tab closed mid-stroke must release the motion gate
 }
 
@@ -473,9 +555,10 @@ int PdfCanvas::currentPage() const
 
 void PdfCanvas::invalidateRenders()
 {
-    m_cache.clear();
-    m_lru.clear();
-    m_cacheBytes = 0;
+    m_rasters.clear();
+    m_rasterLru.clear();
+    m_rasterBytes = 0;
+    m_settleNeeded = false;         // a fresh cache starts crisp
 }
 
 // Public wrapper used by the host: only the visible document keeps rendered
@@ -614,68 +697,16 @@ QRectF PdfCanvas::pageRectInViewport(int page) const
     return QRectF(x, y, g.w, g.h);
 }
 
-void PdfCanvas::touchLru(int page)
+void PdfCanvas::touchRaster(int page)
 {
-    m_lru.removeAll(page);
-    m_lru.append(page);
+    m_rasterLru.removeAll(page);
+    m_rasterLru.append(page);
 }
 
-QImage PdfCanvas::imageFor(int page)
+void PdfCanvas::noteRender(int page, qint64 ms, const QSize &size)
 {
-    const auto it = m_cache.constFind(page);
-    if (it != m_cache.constEnd()) {
-        touchLru(page);
-        return it.value();
-    }
-    if (!m_doc || page < 0 || page >= m_geom.size())
-        return {};
-
-    const PageGeom &g = m_geom.at(page);
-    // The layout is in logical units, but the bitmap must be rasterized at
-    // DEVICE resolution, otherwise a 150%/200%/250% display shows an upscaled
-    // (soft) page. Tagging the image with the ratio lets QPainter map it 1:1
-    // when it draws into the logical rect.
-    const qreal dpr = qMax<qreal>(1.0, viewport() ? viewport()->devicePixelRatioF() : 1.0);
-    // While the pen is down (or a pinch is live) a full-resolution raster of a 4K
-    // page costs tens of milliseconds ON THE UI THREAD. That is exactly the stutter
-    // felt at the START of a stroke right after a zoom: the cache was just cleared,
-    // the first repaint re-rasterizes every visible page, and the pen waits for it.
-    // Under load render a coarse raster (4x fewer pixels) instead; the settle timer
-    // sharpens everything once the pen is up.
-    const bool busy = m_drawing || m_erasing || m_pinchActive;
-    const int div = busy ? 2 : 1;
-    QSize target(qMax(1, int(qRound(g.w * dpr)) / div),
-                 qMax(1, int(qRound(g.h * dpr)) / div));
-
-    // Safety cap so a single enormous page cannot blow the budget in one shot.
-    // ~48 MB = 12 Mpx; A4 stays un-capped up to about 2.9x zoom on a 1366 px
-    // wide page, which keeps memory bounded while pinch-zooming.
-    constexpr qint64 kMaxPageBytes = 48LL * 1024 * 1024;
-    const qint64 wantBytes = qint64(target.width()) * qint64(target.height()) * 4;
-    if (wantBytes > kMaxPageBytes) {
-        const qreal f = qSqrt(qreal(kMaxPageBytes) / qreal(wantBytes));
-        target = QSize(qMax(1, int(target.width() * f)), qMax(1, int(target.height() * f)));
-    }
-
-    QElapsedTimer t;
-    t.start();
-    // The crash we are chasing is a stack overflow while zooming, so measure the depth
-    // of the render path: if a page ever renders *inside* another page's render, that
-    // nesting is what eats the stack and the breadcrumb will say so in the crash log.
-    static int renderDepth = 0;
-    ++renderDepth;
-    if (renderDepth > 1)
-        CrashLog::breadcrumb("render-nested",
-                             QStringLiteral("渲染嵌套第 %1 层（第 %2 页）")
-                                 .arg(renderDepth).arg(page + 1));
-    QImage img = m_doc->render(page, target);
-    --renderDepth;
-    InputProbe::instance().addRender();
-    // A coarse (busy-time) raster is drawn scaled up: tagging it with dpr/div keeps
-    // its LOGICAL size identical to the page rect, so nothing shifts on screen.
-    img.setDevicePixelRatio(dpr / div);
-    m_lastRenderMs = t.elapsed();
-    m_lastRenderSize = img.size();
+    m_lastRenderMs = ms;
+    m_lastRenderSize = size;
     // Queue the readout: it feeds the status bar, which lives outside this paint.
     // Emitting it straight from here let Qt flush a dirty region immediately and
     // re-enter painting - that recursion is the 0xC00000FD. Coalesced, so a burst of
@@ -687,22 +718,263 @@ QImage PdfCanvas::imageFor(int page)
             emit renderMeasured(m_lastRenderMs, m_lastRenderSize);
         }, Qt::QueuedConnection);
     }
-    // Slow pages are the first thing to look at when scrolling feels bad.
-    if (m_lastRenderMs > 40)
+    // A slow tile is the first thing to look at when a page feels sticky.
+    if (ms > 40)
         AppLog::write(QStringLiteral("render"),
-                      QStringLiteral("第 %1 页渲染 %2 ms（%3×%4）")
-                          .arg(page + 1).arg(m_lastRenderMs)
-                          .arg(m_lastRenderSize.width()).arg(m_lastRenderSize.height()));
-
-    m_cache.insert(page, img);
-    m_cacheBytes += img.sizeInBytes();
-    touchLru(page);
-    trimCache();
-    return img;
+                      QStringLiteral("第 %1 页栅格化 %2 ms（%3×%4）")
+                          .arg(page + 1).arg(ms)
+                          .arg(size.width()).arg(size.height()));
 }
 
-// Thumbnail raster for the page picker. Deliberately separate from imageFor():
-// it renders straight through QPdfDocument without touching the whole-page LRU
+PdfCanvas::PageRaster &PdfCanvas::rasterFor(int page, const QSize &deviceSize)
+{
+    const auto it = m_rasters.find(page);
+    if (it != m_rasters.end()) {
+        PageRaster &pr = it.value();
+        // A pinch (or the 160 ms settle after it) draws the previous scale's tiles
+        // scaled; invalidateRenders() replaces them at the new scale. Any other size
+        // change (a layout that did not invalidate) starts a fresh set.
+        if (!m_pinchActive && !m_settleNeeded && pr.deviceSize != deviceSize) {
+            m_rasterBytes -= pr.bytes;
+            pr = PageRaster();
+            pr.deviceSize = deviceSize;
+            pr.cols = qMax(1, (deviceSize.width() + kTilePx - 1) / kTilePx);
+            pr.rows = qMax(1, (deviceSize.height() + kTilePx - 1) / kTilePx);
+            pr.tiles.resize(pr.cols * pr.rows);
+        }
+        touchRaster(page);
+        return pr;
+    }
+
+    PageRaster pr;
+    pr.deviceSize = deviceSize;
+    pr.cols = qMax(1, (deviceSize.width() + kTilePx - 1) / kTilePx);
+    pr.rows = qMax(1, (deviceSize.height() + kTilePx - 1) / kTilePx);
+    pr.tiles.resize(pr.cols * pr.rows);
+    PageRaster &ref = m_rasters.insert(page, pr).value();
+    touchRaster(page);
+    return ref;
+}
+
+// One 512x512 DEVICE-pixel tile at the page's current 1:1 resolution. The clip is
+// expressed in the SCALED page space (QPdfDocumentRenderOptions::setScaledSize),
+// and the returned image is exactly the clip, so the tile can be blitted 1:1.
+QImage PdfCanvas::tileAt(int page, PageRaster &pr, int tx, int ty)
+{
+    if (!m_doc || page < 0 || page >= m_doc->pageCount())
+        return {};
+    if (tx < 0 || tx >= pr.cols || ty < 0 || ty >= pr.rows)
+        return {};
+    const int idx = ty * pr.cols + tx;
+    if (!pr.tiles.at(idx).isNull())
+        return pr.tiles.at(idx);
+
+    const int x0 = tx * kTilePx;
+    const int y0 = ty * kTilePx;
+    const int tw = qMin(kTilePx, pr.deviceSize.width() - x0);
+    const int th = qMin(kTilePx, pr.deviceSize.height() - y0);
+    if (tw <= 0 || th <= 0)
+        return {};
+
+    QPdfDocumentRenderOptions opt;
+    opt.setScaledSize(pr.deviceSize);
+    // QPdfDocument builds its matrix from clip.right()/bottom() (inclusive), so a
+    // clip of exactly tw pixels would render at (tw-1)/tw of the requested scale -
+    // each tile would shrink by ~0.2 % and leave a seam. One extra pixel on the far
+    // edge makes the matrix exactly 1:1; the output image stays tw x th.
+    opt.setScaledClipRect(QRect(x0, y0, tw + 1, th + 1));
+
+    QElapsedTimer t;
+    t.start();
+    // Measure the depth of the render path: a render *inside* another render is
+    // what once ate the stack while zooming, and the breadcrumb names it.
+    static int renderDepth = 0;
+    ++renderDepth;
+    if (renderDepth > 1)
+        CrashLog::breadcrumb("render-nested",
+                             QStringLiteral("渲染嵌套第 %1 层（第 %2 页）")
+                                 .arg(renderDepth).arg(page + 1));
+    QImage img = m_doc->render(page, QSize(tw, th), opt);
+    --renderDepth;
+    InputProbe::instance().addRender();
+    if (img.isNull())
+        return {};
+    // Tag the tile with the screen ratio: its logical size is then tw/dpr, which
+    // is exactly the logical rect it is drawn into (no resampling at 1:1).
+    img.setDevicePixelRatio(qMax<qreal>(1.0, viewport() ? viewport()->devicePixelRatioF() : 1.0));
+    pr.tiles[idx] = img;
+    const qint64 bytes = img.sizeInBytes();
+    pr.bytes += bytes;
+    m_rasterBytes += bytes;
+    noteRender(page, t.elapsed(), img.size());
+    return pr.tiles.at(idx);
+}
+
+// A low-resolution whole-page underlay, used only while the tiles belong to the
+// previous scale (pinch, or a zoom whose settle timer was postponed by writing).
+// Without it a pinch-out would show blank paper where no tile exists yet.
+QImage PdfCanvas::previewAt(int page, PageRaster &pr)
+{
+    if (!pr.preview.isNull())
+        return pr.preview;
+    if (!m_doc || page < 0 || page >= m_doc->pageCount())
+        return {};
+
+    // 1/4 linear resolution, capped: at 8x zoom the page bitmap would otherwise be
+    // hundreds of megabytes even though this is only a transient gesture preview.
+    int w = qMax(1, pr.deviceSize.width() / 4);
+    int h = qMax(1, pr.deviceSize.height() / 4);
+    if (w > 1600) {
+        h = qMax(1, int(qint64(h) * 1600 / w));
+        w = 1600;
+    }
+
+    QElapsedTimer t;
+    t.start();
+    QImage img = m_doc->render(page, QSize(w, h));
+    InputProbe::instance().addRender();
+    if (img.isNull())
+        return {};
+    pr.preview = img;
+    const qint64 bytes = img.sizeInBytes();
+    pr.bytes += bytes;
+    m_rasterBytes += bytes;
+    noteRender(page, t.elapsed(), img.size());
+    return pr.preview;
+}
+
+void PdfCanvas::drawPageRaster(QPainter &p, int page, const QRectF &r)
+{
+    if (!m_doc || r.isEmpty())
+        return;
+
+    const qreal dpr = qMax<qreal>(1.0, viewport() ? viewport()->devicePixelRatioF() : 1.0);
+    const QSize dev(qMax(1, int(qRound(r.width() * dpr))),
+                    qMax(1, int(qRound(r.height() * dpr))));
+    PageRaster &pr = rasterFor(page, dev);
+    const bool stale = m_pinchActive || m_settleNeeded || pr.deviceSize != dev;
+
+    // Only the part of the page that is on screen and inside the paint region
+    // needs tiles: a live ink sample dirties ~140x90 px and must touch one tile,
+    // not the whole page.
+    QRectF vis = r.intersected(QRectF(viewport()->rect()));
+    if (p.hasClipping())
+        vis = vis.intersected(p.clipBoundingRect());
+    if (vis.isEmpty())
+        return;
+
+    const qreal fx0 = (vis.left()   - r.left()) / r.width();
+    const qreal fy0 = (vis.top()    - r.top())  / r.height();
+    const qreal fx1 = (vis.right()  - r.left()) / r.width();
+    const qreal fy1 = (vis.bottom() - r.top())  / r.height();
+    const int devX0 = int(fx0 * pr.deviceSize.width());
+    const int devY0 = int(fy0 * pr.deviceSize.height());
+    const int devX1 = int(qCeil(fx1 * pr.deviceSize.width()));
+    const int devY1 = int(qCeil(fy1 * pr.deviceSize.height()));
+    const int tx0 = qBound(0, devX0 / kTilePx, pr.cols - 1);
+    const int ty0 = qBound(0, devY0 / kTilePx, pr.rows - 1);
+    const int tx1 = qBound(0, qMax(devX0, devX1 - 1) / kTilePx, pr.cols - 1);
+    const int ty1 = qBound(0, qMax(devY0, devY1 - 1) / kTilePx, pr.rows - 1);
+
+    bool missing = false;
+    for (int ty = ty0; ty <= ty1 && !missing; ++ty) {
+        for (int tx = tx0; tx <= tx1; ++tx) {
+            if (pr.tiles.at(ty * pr.cols + tx).isNull()) {
+                missing = true;
+                break;
+            }
+        }
+    }
+
+    // Previous-scale tiles: fill their gaps with the preview instead of rendering
+    // 30+ tiles on the UI thread in the middle of a gesture / stroke.
+    if (stale && missing) {
+        const QImage pv = previewAt(page, pr);
+        if (!pv.isNull())
+            p.drawImage(r, pv);
+    }
+
+    for (int ty = ty0; ty <= ty1; ++ty) {
+        for (int tx = tx0; tx <= tx1; ++tx) {
+            const int x0 = tx * kTilePx;
+            const int y0 = ty * kTilePx;
+            const int tw = qMin(kTilePx, pr.deviceSize.width() - x0);
+            const int th = qMin(kTilePx, pr.deviceSize.height() - y0);
+            if (tw <= 0 || th <= 0)
+                continue;
+            QImage img = pr.tiles.at(ty * pr.cols + tx);
+            if (img.isNull()) {
+                if (stale)
+                    continue;               // the preview underneath covers it
+                img = tileAt(page, pr, tx, ty);
+                if (img.isNull())
+                    continue;
+            }
+
+            QRectF target;
+            if (!stale && pr.deviceSize == dev) {
+                // 1:1: align every tile to whole DEVICE pixels so QPainter blits
+                // instead of resampling, and adjacent tiles share exact edges.
+                const qreal ox = qRound(r.left() * dpr);
+                const qreal oy = qRound(r.top() * dpr);
+                target = QRectF((ox + x0) / dpr, (oy + y0) / dpr,
+                                qreal(tw) / dpr, qreal(th) / dpr);
+            } else {
+                target = QRectF(r.left() + qreal(x0) / pr.deviceSize.width() * r.width(),
+                                r.top()  + qreal(y0) / pr.deviceSize.height() * r.height(),
+                                qreal(tw) / pr.deviceSize.width() * r.width(),
+                                qreal(th) / pr.deviceSize.height() * r.height());
+            }
+            p.drawImage(target, img);
+        }
+    }
+
+    // Bound ONE page too. trimRasters() never evicts a visible page, so at a high
+    // zoom a long pan would otherwise accumulate thousands of tiles. Keep the
+    // range the VIEWPORT needs (not just this paint's dirty rect, which during a
+    // live stroke is one tile) and drop the rest; panning re-renders its strip.
+    constexpr qint64 kPageTileBytes = 96LL * 1024 * 1024;
+    if (pr.bytes > kPageTileBytes) {
+        const QRectF vpVis = r.intersected(QRectF(viewport()->rect()));
+        int keepX0 = tx0;
+        int keepX1 = tx1;
+        int keepY0 = ty0;
+        int keepY1 = ty1;
+        if (!vpVis.isEmpty()) {
+            const int vx0 = int((vpVis.left()   - r.left()) / r.width()  * pr.deviceSize.width());
+            const int vy0 = int((vpVis.top()    - r.top())  / r.height() * pr.deviceSize.height());
+            const int vx1 = int(qCeil((vpVis.right()  - r.left()) / r.width()
+                                      * pr.deviceSize.width()));
+            const int vy1 = int(qCeil((vpVis.bottom() - r.top())  / r.height()
+                                      * pr.deviceSize.height()));
+            keepX0 = qBound(0, vx0 / kTilePx, pr.cols - 1);
+            keepY0 = qBound(0, vy0 / kTilePx, pr.rows - 1);
+            keepX1 = qBound(0, qMax(vx0, vx1 - 1) / kTilePx, pr.cols - 1);
+            keepY1 = qBound(0, qMax(vy0, vy1 - 1) / kTilePx, pr.rows - 1);
+        }
+        qint64 freed = 0;
+        for (int ty = 0; ty < pr.rows; ++ty) {
+            for (int tx = 0; tx < pr.cols; ++tx) {
+                if (tx >= keepX0 && tx <= keepX1 && ty >= keepY0 && ty <= keepY1)
+                    continue;
+                QImage &tile = pr.tiles[ty * pr.cols + tx];
+                if (!tile.isNull()) {
+                    freed += tile.sizeInBytes();
+                    tile = QImage();
+                }
+            }
+        }
+        if (freed > 0) {
+            pr.bytes -= freed;
+            m_rasterBytes -= freed;
+        }
+    }
+
+    trimRasters();
+}
+
+// Thumbnail raster for the page picker. Deliberately separate from the tile
+// cache: it renders straight through QPdfDocument without touching the rasters
 // (a 300 page grid must not evict the pages the reader is actually showing).
 QImage PdfCanvas::pageThumbnail(int page, const QSize &size) const
 {
@@ -723,9 +995,9 @@ QImage PdfCanvas::pageThumbnail(int page, const QSize &size) const
     return m_doc->render(page, QSize(w, h));
 }
 
-void PdfCanvas::trimCache()
+void PdfCanvas::trimRasters()
 {
-    if (m_cacheBytes <= m_cacheBudget)
+    if (m_rasterBytes <= m_rasterBudget)
         return;
 
     const qreal top = verticalScrollBar()->value();
@@ -740,23 +1012,23 @@ void PdfCanvas::trimCache()
         visible.insert(i);
     }
 
-    const qint64 before = m_cacheBytes;
-    for (int i = 0; i < m_lru.size() && m_cacheBytes > m_cacheBudget;) {
-        const int page = m_lru.at(i);
+    const qint64 before = m_rasterBytes;
+    for (int i = 0; i < m_rasterLru.size() && m_rasterBytes > m_rasterBudget;) {
+        const int page = m_rasterLru.at(i);
         if (visible.contains(page)) {   // never evict a visible page
             ++i;
             continue;
         }
-        m_cacheBytes -= m_cache.value(page).sizeInBytes();
-        m_cache.remove(page);
-        m_lru.removeAt(i);
+        m_rasterBytes -= m_rasters.value(page).bytes;
+        m_rasters.remove(page);
+        m_rasterLru.removeAt(i);
     }
-    if (m_cacheBytes < before)
+    if (m_rasterBytes < before)
         AppLog::write(QStringLiteral("cache"),
-                      QStringLiteral("淘汰 %1 MB，缓存 %2 MB / 上限 %3 MB")
-                          .arg(double(before - m_cacheBytes) / 1048576.0, 0, 'f', 1)
-                          .arg(double(m_cacheBytes) / 1048576.0, 0, 'f', 1)
-                          .arg(double(m_cacheBudget) / 1048576.0, 0, 'f', 0));
+                      QStringLiteral("淘汰 %1 MB，瓦片缓存 %2 MB / 上限 %3 MB")
+                          .arg(double(before - m_rasterBytes) / 1048576.0, 0, 'f', 1)
+                          .arg(double(m_rasterBytes) / 1048576.0, 0, 'f', 1)
+                          .arg(double(m_rasterBudget) / 1048576.0, 0, 'f', 0));
 }
 
 void PdfCanvas::drawInk(QPainter &p, int page, const QRectF &rect)
@@ -771,15 +1043,48 @@ void PdfCanvas::drawInk(QPainter &p, int page, const QRectF &rect)
             return QPointF(rect.left() + n.x() * rect.width(),
                            rect.top() + n.y() * rect.height());
         };
+        // Per-point width factors come from the finger's contact area. The vector is
+        // parallel to `pts` for strokes that have them; empty means a uniform stroke.
+        bool weighted = s.wf.size() == s.pts.size();
+        if (weighted) {
+            bool varied = false;
+            for (qreal f : s.wf) {
+                if (qAbs(f - 1.0) > 0.01) {
+                    varied = true;
+                    break;
+                }
+            }
+            weighted = varied;      // all-1.0 keeps the cheaper uniform-pen rendering
+        }
+        const auto factorAt = [&s, weighted](int i) {
+            return weighted ? s.wf.at(i) : 1.0;
+        };
         // A lone sample is a tap, and a tap is a dot: a round-capped pen over zero length
         // paints exactly one. Taps used to disappear because this function demanded two
         // points and endInput() discarded the stroke - see the commit rule there.
         if (s.pts.size() == 1) {
-            p.setPen(QPen(s.color, qMax<qreal>(0.5, s.width * rect.width()),
+            p.setPen(QPen(s.color,
+                          qMax<qreal>(0.5, s.width * factorAt(0) * rect.width()),
                           Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
             p.setBrush(Qt::NoBrush);
             p.drawPoint(device(s.pts.first()));
             return;
+        }
+        if (weighted) {
+            // A filled outline whose width follows the contact area: the touch-screen
+            // version of pen pressure. Drawn as one path, so the joins have no seams.
+            QVector<QPointF> dev;
+            dev.reserve(s.pts.size());
+            for (const QPointF &n : s.pts)
+                dev.append(device(n));
+            const QPainterPath outline =
+                inkOutlinePath(dev, s.wf, qMax<qreal>(0.5, s.width * rect.width()));
+            if (!outline.isEmpty()) {
+                p.setPen(Qt::NoPen);
+                p.setBrush(s.color);
+                p.drawPath(outline);
+                return;
+            }
         }
         // Smooth through the samples instead of joining them with straight
         // segments: sparse input (a fast pen stroke, touch coalescing) otherwise
@@ -804,9 +1109,29 @@ void PdfCanvas::drawInk(QPainter &p, int page, const QRectF &rect)
         p.drawPath(path);
     };
 
+    // Live samples repaint a small rect, but the ink model keeps every stroke on the
+    // page. Building a QPainterPath for strokes that cannot touch that rect is pure
+    // cost, and it grows as the lesson goes on - the page gets slower to write on.
+    // Skip those by bounding box. A null box means the extent is unknown, so the
+    // stroke is drawn (correctness never depends on the cache being complete).
+    const QRectF clip = p.hasClipping() ? p.clipBoundingRect() : QRectF();
+    const auto mayTouchClip = [&rect, &clip](const Stroke &s) {
+        if (clip.isEmpty() || s.box.isNull())
+            return true;
+        const QRectF box(rect.left() + s.box.left()   * rect.width(),
+                         rect.top()  + s.box.top()    * rect.height(),
+                         s.box.width()  * rect.width(),
+                         s.box.height() * rect.height());
+        const qreal pad = qMax<qreal>(2.0, s.width * rect.width() * 0.5
+                                              * kInkMaxWidthFactor) + 1.0;
+        return box.adjusted(-pad, -pad, pad, pad).intersects(clip);
+    };
+
     if (it != m_ink.constEnd()) {
-        for (const Stroke &s : it.value())
-            drawStroke(s);
+        for (const Stroke &s : it.value()) {
+            if (mayTouchClip(s))
+                drawStroke(s);
+        }
     }
     if (live)
         drawStroke(m_current);
@@ -922,7 +1247,7 @@ void PdfCanvas::trackPointer()
     // wrong strokes" report). And during a pinch the poll only steals frames from the
     // gesture. The touch lock is set the moment a touch or stylus sequence starts, which
     // makes it the right gate for both.
-    if (m_touchInkBlocked || m_pinchActive || m_moveDragActive)
+    if (m_touchInkBlocked || m_touchActive || m_pinchActive || m_moveDragActive)
         return;
     const bool dragging = m_erasing || m_drawing;
     if (dragging && QGuiApplication::mouseButtons() == Qt::NoButton)
@@ -1132,32 +1457,8 @@ struct PaintDepthGuard {
 int PdfCanvas::testMaxPaintDepth() const { return s_paintMaxDepth; }
 void PdfCanvas::testResetMaxPaintDepth() { s_paintMaxDepth = s_paintDepth; }
 
-// GPU path (硬件加速) 自测钩子：与构造器查询同一个驱动探针、报告真正装上的
-// viewport（true = 装了 OpenGL 表面）。
-bool PdfCanvas::testGpuRenderAvailable() { return gpuRenderAvailable(); }
-bool PdfCanvas::testViewportIsGl() const
-{ return qobject_cast<QOpenGLWidget *>(viewport()) != nullptr; }
-
-// The GPU surface paints itself: Qt calls paintGL() on the widget that IS the
-// viewport, and the pass it runs is byte-for-byte the CPU one below.
-GlViewport::GlViewport(PdfCanvas *canvas, QWidget *parent)
-    : QOpenGLWidget(parent)
-    , m_canvas(canvas)
-{
-}
-
-void GlViewport::paintGL()
-{
-    if (!m_canvas)
-        return;
-    QPainter p(this);
-    m_canvas->paintForViewport(p);
-}
-
 void PdfCanvas::paintEvent(QPaintEvent *)
 {
-    if (m_gpu)
-        return;                       // GlViewport::paintGL paints instead
     QPainter p(viewport());
     paintForViewport(p);
 }
@@ -1219,17 +1520,40 @@ void PdfCanvas::paintForViewport(QPainter &p)
         // with alpha and PDF pages have no background of their own.
         p.fillPath(paper, Theme::light().paper);
 
+        // A clip *path* is not free: the raster engine scan-converts the whole
+        // page-sized rounded rect into a region on every paint. Measured at 4K this is
+        // ~5 ms even when the dirty rect is only 140x90 - a fixed cost on EVERY live ink
+        // sample, which is exactly what makes handwriting trail the finger. The rounded
+        // corners only matter when the repainted rect actually reaches one, so the clip
+        // is only applied then. A full repaint (no clip) still gets it.
+        const bool clipped = p.hasClipping();
+        const QRectF clipRect = clipped ? p.clipBoundingRect() : QRectF();
+        bool needCornerClip = false;
+        if (m_pageRadius > 0.0) {
+            if (!clipped) {
+                needCornerClip = true;          // full repaint: every corner is painted
+            } else if (!clipRect.isEmpty()) {
+                const qreal rad = m_pageRadius;
+                const QRectF corners[4] = {
+                    QRectF(r.left(),        r.top(),         rad, rad),
+                    QRectF(r.right() - rad, r.top(),         rad, rad),
+                    QRectF(r.left(),        r.bottom() - rad, rad, rad),
+                    QRectF(r.right() - rad, r.bottom() - rad, rad, rad),
+                };
+                for (const QRectF &c : corners)
+                    needCornerClip = needCornerClip || c.intersects(clipRect);
+            }
+        }
+
         p.save();
-        p.setClipPath(paper);
-        // Bilinear scaling of a page-sized bitmap that does not match the current
-        // zoom yet is the most expensive thing in a pinch frame. During the
-        // gesture those bitmaps are knowingly stale previews anyway, so drop the
-        // smoothing (nearest neighbour) and re-render crisply once the gesture
-        // settles.
+        if (needCornerClip)
+            p.setClipPath(paper);
+        // Tiles are 1:1 at the current zoom, so the normal path blits them without
+        // resampling. During a pinch the previous scale's tiles (and the low-res
+        // preview under them) are knowingly stale, so drop the smoothing and
+        // re-render crisply once the gesture settles.
         p.setRenderHint(QPainter::SmoothPixmapTransform, !m_pinchActive);
-        const QImage img = imageFor(page);
-        if (!img.isNull())
-            p.drawImage(r, img);
+        drawPageRaster(p, page, r);
         p.restore();
 
         // Ink stays on top of the page, exactly where it was drawn.
@@ -1250,24 +1574,7 @@ void PdfCanvas::paintForViewport(QPainter &p)
 
 QPixmap PdfCanvas::freezeFramePixmap()
 {
-    // The raster path grabs exactly; only the GL viewport needs a re-render.
-    if (!m_gpu)
-        return grab();
-
-    const qreal dpr = devicePixelRatioF();
-    QPixmap pm(size() * dpr);
-    if (pm.isNull())
-        return grab();                  // pathological size: fall back, never blank
-    pm.setDevicePixelRatio(dpr);
-    pm.fill(Qt::transparent);
-
-    QPainter p(&pm);
-    // paintForViewport paints in viewport-local coordinates and paintBackdrop()
-    // fills viewport()->rect() (always origin-anchored), so shifting by the
-    // viewport's position lands the frame exactly where grab() would.
-    p.translate(viewport()->pos());
-    paintForViewport(p);
-    return pm;
+    return grab();
 }
 
 QPointF PdfCanvas::toNormalized(int page, const QPointF &viewportPos) const
@@ -1290,16 +1597,36 @@ void PdfCanvas::resizeEvent(QResizeEvent *e)
     viewport()->update();
 }
 
-// Pages are always painted from scratch, so there is no bitmap to blit: a
-// plain update is both correct and keeps the floating toolbar anchored to the
-// viewport instead of scrolling away with the content.
+// Scrolling used to repaint the whole viewport. At 4K that is a full page blit
+// (~25 ms measured), so dragging the document felt like 35 fps while a whiteboard
+// app feels like 60. The page content is static at a given zoom, so the already
+// painted pixels can be moved by the backing store and only the newly exposed
+// strip has to be painted (QWidget::scroll does exactly that).
 void PdfCanvas::scrollContentsBy(int dx, int dy)
 {
-    Q_UNUSED(dx)
-    Q_UNUSED(dy)
+    if (dx == 0 && dy == 0) {
+        if (m_toolbar)
+            m_toolbar->reposition();
+        viewport()->update();
+        return;
+    }
+
+    // The scrollbar delta is opposite to the direction the content travels.
+    // QWidget::scroll also moves the viewport's child widgets (the island lives on
+    // the viewport), so reposition it afterwards to put it back where it belongs.
+    viewport()->scroll(-dx, -dy);
     if (m_toolbar)
         m_toolbar->reposition();
-    viewport()->update();
+
+    // The desk gradient at the viewport's top edge is anchored to the viewport
+    // (not to the document), so it must not travel with the blit.
+    const int strip = int(qCeil(qMax<qreal>(12.0, m_ui.icon * 1.4)));
+    QRegion repaint(QRect(0, 0, viewport()->width(), strip));
+    // The eraser ring is screen-space (it follows the pointer, not the page), so
+    // put it back where it was instead of letting the blit carry it away.
+    if (m_eraserHover)
+        repaint += eraserIndicatorBounds(m_eraserHoverPos, activeEraseRadius());
+    viewport()->update(repaint);
 }
 
 // Page under the given viewport position, or -1 when the pointer is not on a
@@ -1322,8 +1649,14 @@ void PdfCanvas::cancelGesture()
     setDrawing(false);
     m_erasing     = false;
     m_erasePushed = false;
+    m_liveEraseRadius = 0.0;
     m_hasLastErasePos = false;
     m_moveDragActive  = false;
+    // 手势被别处取消（切工具 / 撤销 / 关文档）时，触摸占用也一并作废：否则一个已经
+    // 不会再收到 TouchEnd 的序列会把鼠标左键永久挡在门外。
+    m_touchActive = false;
+    m_palmSequence = false;
+    m_sequenceWrote = false;
     m_drawPage    = -1;
     m_current     = Stroke{};
     // 掌擦手势与它的动态半径一并不留。分类器状态 m_touchClass 故意不动：
@@ -1333,6 +1666,34 @@ void PdfCanvas::cancelGesture()
     m_palmEraseActive = false;
     m_hasPalmLastPos  = false;
     m_palmRadius      = 0.0;
+}
+
+// The OS cancelled the touch stream. A finger stroke that was already drawn is KEPT:
+// the teacher meant to write, and silently deleting it is what reads as "the stroke
+// flashes white" (the previous rule - "a cancel must never commit ink" - was written
+// against stray ink from a system gesture, but it also deletes deliberate writing that
+// Windows cancelled for its own reasons). A pinch / palm / eraser gesture still ends
+// without committing anything.
+void PdfCanvas::endCancelledTouch()
+{
+    // A stroke belongs to the touch stream when this sequence set the flag (or when the
+    // stroke itself came from a finger); a stylus stroke that happens to be running is
+    // left to its own release event.
+    const bool keepStroke =
+        m_drawing && !m_touchInkBlocked && (m_touchActive || m_strokeFromTouch);
+    m_touchActive = false;
+    if (keepStroke) {
+        if (m_touchSmooth.hasPending())
+            moveInputTo(m_touchSmooth.flush());
+        endInput();                 // keeps the < 3 px touch-noise rule
+    } else
+        cancelGesture();
+    // 被系统打断：触摸记忆作废，下一次落指从干净状态重新分类。
+    m_touchClass = TouchClassState{};
+    m_pinchActive = false;
+    m_pinchPts.clear();
+    if (m_touchRelease)
+        m_touchRelease->start();    // keep the lock a bit longer
 }
 
 // --- Test hooks (only used by `--selftest-ink`) ---------------------------
@@ -1356,6 +1717,7 @@ void PdfCanvas::testAddStroke(int page, const QPointF &aNorm, const QPointF &bNo
         else
             s.pts.append(p);                              // raw/sparse sampling
     }
+    s.box = strokeBounds(s.pts);
     pushUndoSnapshot();
     m_ink[page].append(s);
     viewport()->update();
@@ -1368,6 +1730,23 @@ int PdfCanvas::testStrokePoints(int page, int index) const
     if (it == m_ink.constEnd() || index < 0 || index >= it.value().size())
         return -1;
     return it.value().at(index).pts.size();
+}
+
+QPointF PdfCanvas::testStrokeFirstPoint(int page, int index) const
+{
+    const auto it = m_ink.constFind(page);
+    if (it == m_ink.constEnd() || index < 0 || index >= it.value().size())
+        return QPointF(-1.0, -1.0);
+    const Stroke &s = it.value().at(index);
+    return s.pts.isEmpty() ? QPointF(-1.0, -1.0) : s.pts.first();
+}
+
+int PdfCanvas::testStrokeWidthCount(int page, int index) const
+{
+    const auto it = m_ink.constFind(page);
+    if (it == m_ink.constEnd() || index < 0 || index >= it.value().size())
+        return -1;
+    return int(it.value().at(index).wf.size());
 }
 
 qreal PdfCanvas::testStrokeDeviceWidth(int page, int index) const
@@ -1510,7 +1889,11 @@ void PdfCanvas::setEraserRadius(qreal radiusPx)
 
 qreal PdfCanvas::activeEraseRadius() const
 {
-    return (m_palmEraseActive && m_palmRadius > 0.0) ? m_palmRadius : m_eraserRadius;
+    if (m_palmEraseActive && m_palmRadius > 0.0)
+        return m_palmRadius;
+    if (m_erasing && m_liveEraseRadius > 0.0)
+        return m_liveEraseRadius;       // contact-area adaptive fingertip eraser
+    return m_eraserRadius;
 }
 
 void PdfCanvas::pushUndoSnapshot()
@@ -1618,12 +2001,47 @@ bool PdfCanvas::eraseAtPointer(int page, const QPointF &viewportPos, qreal radiu
     // across the snapshot would let the write below mutate the snapshot too.
     const QVector<Stroke> strokes = it.value();
 
+    // Fast rejection (CVTE patent CN122816524A's efficiency point in spirit): a sweep
+    // calls this several times per input sample, and a lesson-sized page carries
+    // thousands of samples. If no stroke's box can reach the eraser circle, there is
+    // nothing to rebuild - skip the whole copy/intersect pass.
+    {
+        bool anyNear = false;
+        for (const Stroke &s : strokes) {
+            if (s.box.isNull()) {
+                anyNear = true;
+                break;
+            }
+            const qreal pad = radiusPx + s.width * rect.width() * 0.5 * kInkMaxWidthFactor;
+            const QRectF box(rect.left() + s.box.left() * rect.width(),
+                             rect.top() + s.box.top() * rect.height(),
+                             s.box.width() * rect.width(),
+                             s.box.height() * rect.height());
+            if (box.adjusted(-pad, -pad, pad, pad).contains(center)) {
+                anyNear = true;
+                break;
+            }
+        }
+        if (!anyNear)
+            return false;
+    }
+
+    // A cut piece carries its own points AND its own width factors: the factors are
+    // parallel to the points, so they have to be cut with them. Both are interpolated
+    // at the crossing, otherwise a thickened stroke would snap back to base width at
+    // the new ends.
+    struct CutRun {
+        QVector<QPointF> pts;
+        QVector<qreal> wf;
+    };
+
     QVector<Stroke> rebuilt;
     rebuilt.reserve(strokes.size() + 2);
     bool changed = false;
 
     for (const Stroke &s : strokes) {
-        const qreal R = radiusPx + s.width * rect.width() / 2.0;
+        const bool hasWidths = s.wf.size() == s.pts.size();
+        const qreal R = radiusPx + s.width * rect.width() * 0.5 * kInkMaxWidthFactor;
         const qreal R2 = R * R;
         auto inside = [&center, R2](const QPointF &p) {
             const QPointF d = p - center;
@@ -1644,21 +2062,38 @@ bool PdfCanvas::eraseAtPointer(int page, const QPointF &viewportPos, qreal radiu
         }
 
         QVector<QPointF> dev;
+        QVector<qreal> devW;
         dev.reserve(s.pts.size());
-        for (const QPointF &n : s.pts)
-            dev.append(toDevice(n));
+        if (hasWidths)
+            devW.reserve(s.pts.size());
+        for (int i = 0; i < s.pts.size(); ++i) {
+            dev.append(toDevice(s.pts.at(i)));
+            if (hasWidths)
+                devW.append(s.wf.at(i));
+        }
+        const auto widthAt = [&devW, hasWidths](int i) {
+            return hasWidths ? devW.at(i) : 1.0;
+        };
+        const auto widthAtT = [&devW, hasWidths](int i, qreal t) {
+            return hasWidths ? devW.at(i) + (devW.at(i + 1) - devW.at(i)) * t : 1.0;
+        };
 
-        QVector<QVector<QPointF>> runs;
-        QVector<QPointF> cur;
-        auto flush = [&runs, &cur]() {
-            if (cur.size() >= 2)
+        QVector<CutRun> runs;
+        CutRun cur;
+        const auto push = [&cur, hasWidths](const QPointF &p, qreal w) {
+            cur.pts.append(p);
+            if (hasWidths)
+                cur.wf.append(w);
+        };
+        const auto flush = [&runs, &cur]() {
+            if (cur.pts.size() >= 2)
                 runs.append(cur);
-            cur.clear();
+            cur = CutRun{};
         };
 
         bool prevInside = inside(dev.first());
         if (!prevInside)
-            cur.append(dev.first());
+            push(dev.first(), widthAt(0));
 
         for (int i = 0; i + 1 < dev.size(); ++i) {
             const QPointF a = dev.at(i);
@@ -1669,17 +2104,17 @@ bool PdfCanvas::eraseAtPointer(int page, const QPointF &viewportPos, qreal radiu
 
             if (crosses) {
                 if (!prevInside && t0 > 0.0) {
-                    if (cur.isEmpty())
-                        cur.append(a);
-                    cur.append(a + t0 * (b - a));   // last point before the cut
+                    if (cur.pts.isEmpty())
+                        push(a, widthAt(i));
+                    push(a + t0 * (b - a), widthAtT(i, t0));   // last point before the cut
                 }
                 flush();
                 if (!bInside && t1 < 1.0) {
-                    cur.append(a + t1 * (b - a));   // first point after the cut
-                    cur.append(b);                  // b is outside: keep the tail
+                    push(a + t1 * (b - a), widthAtT(i, t1));   // first point after the cut
+                    push(b, widthAt(i + 1));                    // b is outside: keep the tail
                 }
             } else if (!prevInside && !bInside) {
-                cur.append(b);
+                push(b, widthAt(i + 1));
             } else {
                 flush();
             }
@@ -1687,18 +2122,22 @@ bool PdfCanvas::eraseAtPointer(int page, const QPointF &viewportPos, qreal radiu
         }
         flush();
 
-        if (runs.size() == 1 && runs.first().size() == dev.size()) {
+        if (runs.size() == 1 && runs.first().pts.size() == dev.size()) {
             rebuilt.append(s);          // untouched by this erase
             continue;
         }
 
         changed = true;
-        for (const QVector<QPointF> &run : runs) {
+        for (const CutRun &run : runs) {
             Stroke ns = s;
             ns.pts.clear();
-            ns.pts.reserve(run.size());
-            for (const QPointF &d : run)
+            ns.wf.clear();
+            ns.pts.reserve(run.pts.size());
+            for (const QPointF &d : run.pts)
                 ns.pts.append(toNorm(d));
+            if (hasWidths && run.wf.size() == run.pts.size())
+                ns.wf = run.wf;
+            ns.box = strokeBounds(ns.pts);      // the cut piece has its own extent
             rebuilt.append(ns);
         }
     }
@@ -1804,7 +2243,8 @@ void PdfCanvas::endPalmErase()
 // Mouse and touch both funnel through these, so pen / eraser / pinch behave
 // identically whichever input produced them.
 
-void PdfCanvas::beginInputAt(const QPointF &viewportPos, bool asEraser)
+void PdfCanvas::beginInputAt(const QPointF &viewportPos, bool asEraser, qreal widthFactor,
+                             qreal eraseRadiusPx)
 {
     // `asEraser` comes from hardware that names its own eraser (a stylus turned around): this
     // stroke erases and the toolbar keeps whatever tool it had.
@@ -1825,9 +2265,11 @@ void PdfCanvas::beginInputAt(const QPointF &viewportPos, bool asEraser)
     if (m_tool == InkTool::Eraser || asEraser) {
         m_erasing = true;
         m_erasePushed = false;
+        m_liveEraseRadius = eraseRadiusPx > 0.0 ? eraseRadiusPx : 0.0;
+        const qreal wipe = m_liveEraseRadius > 0.0 ? m_liveEraseRadius : m_eraserRadius;
         m_lastErasePos = viewportPos;
         m_hasLastErasePos = true;
-        eraseAtPointer(page, viewportPos, m_eraserRadius);     // never starts an ink stroke
+        eraseAtPointer(page, viewportPos, wipe);     // never starts an ink stroke
         return;
     }
 
@@ -1844,17 +2286,20 @@ void PdfCanvas::beginInputAt(const QPointF &viewportPos, bool asEraser)
     }
     const int first = m_current.pts.size();
     appendDensified(m_current.pts, toNormalized(page, viewportPos), kInkMaxStepNorm);
+    for (int i = first; i < m_current.pts.size(); ++i)
+        m_current.wf.append(widthFactor);
     if (m_current.pts.size() == first)
         return;
     // Same partial repaint as the rest of the stroke: a full-viewport update here
-    // would repaint the whole 4K page just to show the first dot.
+    // would repaint the whole 4K page just to show the first dot. The pad uses the
+    // widest factor the brush is allowed to produce, so a thick sample is never cut.
     const QRectF pr = pageRectInViewport(page);
     const qreal inkPx = qMax<qreal>(1.0, m_current.width * pr.width());
     viewport()->update(inkDirtyRect(pr, m_current.pts.constData(), m_current.pts.size(),
-                                    0, inkPx * 0.5 + 4.0));
+                                    0, inkPx * 0.5 * kInkMaxWidthFactor + 4.0));
 }
 
-void PdfCanvas::moveInputTo(const QPointF &viewportPos)
+void PdfCanvas::moveInputTo(const QPointF &viewportPos, qreal widthFactor)
 {
     if (m_erasing) {
         if (!m_hasLastErasePos) {
@@ -1862,8 +2307,9 @@ void PdfCanvas::moveInputTo(const QPointF &viewportPos)
             m_hasLastErasePos = true;
         }
         // Erase along the whole travelled path, not just at this sample.
+        const qreal wipe = m_liveEraseRadius > 0.0 ? m_liveEraseRadius : m_eraserRadius;
         setEraserHover(viewportPos);
-        eraseSweep(pageAtViewportPos(viewportPos), m_lastErasePos, viewportPos, m_eraserRadius);
+        eraseSweep(pageAtViewportPos(viewportPos), m_lastErasePos, viewportPos, wipe);
         m_lastErasePos = viewportPos;
         return;
     }
@@ -1874,19 +2320,22 @@ void PdfCanvas::moveInputTo(const QPointF &viewportPos)
     const int first = m_current.pts.size();
     appendDensified(m_current.pts, toNormalized(m_drawPage, viewportPos),
                     kInkMaxStepNorm);
+    for (int i = first; i < m_current.pts.size(); ++i)
+        m_current.wf.append(widthFactor);
     if (m_current.pts.size() == first)
         return;
     const QRectF pr = pageRectInViewport(m_drawPage);
     const qreal inkPx = qMax<qreal>(1.0, m_current.width * pr.width());
     viewport()->update(inkDirtyRect(pr, m_current.pts.constData(), m_current.pts.size(),
-                                    first - 2, inkPx * 0.5 + 4.0));
+                                    first - 2, inkPx * 0.5 * kInkMaxWidthFactor + 4.0));
 }
 
 void PdfCanvas::endInput()
 {
-    // The pen is up: the page may be sharpened again (see beginInputAt). This is
-    // also what replaces a coarse busy-time raster with a crisp one.
-    if (m_zoomSettle)
+    // The pen is up: sharpen the page again IF this stroke produced a coarse raster
+    // (see beginInputAt). Starting the timer unconditionally re-rendered a whole 4K
+    // page after every single stroke - 48-60 ms of UI-thread freeze per stroke.
+    if (m_zoomSettle && m_settleNeeded)
         m_zoomSettle->start();
 
     // A two-finger gesture owns the input: never commit a stroke while the ink
@@ -1897,6 +2346,7 @@ void PdfCanvas::endInput()
     }
     if (m_erasing) {
         m_erasing = false;
+        m_liveEraseRadius = 0.0;
         m_hasLastErasePos = false;
         if (m_erasePushed) {
             m_erasePushed = false;
@@ -1937,6 +2387,7 @@ void PdfCanvas::endInput()
             eraseLog(QStringLiteral("ink committed (len=%1 px, pts=%2)")
                          .arg(lenPx, 0, 'f', 1).arg(m_current.pts.size()));
         }
+        m_current.box = strokeBounds(m_current.pts);   // extent for drawInk's culling
         pushUndoSnapshot();                    // state before the new stroke
         m_ink[m_drawPage].append(m_current);
         emit inkChanged(strokeCount());
@@ -1978,7 +2429,9 @@ void PdfCanvas::mousePressEvent(QMouseEvent *e)
         return;
     }
     if (e->button() != Qt::LeftButton) {
-        QAbstractScrollArea::mousePressEvent(e);
+        // Right / middle click: nothing on the page uses them, and a held finger is
+        // delivered as a right click (see CanvasMessageFilter).
+        e->accept();
         return;
     }
     if (m_tool == InkTool::Move) {
@@ -2035,6 +2488,10 @@ void PdfCanvas::contextMenuEvent(QContextMenuEvent *e)
 
 void PdfCanvas::mouseReleaseEvent(QMouseEvent *e)
 {
+    if (e->button() != Qt::LeftButton) {
+        e->accept();
+        return;
+    }
     if (m_touchInkBlocked) {
         eraseLog(QStringLiteral("mouse release ignored (touch lock)"));
         QAbstractScrollArea::mouseReleaseEvent(e);
@@ -2102,6 +2559,23 @@ QJsonObject PdfCanvas::exportInk() const
                 pts.append(p.y());
             }
             so.insert(QStringLiteral("p"), pts);
+            // Contact-area widths are optional: only write them when they actually
+            // vary, so uniform strokes keep the old, smaller file format.
+            if (s.wf.size() == s.pts.size()) {
+                bool varied = false;
+                for (qreal f : s.wf) {
+                    if (qAbs(f - 1.0) > 0.01) {
+                        varied = true;
+                        break;
+                    }
+                }
+                if (varied) {
+                    QJsonArray wf;
+                    for (qreal f : s.wf)
+                        wf.append(f);
+                    so.insert(QStringLiteral("wf"), wf);
+                }
+            }
             arr.append(so);
         }
         pages.insert(QString::number(it.key()), arr);
@@ -2138,6 +2612,13 @@ void PdfCanvas::importInk(const QJsonObject &obj)
             const QJsonArray pts = so.value(QStringLiteral("p")).toArray();
             for (qsizetype i = 0; i + 1 < pts.size(); i += 2)
                 s.pts.append(QPointF(pts.at(i).toDouble(), pts.at(i + 1).toDouble()));
+            const QJsonArray wf = so.value(QStringLiteral("wf")).toArray();
+            if (wf.size() == s.pts.size()) {
+                s.wf.reserve(wf.size());
+                for (const QJsonValue &f : wf)
+                    s.wf.append(f.toDouble(1.0));
+            }
+            s.box = strokeBounds(s.pts);
             if (!s.pts.isEmpty())
                 strokes.append(s);
         }
@@ -2227,6 +2708,7 @@ void PdfCanvas::applyZoom(qreal targetZoom, const QPointF &anchor, bool immediat
         // crisply once the gesture settles - invalidating each touch event
         // caused stutter and memory churn.
         relayout();
+        m_settleNeeded = true;      // the bitmaps are still at the previous scale
         if (m_zoomSettle)
             m_zoomSettle->start();
     }
@@ -2306,19 +2788,33 @@ bool PdfCanvas::event(QEvent *e)
 
 bool PdfCanvas::viewportEvent(QEvent *e)
 {
-    // With the GPU viewport, painting belongs to the QOpenGLWidget itself: routing
-    // the paint event to the scroll area (the default) would paint through a GL
-    // context that is not current, and the widget's own frame would never be
-    // composited. Let it through so QOpenGLWidget::paintGL() runs instead.
-    if (m_gpu && e->type() == QEvent::Paint)
-        return false;
-
     switch (e->type()) {
     case QEvent::ContextMenu:
         // "Press and hold" on a touch panel arrives as a context menu request; during
         // writing that used to break the stroke. See contextMenuEvent().
         e->accept();
         return true;
+    case QEvent::MouseButtonPress:
+    case QEvent::MouseButtonRelease:
+    case QEvent::MouseButtonDblClick:
+    case QEvent::MouseMove: {
+        const auto *me = static_cast<QMouseEvent *>(e);
+        // The page has no right-click / middle-click action, so those never reach the
+        // mouse handlers (a held finger is delivered as a right click).
+        if (e->type() != QEvent::MouseMove && me->button() != Qt::LeftButton) {
+            e->accept();
+            return true;
+        }
+        // Windows synthesizes mouse events for a touch contact. Feeding them to the ink
+        // path is not just redundant: a press calls beginInputAt(), which throws the live
+        // stroke away and restarts it at the mouse position, and a release commits it
+        // early. That is what punched white gaps into handwriting mid-stroke.
+        if (m_touchActive) {
+            e->accept();
+            return true;
+        }
+        break;
+    }
     case QEvent::Leave:
         // The pointer left the canvas: drop the indicator (and give the cursor back).
         clearEraserHover();
@@ -2605,16 +3101,34 @@ void resetPalmClass(PdfCanvas::TouchClassState &state)
     state.hasRest = false;
 }
 
-// 手掌半径 = 簇心到最远点的距离（圆周半径）+ 手指接触面的余量，钳在静态
-// 最小档与 3 倍最大档之间。防抖三件套：单帧限幅、EMA、死区；手掌按住不动
-// 时（簇心与慢平均重合）直接冻结，圆环不会呼吸。
-qreal updatePalmRadius(PdfCanvas::TouchClassState &state, const QVector<QPointF> &cluster,
+// A touch sequence may only become a palm eraser if it STARTED as a palm/hand press.
+// A single contact never qualifies: a felt pen tip and a finger are the same signal,
+// and a pen pressing harder must not turn the stroke into an eraser mid-writing.
+bool palmLikeBegin(const QVector<QPointF> &pts, const QVector<qreal> &diameters,
+                   const PdfCanvas::TouchClassState &state)
+{
+    if (pts.size() >= kPalmEnterPoints)
+        return true;                        // 4+ contacts in the first frame: not a pen
+    if (pts.size() >= 2 && diameters.size() == pts.size() && state.hasFingerDiam) {
+        bool anyPalm = false;
+        bool anyFinger = false;
+        for (qreal d : diameters) {
+            if (d >= state.fingerDiam * kPalmSizeRatio)
+                anyPalm = true;
+            else
+                anyFinger = true;
+        }
+        return anyPalm && !anyFinger;       // several contacts, all palm-sized
+    }
+    return false;
+}
+
+// 半径防抖三件套（单帧限幅、EMA、死区）与“按住不动就冻结”，两种来源共用：
+// 簇的圆周半径（面板不上报接触面积时）与接触椭圆半径（纯触摸面板上报时）。
+qreal smoothPalmRadius(PdfCanvas::TouchClassState &state, qreal rawRadius,
                        const QPointF &centroid)
 {
-    qreal spread = 0.0;
-    for (const QPointF &p : cluster)
-        spread = qMax(spread, QLineF(centroid, p).length());
-    const qreal raw = qBound(kPalmRadiusMinPx, spread + kPalmRadiusPadPx, kPalmRadiusMaxPx);
+    const qreal raw = qBound(kPalmRadiusMinPx, rawRadius, kPalmRadiusMaxPx);
 
     if (!state.hasRest) {
         state.restCentroid = centroid;
@@ -2633,6 +3147,16 @@ qreal updatePalmRadius(PdfCanvas::TouchClassState &state, const QVector<QPointF>
             state.radius = next;
     }
     return qBound(kPalmRadiusMinPx, state.radius, kPalmRadiusMaxPx);
+}
+
+// 面板不上报接触面积时：手掌半径 = 簇心到最远点的距离 + 手指接触面的余量。
+qreal updatePalmRadius(PdfCanvas::TouchClassState &state, const QVector<QPointF> &cluster,
+                       const QPointF &centroid)
+{
+    qreal spread = 0.0;
+    for (const QPointF &p : cluster)
+        spread = qMax(spread, QLineF(centroid, p).length());
+    return smoothPalmRadius(state, spread + kPalmRadiusPadPx, centroid);
 }
 
 }   // namespace
@@ -2655,10 +3179,105 @@ PdfCanvas::TouchClassResult PdfCanvas::classifyTouch(const QVector<QPointF> &pts
                                                      TouchClassState &state,
                                                      bool palmEraserEnabled)
 {
+    return classifyTouch(pts, QVector<qreal>(), state, palmEraserEnabled);
+}
+
+PdfCanvas::TouchClassResult PdfCanvas::classifyTouch(const QVector<QPointF> &pts,
+                                                     const QVector<qreal> &diameters,
+                                                     TouchClassState &state,
+                                                     bool palmEraserEnabled)
+{
     TouchClassResult r;
     if (pts.isEmpty()) {
         resetPalmClass(state);
         return r;                              // Idle
+    }
+
+    // --- 接触面积规则（纯触摸面板，专利 CN119917011A）------------------------
+    // 面板上报接触椭圆时，这一条比“数点/聚簇”可靠得多：同一帧里最小的接触是手指，
+    // 明显更大的接触是手掌/手背。基准是最近接触尺寸的中位数，所以不依赖面板单位、
+    // DPI 或缩放。**单触点永远不按面积判手掌**：毛毡笔尖和手指是同一种信号，笔尖
+    // 按重一点接触面积就会变大，那正是“写着写着变橡皮”的来路。没有上报（全 0）时
+    // 整段跳过，走下面的点数/聚簇规则。
+    if (diameters.size() == pts.size()) {
+        qreal minD = 0.0;
+        for (qreal d : diameters) {
+            if (d > 0.0)
+                minD = (minD <= 0.0) ? d : qMin(minD, d);
+        }
+        if (minD > 0.0) {
+            // Finger reference: the median of a short recent window. A median (not the
+            // minimum) keeps a normal finger "normal" even when pressure makes its
+            // contact 1.5-2x bigger. Freezing the window while the palm is erasing
+            // keeps the reference at finger size.
+            if (!state.hasFingerDiam
+                || minD <= state.fingerDiam * kPalmSizeRatio) {   // never feed a palm
+                state.fingerWindow[state.fingerPos] = minD;
+                state.fingerPos = (state.fingerPos + 1) % TouchClassState::kFingerWindow;
+                if (state.fingerCount < TouchClassState::kFingerWindow)
+                    ++state.fingerCount;
+                qreal vals[TouchClassState::kFingerWindow];
+                for (int i = 0; i < state.fingerCount; ++i)
+                    vals[i] = state.fingerWindow[i];
+                std::sort(vals, vals + state.fingerCount);
+                state.fingerDiam = vals[state.fingerCount / 2];
+                state.hasFingerDiam = true;
+            }
+            // The reference is fed by any single contact too (a pen/finger press is the
+            // main calibration source); only the PALM DECISION is skipped for one
+            // contact - a felt pen pressing harder must never become an eraser.
+            const bool canJudgePalm = (pts.size() >= 2);
+            const qreal ratio = state.palmActive ? kPalmSizeStayRatio : kPalmSizeRatio;
+            const qreal palmMin = state.fingerDiam * ratio;
+            int palmCount = 0;
+            int fingerCount = 0;
+            QPointF palmAt;
+            QPointF fingerAt;
+            qreal palmDiam = 0.0;
+            for (int i = 0; i < pts.size(); ++i) {
+                if (diameters.at(i) >= palmMin) {
+                    ++palmCount;
+                    palmAt += pts.at(i);
+                    palmDiam = qMax(palmDiam, diameters.at(i));
+                } else {
+                    ++fingerCount;
+                    fingerAt += pts.at(i);
+                }
+            }
+            if (canJudgePalm && palmCount > 0 && fingerCount == 0) {
+                // 只有手掌/手背：擦。半径直接取接触椭圆的半径（再平滑），比用
+                // 簇心到最远点的距离更接近“手掌有多大就擦多大”。
+                if (!palmEraserEnabled) {
+                    resetPalmClass(state);
+                    r.mode = TouchClass::Writing;
+                    r.hasWritePos = false;
+                    return r;
+                }
+                if (++state.palmFrames >= kPalmEnterFrames) {
+                    state.palmActive = true;
+                    r.mode = TouchClass::PalmEraser;
+                    r.radiusPx = smoothPalmRadius(state, palmDiam * 0.5 + kPalmSizePadPx,
+                                                  palmAt / qreal(palmCount));
+                } else {
+                    r.mode = TouchClass::Writing;   // 幽灵帧：先看清，不动手
+                    r.hasWritePos = false;
+                }
+                return r;
+            }
+            if (palmCount > 0) {
+                // 手掌 + 若干手指：一根手指就写字（掌托防误触）；多根交给双指逻辑。
+                if (canJudgePalm && fingerCount == 1) {
+                    resetPalmClass(state);
+                    r.mode = TouchClass::Writing;
+                    r.writePos = fingerAt;
+                    r.hasWritePos = true;
+                    return r;
+                }
+            } else {
+                // 全是手指大小的接触：清掉掌擦状态，走原来的点数/聚簇规则。
+                resetPalmClass(state);
+            }
+        }
     }
 
     const QVector<QVector<QPointF>> clusters = clusterTouchPoints(pts);
@@ -2763,21 +3382,48 @@ bool PdfCanvas::touchBelongsToOverlay(const QVector<QPointF> &viewportPts) const
 
 bool PdfCanvas::handleTouch(QTouchEvent *te)
 {
+    // Clear even when the sequence is ignored below (no document): leaving the flag set
+    // would block left-button input for the rest of the session.
+    if (te->type() == QEvent::TouchEnd || te->type() == QEvent::TouchCancel) {
+        m_touchActive = false;
+        m_palmSequence = false;
+        m_sequenceWrote = false;
+    }
+
     // Free move pans the view, so it works on a blank canvas too.
     if (m_tool != InkTool::Move && (!m_doc || m_geom.isEmpty()))
         return false;
     // The only path that feeds real finger input: a finger tap may still be noise, so it
     // keeps the "too short = discard" rule in endInput(). A mouse/stylus tap leaves a dot.
     m_strokeFromTouch = true;
+    // Set only for a touch we actually handle, so the flag can never stick on a sequence
+    // that was passed on to the base class.
+    if (te->type() == QEvent::TouchBegin) {
+        m_touchActive = true;
+        m_touchSmooth.reset();     // every finger stroke starts from its own raw sample
+        m_touchWidthValid = false; // contact-area width starts fresh per stroke
+    }
 
     QVector<QPointF> pts;
+    QVector<qreal> diams;       // per-contact size, 0 when the panel does not report it
     for (const QEventPoint &p : te->points()) {
         // Cancelled touches arrive as a TouchCancel event; here a point is
         // either still down or released.
-        if (p.state() != QEventPoint::Released)
+        if (p.state() != QEventPoint::Released) {
             pts.append(p.position());
+            const QSizeF e = p.ellipseDiameters();
+            diams.append(qMax(e.width(), e.height()));
+        }
     }
     InputProbe::instance().addEvent(pts.size());
+
+    // A sequence can only turn into a palm eraser if it STARTED as a palm press. A pen
+    // tip / finger sequence must never do that: its own contact can look palm-sized
+    // when pressed harder (felt pen == finger on this panel).
+    if (te->type() == QEvent::TouchBegin) {
+        m_palmSequence = palmLikeBegin(pts, diams, m_touchClass);
+        m_sequenceWrote = false;
+    }
 
     // A touch that LANDS on a floating overlay (toolbar, palette, page grid)
     // belongs to that widget: never start a stroke underneath it and never treat
@@ -2809,28 +3455,29 @@ bool PdfCanvas::handleTouch(QTouchEvent *te)
                  .arg(e0.width(), 0, 'f', 1).arg(e0.height(), 0, 'f', 1)
                  .arg(e1.width(), 0, 'f', 1).arg(e1.height(), 0, 'f', 1));
 
-    // A cancelled touch stream must NOT commit the pending stroke - that is a
-    // classic source of stray ink when the system takes over a gesture.
+    // The system can take the touch stream away mid-stroke (its own press-and-hold
+    // gesture, an edge swipe, a panel hiccup). Throwing the stroke away there is
+    // exactly what made handwriting lose chunks - see endCancelledTouch().
     if (te->type() == QEvent::TouchCancel) {
-        cancelGesture();
-        m_touchClass = TouchClassState{};  // 被系统打断：触摸记忆作废
-        m_pinchActive = false;
-        m_pinchPts.clear();
-        if (m_touchRelease)
-            m_touchRelease->start();       // keep the lock a bit longer
+        endCancelledTouch();
         return true;
     }
 
     // --- 先分类这一帧：掌擦 / 双指 / 书写三条路互斥 -------------------------
     // 分类器只看点集和它自己的跨帧状态（见 classifyTouch），既有双指语义
     // 一分不动；点数抖动的单簇不再被误当成双指。
-    TouchClassResult cls = classifyTouch(pts, m_touchClass, m_palmEraserEnabled);
+    TouchClassResult cls = classifyTouch(pts, diams, m_touchClass, m_palmEraserEnabled);
     // 自由移动模式完全不做掌擦（那是"拖动画面"模式）：手掌帧沿用原来的
     // 双指路径，该模式的行为不变。
     if (m_tool == InkTool::Move && cls.mode == TouchClass::PalmEraser)
         cls.mode = TouchClass::Pinch;
 
     if (cls.mode == TouchClass::PalmEraser) {
+        // A sequence that began with a pen/finger, or that already wrote ink, must never
+        // turn into an eraser: the writing contact itself can look palm-sized when the
+        // felt tip is pressed harder, and a resting palm must not delete handwriting.
+        if (!m_palmSequence || m_sequenceWrote || m_drawing || m_erasing)
+            return true;
         palmEraseTo(pointsCentroid(pts), cls.radiusPx);
         return true;
     }
@@ -2863,6 +3510,10 @@ bool PdfCanvas::handleTouch(QTouchEvent *te)
 
     if (ended) {
         m_moveDragActive = false;
+        // The smoother holds the newest sample back by one to keep its window centred;
+        // hand it over so the ink reaches the finger.
+        if (m_drawing && m_strokeFromTouch && m_touchSmooth.hasPending())
+            moveInputTo(m_touchSmooth.flush());
         endInput();
         // Keep the lock briefly: synthesized mouse events may still trail in.
         if (m_touchRelease)
@@ -2875,7 +3526,41 @@ bool PdfCanvas::handleTouch(QTouchEvent *te)
     // 书写 / 单点：writePos 是"该落笔的那一个点"（手掌 + 手指时是手指，
     // 不是手掌簇）。
     if (cls.hasWritePos) {
-        const QPointF inkPos = cls.writePos;
+        // Finger samples carry a couple of pixels of panel noise; the panel cannot send
+        // more of them, so filter the ones it sends (see InkSmooth.h). Free-move panning
+        // and the mouse/stylus paths stay raw - a pan has no ink to make hairy and a
+        // stylus is precise enough that filtering would only add lag.
+        //
+        // Contact area -> brush width: the pure-touch stand-in for pressure. The
+        // reference is the smallest contact seen this session, so no absolute size or
+        // DPI is assumed; a panel that reports nothing leaves the stroke uniform.
+        qreal widthFactor = 1.0;
+        if (diams.size() == pts.size() && m_touchClass.hasFingerDiam
+            && m_touchClass.fingerDiam > 0.0) {
+            qreal picked = 0.0;
+            qreal best = 1e9;
+            for (int i = 0; i < pts.size(); ++i) {
+                if (diams.at(i) <= 0.0)
+                    continue;
+                const qreal dist = QLineF(pts.at(i), cls.writePos).length();
+                if (dist < best) {
+                    best = dist;
+                    picked = diams.at(i);
+                }
+            }
+            if (picked > 0.0) {
+                const qreal target = qBound(kInkMinWidthFactor,
+                                            picked / m_touchClass.fingerDiam,
+                                            kInkMaxWidthFactor);
+                if (!m_touchWidthValid) {
+                    m_touchWidth = target;
+                    m_touchWidthValid = true;
+                } else {
+                    m_touchWidth += (target - m_touchWidth) * 0.25;
+                }
+                widthFactor = m_touchWidth;
+            }
+        }
         if (te->type() == QEvent::TouchBegin) {
             // A fresh single-finger sequence starts here (extra fingers arrive as
             // TouchUpdate, never as TouchBegin), so it is safe to unlock at once
@@ -2886,19 +3571,36 @@ bool PdfCanvas::handleTouch(QTouchEvent *te)
             if (m_tool == InkTool::Move) {
                 // One finger in free-move mode pans the view, not the page.
                 m_moveDragActive = true;
-                m_moveLastPos = inkPos;
+                m_moveLastPos = cls.writePos;
                 return true;
             }
-            beginInputAt(inkPos);
+            // Eraser tool + a panel that reports contact size: the wipe follows the
+            // contact (Seewo-style adaptive eraser). The selected step is the floor.
+            qreal eraseRadius = -1.0;
+            if (m_tool == InkTool::Eraser && diams.size() == pts.size()) {
+                qreal widest = 0.0;
+                for (qreal v : diams)
+                    widest = qMax(widest, v);
+                if (widest > 0.0) {
+                    const qreal *steps = eraserRadiusSteps();
+                    eraseRadius = adaptiveEraseRadius(m_eraserRadius, widest,
+                                                     steps[0], steps[2] * 2.0);
+                }
+            }
+            beginInputAt(m_touchSmooth.push(cls.writePos), false, widthFactor, eraseRadius);
+            if (m_drawing)
+                m_sequenceWrote = true;
             return true;
         }
         if (m_touchInkBlocked)
             return true;                   // residual finger of a pinch gesture
         if (m_tool == InkTool::Move) {
-            freePanTo(inkPos);
+            freePanTo(cls.writePos);
             return true;
         }
-        moveInputTo(inkPos);
+        moveInputTo(m_touchSmooth.push(cls.writePos), widthFactor);
+        if (m_drawing)
+            m_sequenceWrote = true;
         return true;
     }
 
@@ -2932,16 +3634,21 @@ void PdfCanvas::testWheelAt(const QPointF &viewportPos, int angleDeltaY, bool ct
 
 void PdfCanvas::testTouchBegin(const QPointF &viewportPos)
 {
-    // Mirrors handleTouch's TouchBegin: a fresh sequence clears the trailing lock.
+    // Mirrors handleTouch's TouchBegin: a fresh sequence clears the trailing lock and
+    // owns the pointer (synthesized mouse events stay out).
     if (m_touchRelease)
         m_touchRelease->stop();
+    m_touchActive = true;
     beginInputAt(viewportPos);
 }
 
 void PdfCanvas::testTouchMove(const QPointF &viewportPos) { moveInputTo(viewportPos); }
 
+void PdfCanvas::testTouchCancel() { endCancelledTouch(); }
+
 void PdfCanvas::testTouchEnd()
 {
+    m_touchActive = false;
     endInput();
     // ...and TouchEnd keeps the lock briefly, exactly like the real touch path.
     // That 250 ms window is what stops a synthesized pan-as-wheel from zooming,

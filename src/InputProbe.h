@@ -6,7 +6,7 @@
 // frame rate?" with numbers taken from the real panel instead of impressions.
 // One line per second is written to the log:
 //
-//   每秒：输入 63 事件（样本 63）| 重绘 58 帧 | 页面栅格化 2 | 缩放 1.00x
+//   每秒：输入 63 事件（样本 63）| 重绘 58 帧 | 栅格化块 2 | 缩放 1.00x
 //
 //   in     = touch/tablet events the platform actually delivered (the panel's
 //            report rate after Qt's own merging) - if this is ~20 while the
@@ -54,7 +54,7 @@ public:
             return QString();
 
         const QString line =
-            QStringLiteral("每秒：输入 %1 事件（样本 %2）| 重绘 %3 帧 | 页面栅格化 %4 | 缩放 %5x")
+            QStringLiteral("每秒：输入 %1 事件（样本 %2）| 重绘 %3 帧 | 栅格化块 %4 | 缩放 %5x")
                 .arg(m_events)
                 .arg(m_points)
                 .arg(m_paints)

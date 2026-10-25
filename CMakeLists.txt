@@ -4,7 +4,7 @@ project(PDFBoard LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Pdf Network OpenGLWidgets)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Pdf Network)
 qt_standard_project_setup()
 
 qt_add_executable(pdfboard
@@ -18,7 +18,6 @@ qt_add_executable(pdfboard
     src/ZoomBar.cpp
     src/PdfCanvas.h
     src/PdfCanvas.cpp
-    src/GlViewport.h
     src/AnnotationBundle.h
     src/AnnotationBundle.cpp
     src/PdfExport.h
@@ -45,8 +44,13 @@ qt_add_executable(pdfboard
     src/IconPainter.cpp
     src/Theme.h
     src/ThemePresets.generated.h
+    src/TouchProbe.h
+    src/TouchProbe.cpp
   src/InputProbe.h
   src/InkDirty.h
+  src/InkErase.h
+  src/InkSmooth.h
+  src/InkStroke.h
   src/PaperBase.h
 )
 
@@ -54,7 +58,6 @@ target_link_libraries(pdfboard PRIVATE
     Qt6::Widgets
     Qt6::Pdf
     Qt6::Network
-    Qt6::OpenGLWidgets
 psapi
 dwmapi
 version

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "InkSmooth.h"
 #include "Theme.h"
 
 #include <QAbstractScrollArea>
@@ -9,12 +10,14 @@
 #include <QPixmap>
 #include <QJsonObject>
 #include <QPointF>
+#include <QRectF>
 #include <QSizeF>
 #include <QVector>
 
 class QPdfDocument;
 class QPainter;
 class QTouchEvent;
+class QAbstractNativeEventFilter;
 
 class QTabletEvent;
 class QWheelEvent;
@@ -56,27 +59,11 @@ public:
     // palette and the page-grid picker).
     void applyTheme();
 
-    // The whole page-painting pass (backdrop, pages, ink, eraser ring). paintEvent()
-    // calls it with a painter on the CPU raster viewport; GlViewport::paintGL()
-    // calls it with a painter on the OpenGL surface when 硬件加速 is on. The
-    // painter is always created by the caller, so this method never binds a
-    // surface of its own - that is what lets both paths share one implementation.
+    // The whole page-painting pass (backdrop, pages, ink, eraser ring).
     void paintForViewport(QPainter &p);
-    bool gpuAccelerated() const { return m_gpu; }
 
     // A full-canvas freeze frame for the page-switch transition (MainWindow).
-    // A plain canvas is grabbed; a GPU canvas (硬件加速) is NOT - QWidget::grab()
-    // does not capture a QOpenGLWidget's GL content, which is what made a switch
-    // 花屏 - so its page pass is rendered into the pixmap with the very same
-    // paintForViewport() the on-screen CPU path uses. Sized like grab(): the whole
-    // widget at the widget's device pixel ratio.
     QPixmap freezeFramePixmap();
-
-    // GPU path (硬件加速) test hooks: `testGpuRenderAvailable()` is the same
-    // driver probe the constructor consults, and `testViewportIsGl()` reports
-    // which viewport actually won (true = the OpenGL surface was installed).
-    static bool testGpuRenderAvailable();
-    bool testViewportIsGl() const;
 
     int pageCount() const;
     int currentPage() const;            // topmost visible page
@@ -157,6 +144,15 @@ public:
         bool    hasRadius = false;
         QPointF restCentroid;       // 静止检测用的慢平均簇心
         bool    hasRest = false;
+        // 接触面积规则的“手指基准”：最近 kFingerWindow 帧接触尺寸的中位数。
+        // 中位数比最小值稳：按压力度让指腹变大 1.5~2 倍时仍算手指，不会被误判成
+        // 手掌；手掌帧不参与，免得手掌把基准抬高后自己就擦不动了。跨文档清空。
+        static constexpr int kFingerWindow = 16;
+        qreal   fingerWindow[kFingerWindow] = {};
+        int     fingerCount = 0;
+        int     fingerPos = 0;
+        qreal   fingerDiam = 0.0;
+        bool    hasFingerDiam = false;
     };
     struct TouchClassResult {
         TouchClass mode = TouchClass::Idle;
@@ -165,6 +161,14 @@ public:
         bool       hasWritePos = false;
     };
     static TouchClassResult classifyTouch(const QVector<QPointF> &pts,
+                                          TouchClassState &state,
+                                          bool palmEraserEnabled = false);
+    // 带接触面积的版本（纯触摸面板）：`diameters` 与 `pts` 一一对应，取每个接触
+    // 椭圆的长边（逻辑 px），0 = 该面板没有上报。最小接触当“手指基准”，明显更大
+    // 的接触就是手掌/手背 —— 这是视源专利 CN119917011A 的做法（用物理接触面积
+    // 区分手指与手掌），好处是不依赖点数抖动，也不需要写死 DPI/单位。
+    static TouchClassResult classifyTouch(const QVector<QPointF> &pts,
+                                          const QVector<qreal> &diameters,
                                           TouchClassState &state,
                                           bool palmEraserEnabled = false);
 
@@ -179,6 +183,12 @@ public:
                        const QColor &color, qreal width, int steps = 120,
                        bool densify = true);
     int  testStrokePoints(int page, int index) const;
+    // First sample of a stored stroke, normalized. Used to prove a synthesized
+    // mouse event did not restart the stroke (a restart moves the first sample).
+    QPointF testStrokeFirstPoint(int page, int index) const;
+    // Number of per-point width factors (0 = uniform stroke). Lets the self test prove
+    // that erasing keeps `wf` parallel to `pts`.
+    int  testStrokeWidthCount(int page, int index) const;
     // Number of points the sample path would keep for `raw` (dedupe + densify):
     // lets the self test prove repeated panel frames are dropped, not stored.
     int  testDensifiedCount(const QVector<QPointF> &raw) const;
@@ -187,6 +197,9 @@ public:
     void  testTouchBegin(const QPointF &viewportPos);
     void  testTouchMove(const QPointF &viewportPos);
     void  testTouchEnd();
+    // The system can take a touch stream away mid-stroke (its own press-and-hold
+    // gesture, an edge swipe). Same route as handleTouch's TouchCancel branch.
+    void  testTouchCancel();
     bool  testTouchBelongsToOverlay(const QVector<QPointF> &viewportPts) const;
     // 掌擦的整帧驱动（自测用）：走和 handleTouch 掌擦分支同一段"分类 -> 执行"
     // 路径，只是不经过 QTouchEvent，所以没有触摸屏也能断言"多帧手掌真的擦掉了
@@ -201,6 +214,9 @@ public:
     void  testZoomAt(const QPointF &viewportAnchor, qreal factor);
     qreal testZoom() const { return m_zoom; }
     int   testPageAtViewportY(qreal y) const;
+    // Page rectangle in viewport coordinates. The self test uses it to sample the
+    // rounded corners of a painted page.
+    QRectF testPageRect(int page) const { return pageRectInViewport(page); }
     qreal testFracAtViewportY(qreal y) const;
     qreal testFracX(int page, qreal x) const;
     QSize testViewportSize() const { return viewport()->size(); }
@@ -293,11 +309,21 @@ private:
     };
     struct Stroke {
         QVector<QPointF> pts;   // normalized 0..1 inside the page rect
+        // Bounding box of `pts` in the same normalized space, filled in when the stroke
+        // is committed. drawInk() uses it to skip strokes that fall outside the
+        // repainted rect, so a page full of ink does not slow every live sample down.
+        // An empty box means "no extent" (a dot) and the stroke is always drawn.
+        QRectF box;
         QColor color{Qt::red};
         // Stroke thickness as a FRACTION of the page width (not device px), so
         // ink scales with zoom: writing zoomed in and then fitting the width
         // shrinks the strokes along with the page.
         qreal  width = 0.003;
+        // Per-point width factor (1.0 = `width`), parallel to `pts`. Empty means a
+        // uniform stroke - mouse/stylus input, imported files without it, or a panel
+        // that does not report contact size. Finger input fills it from the contact
+        // area, which is the touch screen's version of pressure.
+        QVector<qreal> wf;
     };
     using InkModel = QHash<int, QVector<Stroke>>;
 
@@ -320,9 +346,24 @@ private:
     // the settle timer (used for discrete actions like "适配宽度").
     void applyZoom(qreal targetZoom, const QPointF &anchor, bool immediate);
 
-    QImage imageFor(int page);          // cached render (renders on miss)
-    void   trimCache();
-    void   touchLru(int page);
+    // Page rasters are tiled: each tile is 512x512 DEVICE pixels rendered at the
+    // current zoom (1:1, no whole-page downscale), so a 4K panel gets a sharp page
+    // and a scroll strip only has to render the tiles it newly exposes.
+    struct PageRaster {
+        QSize deviceSize;               // full page at render time, device px
+        int cols = 0;
+        int rows = 0;
+        QVector<QImage> tiles;          // cols*rows, null = not rendered yet
+        QImage preview;                 // low-res underlay for pinch / stale zoom
+        qint64 bytes = 0;
+    };
+    PageRaster &rasterFor(int page, const QSize &deviceSize);
+    QImage tileAt(int page, PageRaster &pr, int tx, int ty);
+    QImage previewAt(int page, PageRaster &pr);
+    void   noteRender(int page, qint64 ms, const QSize &size);
+    void   drawPageRaster(QPainter &p, int page, const QRectF &r);
+    void   trimRasters();
+    void   touchRaster(int page);
 
     int    pageAtContentY(qreal contentY) const;
     int    pageAtViewportPos(const QPointF &viewportPos) const;  // -1 if off-page
@@ -338,6 +379,9 @@ private:
     // Ink mutation helpers (all snapshot the model before changing it).
     void         pushUndoSnapshot();
     void         cancelGesture();
+    // Touch stream taken away by the system mid-stroke: keep what was drawn, drop the
+    // gesture state. Shared by handleTouch(TouchCancel) and testTouchCancel().
+    void         endCancelledTouch();
     // Partial (segment-level) erase: cuts out only the touched part of a
     // stroke; the remaining pieces stay as separate strokes. Returns true if
     // anything changed. `radiusPx` is the wipe radius in logical px (the
@@ -371,8 +415,13 @@ private:
     // Shared input entry points (used by both mouse and touch handlers).
     // `asEraser` is for hardware that names its own eraser: a stylus used with its eraser end
     // erases this stroke without touching the toolbar's tool state.
-    void beginInputAt(const QPointF &viewportPos, bool asEraser = false);
-    void moveInputTo(const QPointF &viewportPos);
+    // `widthFactor` (touch only) is the per-sample brush width multiplier derived
+    // from the contact area; 1.0 keeps the stroke uniform. `eraseRadiusPx` (touch
+    // only) is the contact-area-driven wipe radius for the eraser tool; <= 0 keeps
+    // the selected step.
+    void beginInputAt(const QPointF &viewportPos, bool asEraser = false,
+                      qreal widthFactor = 1.0, qreal eraseRadiusPx = -1.0);
+    void moveInputTo(const QPointF &viewportPos, qreal widthFactor = 1.0);
     void endInput();
     // Free-move mode: pans the view by the pointer movement since the previous
     // sample. Returns true while a move drag is in progress.
@@ -387,10 +436,6 @@ private:
     QTimer       *m_zoomSettle = nullptr;   // re-render at full quality after a zoom
     QTimer       *m_touchRelease = nullptr; // delays clearing the touch ink lock
     QString       m_path;
-
-    // True when the viewport is a GlViewport (硬件加速): the GPU surface owns
-    // painting and paintEvent() steps aside.
-    bool m_gpu = false;
 
     Theme::Metrics m_ui;                // chrome metrics derived from the font
     qreal m_pageRadius = 4.0;           // rounded paper corners (logical px)
@@ -415,10 +460,11 @@ private:
     qreal  m_zoom     = 1.0;            // multiplier on the fit-width scale
     qreal  m_scale    = 1.0;            // points -> device px
 
-    QHash<int, QImage> m_cache;
-    QVector<int>       m_lru;           // least recent first
-    qint64 m_cacheBytes  = 0;
-    qint64 m_cacheBudget = 128LL * 1024 * 1024;   // whole-page LRU budget (no tiling by design)
+    static constexpr int kTilePx = 512;            // tile edge in DEVICE pixels
+    QHash<int, PageRaster> m_rasters;
+    QVector<int>           m_rasterLru;            // least recent first
+    qint64 m_rasterBytes  = 0;
+    qint64 m_rasterBudget = 160LL * 1024 * 1024;   // tiles + previews
 
     InkModel m_ink;
     Stroke   m_current;
@@ -429,15 +475,18 @@ private:
     QColor  m_penColor{0xD3, 0x2F, 0x2F};
     qreal   m_penWidth = 4.0;           // device px
     // 橡皮大小：静态三档里选中的那一档（逻辑像素半径），默认第一档 14。
-    qreal   m_eraserRadius = eraserRadiusSteps()[0];
+    qreal m_eraserRadius = eraserRadiusSteps()[0];
+    // Live wipe radius for the current touch eraser drag (contact-area adaptive);
+    // 0 means "use the selected step".
+    qreal m_liveEraseRadius = 0.0;
 
     bool m_erasing     = false;         // point-eraser drag in progress
     bool m_erasePushed = false;         // this drag already took a snapshot
     QPointF m_lastErasePos;             // previous eraser sample (for sweeping)
     bool    m_hasLastErasePos = false;
     // 掌擦：分类器（classifyTouch）负责防抖，这里只跟着它的结论走。
-    // 开关出厂默认关（实验性功能，见 AppSettings::palmEraserEnabled）；主机把已保存
-    // 的设置推给每份画布（见 MainWindow）。擦除是破坏性操作，忘了推就宁可不擦。
+    // 出厂默认关（见 AppSettings::palmEraserEnabled）：毛毡笔尖与手指同信号，误判
+    // 一次会擦掉刚写的字；需要时在设置里打开。主机仍把已保存的设置推给每份画布。
     bool    m_palmEraserEnabled = false;
     qreal   m_palmRadius = 0.0;         // 当前动态半径（掌擦期间显示与命中都用它）
     bool    m_palmEraseActive = false;  // 掌擦手势进行中
@@ -472,6 +521,21 @@ private:
     bool    m_hasTrackedPos = false;
     bool    m_pinchActive = false;      // two-finger zoom+pan in progress
     bool    m_touchInkBlocked = false;  // no inking until every finger lifts
+    // A finger owns the input right now (TouchBegin .. TouchEnd/Cancel). Windows also
+    // synthesizes mouse events for that contact; a press there restarts the live stroke
+    // and a release commits it early, so both are ignored while this is set.
+    bool    m_touchActive = false;
+    // Per touch sequence: did it START palm-like, and has it already written ink?
+    // A sequence that wrote ink must never turn into an eraser when the finger lifts
+    // and the palm is still resting - that reads as "写字写着写着变橡皮".
+    bool    m_palmSequence = false;
+    bool    m_sequenceWrote = false;
+    // Jitter filter for finger samples (see InkSmooth.h). Reset per stroke.
+    InkSmoother m_touchSmooth;
+    // Contact-area brush width: EMA of (contact diameter / finger reference), the
+    // pure-touch equivalent of pressure. Only the touch path feeds it.
+    qreal   m_touchWidth = 1.0;
+    bool    m_touchWidthValid = false;
     QVector<QPointF> m_pinchPts;        // last two touch points
     bool    m_moveDragActive = false;   // free-move drag in progress (mouse / one finger)
     QPointF m_moveLastPos;              // previous free-move sample (viewport coords)
@@ -481,7 +545,18 @@ private:
 
     InkToolbar *m_toolbar = nullptr;
 
+    // True when the cached page rasters are coarse (rendered while writing/pinching)
+    // or were left at the previous zoom. Only then does the settle timer have work;
+    // starting it after every stroke re-rendered a whole 4K page for nothing (measured
+    // 48-60 ms per stroke on the classroom panel, see docs 2.84).
+    bool m_settleNeeded = false;
+
     qint64 m_lastRenderMs = 0;
     QSize  m_lastRenderSize;
     bool   m_renderNotifyPending = false;   // one queued status-bar update at a time
+
+    // Windows: swallows right-click / context-menu messages and answers the system's
+    // "which touch gestures may I run?" query so a held finger cannot become a right
+    // click (see the class in PdfCanvas.cpp). Null on other platforms.
+    QAbstractNativeEventFilter *m_nativeFilter = nullptr;
 };

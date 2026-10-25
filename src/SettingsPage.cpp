@@ -897,12 +897,12 @@ void SettingsPage::buildUi()
                                        QStringLiteral("登录 Windows 后自动打开本程序"),
                                        m_autoStart, Theme::Space3, Theme::Space3));
     m_palmEraser = new ToggleSwitch(general.frame);
-    m_palmEraser->setToolTip(QStringLiteral("实验性功能：多指触摸会被 Windows 手势拦截，多数面板上不可用"));
+    m_palmEraser->setToolTip(QStringLiteral("默认关：开启后手掌/手背大面积接触才触发擦除；用笔或手指书写不受影响"));
     m_palmEraser->setChecked(AppSettings::palmEraserEnabled());
     connect(m_palmEraser, &QAbstractButton::toggled, this, &SettingsPage::onPalmEraserToggled);
     general.col->addWidget(makeTextRow(general.frame,
-                                       QStringLiteral("手掌当橡皮（实验性）"),
-                                       QStringLiteral("实验性功能，暂不可用：多指触摸会被系统手势拦截"),
+                                       QStringLiteral("手掌/手背当橡皮"),
+                                       QStringLiteral("默认关。开启后大面积接触自动擦除（可撤销）；笔/手指书写不受影响"),
                                        m_palmEraser, Theme::Space3, Theme::Space3));
     m_reduceMotion = new ToggleSwitch(general.frame);
     m_reduceMotion->setToolTip(QStringLiteral("界面动画直接跳到结果，适合配置较低的一体机"));
@@ -912,16 +912,6 @@ void SettingsPage::buildUi()
                                        QStringLiteral("减少动效"),
                                        QStringLiteral("关闭界面动画，配置较低的一体机上更省资源"),
                                        m_reduceMotion, Theme::Space3, Theme::Space3));
-    m_gpuAccel = new ToggleSwitch(general.frame);
-    m_gpuAccel->setToolTip(QStringLiteral("用 GPU 渲染页面；仅有独立显卡驱动时有效，"
-                                          "软件 OpenGL 会被忽略。重新打开文档后生效"));
-    m_gpuAccel->setChecked(AppSettings::gpuAcceleration());
-    connect(m_gpuAccel, &QAbstractButton::toggled, this, &SettingsPage::onGpuAccelerationToggled);
-    general.col->addWidget(makeTextRow(general.frame,
-                                       QStringLiteral("硬件加速（实验性）"),
-                                       QStringLiteral("用 GPU 渲染页面，重新打开文档后生效；"
-                                                      "仅在显卡驱动可用时起作用"),
-                                       m_gpuAccel, Theme::Space3, Theme::Space3));
     col->addWidget(general.frame);
 
     // --- Word 文档 ----------------------------------------------------------
@@ -1917,18 +1907,6 @@ void SettingsPage::onReduceMotionToggled(bool on)
         return;
     }
     Theme::Motion::setReduced(on);   // takes effect on the next animation, no restart
-}
-
-// 硬件加速 has no live switch: the viewport is chosen when a document's canvas is
-// created, so the value only applies to documents opened from now on.
-void SettingsPage::onGpuAccelerationToggled(bool on)
-{
-    QString err;
-    if (!AppSettings::setGpuAcceleration(on, &err)) {
-        QMessageBox::warning(this, QStringLiteral("保存失败"), err);
-        const QSignalBlocker block(m_gpuAccel);
-        m_gpuAccel->setChecked(AppSettings::gpuAcceleration());
-    }
 }
 
 void SettingsPage::onRegisterPdf()

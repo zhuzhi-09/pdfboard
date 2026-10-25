@@ -58,7 +58,6 @@ private slots:
     void onAutoStartToggled(bool on);
     void onPalmEraserToggled(bool on);
     void onReduceMotionToggled(bool on);
-    void onGpuAccelerationToggled(bool on);
     void onRegisterPdf();
     void onChooseSaveDir();
     void onResetSaveDir();
@@ -97,7 +96,6 @@ private:
     QAbstractButton *m_autoStart = nullptr;
     QAbstractButton *m_palmEraser = nullptr;   // 手掌当橡皮（实验性，默认关）
     QAbstractButton *m_reduceMotion = nullptr; // 减少动效（默认关）
-    QAbstractButton *m_gpuAccel = nullptr;     // 硬件加速（实验性，默认关）
     QPushButton     *m_register  = nullptr;
     QLabel          *m_savePathLabel = nullptr;
     QPushButton     *m_chooseSaveDir = nullptr;

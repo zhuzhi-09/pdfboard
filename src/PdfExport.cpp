@@ -1,5 +1,6 @@
 #include "PdfExport.h"
 
+#include "InkStroke.h"
 #include "PdfCanvas.h"
 
 #include <QBuffer>
@@ -102,25 +103,59 @@ QImage rasterizePageWithInk(const PdfCanvas *canvas, int page, int dpi,
             if (pts.size() < 2)
                 continue;
 
+            // Contact-area width factors, if this stroke has them (pure-touch input).
+            QVector<qreal> factors;
+            const QJsonArray wf = so.value(QStringLiteral("wf")).toArray();
+            if (wf.size() * 2 == pts.size()) {
+                factors.reserve(wf.size());
+                for (const QJsonValue &f : wf)
+                    factors.append(f.toDouble(1.0));
+            }
+
             // Same normalized -> pixel mapping the on-screen ink uses.
             const qreal w = qMax<qreal>(1.0, wNorm * iw);
             if (pts.size() < 4) {
                 // One point is a tap: the screen draws it as a dot (round cap over zero
                 // length), so the export has to as well or taps would vanish from the
                 // saved PDF/PNG.
-                p.setPen(QPen(color, w, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+                const qreal dotW = factors.isEmpty() ? w : qMax<qreal>(1.0, w * factors.first());
+                p.setPen(QPen(color, dotW, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
                 p.setBrush(Qt::NoBrush);
                 p.drawPoint(QPointF(pts.at(0).toDouble() * (iw - 1),
                                     pts.at(1).toDouble() * (ih - 1)));
                 continue;
             }
 
+            QVector<QPointF> dev;
+            dev.reserve(pts.size() / 2);
+            for (qsizetype i = 0; i + 1 < pts.size(); i += 2)
+                dev.append(QPointF(pts.at(i).toDouble() * (iw - 1),
+                                   pts.at(i + 1).toDouble() * (ih - 1)));
+
+            bool varied = !factors.isEmpty();
+            if (varied) {
+                varied = false;
+                for (qreal f : factors) {
+                    if (qAbs(f - 1.0) > 0.01) {
+                        varied = true;
+                        break;
+                    }
+                }
+            }
+            if (varied) {
+                const QPainterPath outline = inkOutlinePath(dev, factors, w);
+                if (!outline.isEmpty()) {
+                    p.setPen(Qt::NoPen);
+                    p.setBrush(color);
+                    p.drawPath(outline);
+                    continue;
+                }
+            }
+
             QPainterPath path;
-            path.moveTo(pts.at(0).toDouble() * (iw - 1),
-                        pts.at(1).toDouble() * (ih - 1));
-            for (qsizetype i = 2; i + 1 < pts.size(); i += 2)
-                path.lineTo(pts.at(i).toDouble() * (iw - 1),
-                            pts.at(i + 1).toDouble() * (ih - 1));
+            path.moveTo(dev.first());
+            for (int i = 1; i < dev.size(); ++i)
+                path.lineTo(dev.at(i));
 
             p.setPen(QPen(color, w, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
             p.setBrush(Qt::NoBrush);

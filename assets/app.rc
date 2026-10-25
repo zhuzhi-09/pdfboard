@@ -18,13 +18,13 @@ BEGIN
         BLOCK "080404B0"
         BEGIN
             VALUE "CompanyName",      "PDFBoard"
-            VALUE "FileDescription",  "落墨·大屏批注"
-            VALUE "FileVersion",      "1.14.0.0"
+            VALUE "FileDescription",  "落墨·大屏批注（实验版）"
+            VALUE "FileVersion",      "1.14.0-exp"
             VALUE "InternalName",     "pdfboard"
             VALUE "LegalCopyright",   "MIT License"
             VALUE "OriginalFilename", "pdfboard.exe"
             VALUE "ProductName",      "落墨·大屏批注"
-            VALUE "ProductVersion",   "1.14.0.0"
+            VALUE "ProductVersion",   "1.14.0-exp"
         END
     END
     BLOCK "VarFileInfo"
