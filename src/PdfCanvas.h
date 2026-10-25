@@ -380,6 +380,8 @@ private:
     QImage tileAt(int page, PageRaster &pr, int tx, int ty);
     QImage previewAt(int page, PageRaster &pr);
     void   requestTile(int page, PageRaster &pr, int tx, int ty);
+    void   prefetchTiles(int page, PageRaster &pr,
+                         int vx0, int vy0, int vx1, int vy1);
     void   onTileRendered(int page, const QSize &size, const QImage &image,
                           quint64 requestId);
     void   noteRender(int page, qint64 ms, const QSize &size);
@@ -488,8 +490,10 @@ private:
     qint64 m_rasterBytes  = 0;
     qint64 m_rasterBudget = 160LL * 1024 * 1024;   // tiles + previews
 
-    // Tiles are filled by a worker thread so the UI only ever pays for the
-    // preview (a few ms) on a cold page/zoom, not for the whole tile set.
+    // The visible tiles are always rendered on the UI thread so the page stays
+    // sharp; the margin around them is prefetched by a worker for smooth
+    // scrolling. (Trying to fill the visible area asynchronously behind a 1/4
+    // preview looked like a scrambled page on a tall document.)
     QPdfPageRenderer *m_tileRenderer = nullptr;
     QHash<quint64, PendingTile> m_pendingTiles;    // requestId -> request
     QSet<quint64> m_pendingTileKeys;               // dedup pending requests

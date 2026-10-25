@@ -915,6 +915,33 @@ void PdfCanvas::requestTile(int page, PageRaster &pr, int tx, int ty)
     m_pendingTileKeys.insert(key);
 }
 
+// Warm the tiles just outside the visible range. The visible range itself is
+// rendered synchronously, so the page is always sharp; this only makes the next
+// scroll cheaper. The budget keeps the worker queue short.
+void PdfCanvas::prefetchTiles(int page, PageRaster &pr,
+                              int vx0, int vy0, int vx1, int vy1)
+{
+    if (!m_tileRenderer || !m_doc)
+        return;
+    constexpr int kMargin = 2;
+    constexpr int kBudget = 16;
+    const int x0 = qMax(0, vx0 - kMargin);
+    const int x1 = qMin(pr.cols - 1, vx1 + kMargin);
+    const int y0 = qMax(0, vy0 - kMargin);
+    const int y1 = qMin(pr.rows - 1, vy1 + kMargin);
+    int budget = kBudget;
+    for (int ty = y0; ty <= y1 && budget > 0; ++ty) {
+        for (int tx = x0; tx <= x1 && budget > 0; ++tx) {
+            if (tx >= vx0 && tx <= vx1 && ty >= vy0 && ty <= vy1)
+                continue;
+            if (!pr.tiles.at(ty * pr.cols + tx).isNull())
+                continue;
+            requestTile(page, pr, tx, ty);
+            --budget;
+        }
+    }
+}
+
 void PdfCanvas::onTileRendered(int page, const QSize &size, const QImage &image,
                                quint64 requestId)
 {
@@ -995,12 +1022,13 @@ void PdfCanvas::drawPageRaster(QPainter &p, int page, const QRectF &r)
                     qMax(1, int(qRound(r.height() * dpr))));
     PageRaster &pr = rasterFor(page, dev);
     const bool stale = m_pinchActive || m_settleNeeded || pr.deviceSize != dev;
-    // On screen the tiles arrive from the worker; offscreen canvases (paint
-    // benchmark, UI/ink self tests) keep the deterministic synchronous path. The
-    // smoke test marks the MainWindow offscreen, so check the window too.
+    // Visible tiles are ALWAYS rendered on the UI thread (sharp page). Only the
+    // margin around them is prefetched by the worker, for smooth scrolling.
+    // Offscreen canvases (benchmark/self tests) skip the prefetch so their
+    // results stay deterministic; the smoke test marks the MainWindow offscreen.
     const bool offscreen = testAttribute(Qt::WA_DontShowOnScreen)
                            || (window() && window()->testAttribute(Qt::WA_DontShowOnScreen));
-    const bool async = m_asyncTiles && (!offscreen || m_forceAsyncTiles);
+    const bool prefetch = m_asyncTiles && (!offscreen || m_forceAsyncTiles);
 
     // Only the part of the page that is on screen and inside the paint region
     // needs tiles: a live ink sample dirties ~140x90 px and must touch one tile,
@@ -1034,9 +1062,9 @@ void PdfCanvas::drawPageRaster(QPainter &p, int page, const QRectF &r)
         }
     }
 
-    // Previous-scale tiles (pinch / pending settle) and the async cold path: fill
-    // the gaps with the preview instead of blocking the UI thread on 30+ tiles.
-    if ((stale || async) && missing) {
+    // Previous-scale tiles (pinch / pending settle): fill the gaps with the
+    // preview instead of blocking the UI thread on 30+ stale tiles.
+    if (stale && missing) {
         const QImage pv = previewAt(page, pr);
         if (!pv.isNull())
             p.drawImage(r, pv);
@@ -1054,10 +1082,6 @@ void PdfCanvas::drawPageRaster(QPainter &p, int page, const QRectF &r)
             if (img.isNull()) {
                 if (stale)
                     continue;               // the preview underneath covers it
-                if (async) {
-                    requestTile(page, pr, tx, ty);
-                    continue;               // preview underneath, tile repaints later
-                }
                 img = tileAt(page, pr, tx, ty);
                 if (img.isNull())
                     continue;
@@ -1121,6 +1145,12 @@ void PdfCanvas::drawPageRaster(QPainter &p, int page, const QRectF &r)
             m_rasterBytes -= freed;
         }
     }
+
+    // Prefetch a small margin around the visible range so the next scroll is
+    // already sharp. Skip it while the page is over its tile cap (the trim above
+    // would immediately drop what we just asked for).
+    if (prefetch && !stale && pr.bytes < kPageTileBytes)
+        prefetchTiles(page, pr, tx0, ty0, tx1, ty1);
 
     trimRasters();
 }

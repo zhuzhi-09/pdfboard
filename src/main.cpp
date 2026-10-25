@@ -54,6 +54,7 @@
 #include <QElapsedTimer>
 #include <QEventLoop>
 #include <QImage>
+#include <QtMath>
 #include <QPdfDocument>
 #include <QPdfDocumentRenderOptions>
 #include <QPdfWriter>
@@ -1206,6 +1207,98 @@ static int runTileClipSelfTest(const QString &outDir)
                     .arg(cellsOk ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
             shot.save(dir.filePath(QStringLiteral("canvas_async.png")));
         }
+    }
+
+    // Short viewport (the classroom case: page taller than the window). The
+    // visible page is rendered synchronously and must be pixel-identical to a
+    // plain synchronous paint; the worker only prefetches the margin.
+    {
+        const QSize shortSize(1000, 600);
+        PdfCanvas *c = new PdfCanvas;
+        c->setAttribute(Qt::WA_DontShowOnScreen, true);
+        c->resize(shortSize);
+        c->show();
+        QString e;
+        if (!c->openPdf(pdf, &e)) {
+            out(QStringLiteral("[tileclip] short open FAILED: %1").arg(e));
+            ++failed;
+        } else {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 50);
+            QImage syncShot(c->viewport()->size(), QImage::Format_ARGB32);
+            syncShot.fill(Qt::white);
+            {
+                QPainter p(&syncShot);
+                c->paintForViewport(p);
+            }
+
+            const QRectF pr = c->testPageRect(0);
+            const QSize dev = c->testRasterDeviceSize(0);
+            const QRectF vis = pr.intersected(QRectF(c->viewport()->rect()));
+            const int devX0 = int((vis.left() - pr.left()) / pr.width() * dev.width());
+            const int devY0 = int((vis.top() - pr.top()) / pr.height() * dev.height());
+            const int devX1 = int(qCeil((vis.right() - pr.left()) / pr.width() * dev.width()));
+            const int devY1 = int(qCeil((vis.bottom() - pr.top()) / pr.height() * dev.height()));
+            const int cols = qMax(1, (dev.width() + 511) / 512);
+            const int rows = qMax(1, (dev.height() + 511) / 512);
+            const int tx0 = qBound(0, devX0 / 512, cols - 1);
+            const int ty0 = qBound(0, devY0 / 512, rows - 1);
+            const int tx1 = qBound(0, qMax(devX0, devX1 - 1) / 512, cols - 1);
+            const int ty1 = qBound(0, qMax(devY0, devY1 - 1) / 512, rows - 1);
+            const int want = (tx1 - tx0 + 1) * (ty1 - ty0 + 1);
+
+            c->releaseCachedPages();
+            c->testForceAsyncTiles(true);
+            QImage asyncShot(c->viewport()->size(), QImage::Format_ARGB32);
+            asyncShot.fill(Qt::white);
+            QElapsedTimer first;
+            first.start();
+            {
+                QPainter p(&asyncShot);
+                c->paintForViewport(p);
+            }
+            const qint64 firstMs = first.elapsed();
+
+            QElapsedTimer t;
+            t.start();
+            while (t.elapsed() < 3000 && c->testCachedTileCount(0) <= want) {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 10);
+                QThread::msleep(2);
+            }
+            const int got = c->testCachedTileCount(0);
+            bool ok = got > want && !vis.isEmpty() && !dev.isEmpty();
+            out(QStringLiteral("[tileclip] prefetch: first paint %1 ms, visible %2, cached %3 in %4 ms")
+                    .arg(firstMs).arg(want).arg(got).arg(t.elapsed()));
+
+            asyncShot.fill(Qt::white);
+            {
+                QPainter p(&asyncShot);
+                c->paintForViewport(p);
+            }
+            const QRect area = vis.toAlignedRect().intersected(
+                QRect(QPoint(0, 0), asyncShot.size()));
+            const QImage a = syncShot.copy(area);
+            const QImage b = asyncShot.copy(area);
+            double shortMean = 0.0;
+            double shortBad = 0.0;
+            int shortMax = 0;
+            if (a.size() == b.size() && !a.isNull()) {
+                stats(b, a, &shortMean, &shortMax, &shortBad);
+                if (!(shortMean < 6.0 && shortMax < 160 && shortBad < 1.0))
+                    ok = false;
+            } else {
+                ok = false;
+            }
+            out(QStringLiteral("[tileclip] prefetch page %1x%2 visible %3x%4: mean %5, max %6, >24 %7%% -> %8")
+                    .arg(qRound(pr.width())).arg(qRound(pr.height()))
+                    .arg(area.width()).arg(area.height())
+                    .arg(shortMean, 0, 'f', 2).arg(shortMax).arg(shortBad, 0, 'f', 2)
+                    .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+            if (!ok)
+                ++failed;
+            syncShot.save(dir.filePath(QStringLiteral("canvas_short_sync.png")));
+            asyncShot.save(dir.filePath(QStringLiteral("canvas_short_async.png")));
+        }
+        delete c;
     }
 
     out(QStringLiteral("[tileclip] %1").arg(failed == 0 ? QStringLiteral("OK")
