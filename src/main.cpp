@@ -1357,6 +1357,190 @@ static int runTileClipSelfTest(const QString &outDir)
     return failed == 0 ? 0 : 3;
 }
 
+// On-screen scroll self test:  pdfboard.exe --selftest-scroll [outdir]
+//
+// Every other render test paints into a QImage through paintForViewport(), which
+// never touches the window's backing store - so a broken scroll blit (stale bands
+// after dragging the page, "花屏") passed all of them. This one shows a real
+// window, scrolls it the way a drag does (several steps per frame included), then
+// grabs what is actually ON SCREEN and compares it with a fresh full paint at the
+// same scroll position.
+static int runScrollSelfTest(const QString &outDir)
+{
+    QDir dir(outDir);
+    if (!dir.exists() && !dir.mkpath(QStringLiteral("."))) {
+        out(QStringLiteral("[scroll] cannot create %1").arg(outDir));
+        return 2;
+    }
+    const QString pdf = dir.filePath(QStringLiteral("scroll.pdf"));
+    {
+        // Three pages of labelled, colour-coded rows: a band left behind by a
+        // missed blit shows up as a row whose colour/label does not belong there.
+        QPdfWriter w(pdf);
+        w.setPageSize(QPageSize(QPageSize::A4));
+        w.setResolution(72);
+        QPainter p(&w);
+        for (int pg = 0; pg < 3; ++pg) {
+            if (pg > 0)
+                w.newPage();
+            const QRectF page(0, 0, w.width(), w.height());
+            constexpr int kRows = 40;
+            for (int y = 0; y < kRows; ++y) {
+                const QRectF row(0, y * page.height() / kRows, page.width(), page.height() / kRows);
+                p.fillRect(row, QColor::fromHsv((pg * 120 + y * 29) % 360, 160, 230));
+                p.setPen(Qt::black);
+                p.setFont(QFont(QStringLiteral("Arial"), 8));
+                p.drawText(row.adjusted(4, 0, -4, 0), Qt::AlignVCenter | Qt::AlignLeft,
+                           QStringLiteral("page %1 row %2").arg(pg + 1).arg(y));
+            }
+            p.setPen(QPen(Qt::black, 3));
+            p.drawLine(page.topLeft(), page.bottomRight());
+            p.drawLine(page.topRight(), page.bottomLeft());
+        }
+        p.end();
+    }
+
+    auto pump = [](int ms) {
+        QElapsedTimer t;
+        t.start();
+        while (t.elapsed() < ms) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+            QThread::msleep(2);
+        }
+    };
+
+    PdfCanvas canvas;
+    canvas.setWindowFlag(Qt::WindowStaysOnTopHint, true);
+    // The grab reads the real screen, so the whole window must be on it - at a
+    // large scale factor 1100x760 logical px no longer fits a 1080p panel.
+    const QRect avail = canvas.screen()->availableGeometry();
+    canvas.resize(qMin(1100, avail.width() - 80), qMin(760, avail.height() - 80));
+    canvas.move(avail.topLeft() + QPoint(40, 40));
+    canvas.show();
+    canvas.raise();
+    canvas.activateWindow();
+    QString err;
+    if (!canvas.openPdf(pdf, &err)) {
+        out(QStringLiteral("[scroll] open FAILED: %1").arg(err));
+        return 2;
+    }
+    pump(800);
+
+    int failed = 0;
+    auto compare = [&](const QString &tag) {
+        pump(600);      // let async tiles and the settle timer land
+        QWidget *vp = canvas.viewport();
+        const qreal dpr = qMax<qreal>(1.0, vp->devicePixelRatioF());
+        const QPoint g = vp->mapToGlobal(QPoint(0, 0));
+        QScreen *scr = canvas.screen();
+        const QPoint sg = g - scr->geometry().topLeft();
+        const QImage onScreen = scr->grabWindow(0, sg.x(), sg.y(), vp->width(), vp->height())
+                                    .toImage().convertToFormat(QImage::Format_ARGB32);
+        QImage ref(onScreen.size(), QImage::Format_ARGB32);
+        ref.setDevicePixelRatio(dpr);
+        ref.fill(Qt::white);
+        {
+            QPainter p(&ref);
+            canvas.paintForViewport(p);
+        }
+        // The floating toolbar is a child widget drawn over the page; leave it out.
+        QRect mask;
+        if (InkToolbar *tb = canvas.toolbar(); tb && tb->isVisible()) {
+            const QRect r = QRect(tb->mapTo(vp, QPoint(0, 0)), tb->size()).adjusted(-24, -24, 24, 24);
+            mask = QRect(qFloor(r.left() * dpr), qFloor(r.top() * dpr),
+                         qCeil(r.width() * dpr), qCeil(r.height() * dpr));
+        }
+        qint64 sum = 0, bad = 0, n = 0;
+        int badRows = 0;
+        for (int y = 0; y < onScreen.height() && y < ref.height(); ++y) {
+            const QRgb *a = reinterpret_cast<const QRgb *>(onScreen.constScanLine(y));
+            int rowBad = 0, rowN = 0;
+            for (int x = 0; x < onScreen.width() && x < ref.width(); ++x) {
+                if (mask.contains(x, y))
+                    continue;
+                // At a fractional DPR the viewport's origin in the window is not on
+                // a device pixel, so edges can land one pixel off the QImage
+                // reference. Accept the best match within +/-1 device px; a stale
+                // band is tens of pixels off and still fails.
+                int d = 255;
+                for (int oy = -1; oy <= 1 && d > 0; ++oy) {
+                    const int ry = y + oy;
+                    if (ry < 0 || ry >= ref.height())
+                        continue;
+                    const QRgb *br = reinterpret_cast<const QRgb *>(ref.constScanLine(ry));
+                    for (int ox = -1; ox <= 1; ++ox) {
+                        const int rx = x + ox;
+                        if (rx < 0 || rx >= ref.width())
+                            continue;
+                        d = qMin(d, qMax(qAbs(qRed(a[x]) - qRed(br[rx])),
+                                         qMax(qAbs(qGreen(a[x]) - qGreen(br[rx])),
+                                              qAbs(qBlue(a[x]) - qBlue(br[rx])))));
+                    }
+                }
+                sum += d;
+                ++n;
+                ++rowN;
+                if (d > 24) {
+                    ++bad;
+                    ++rowBad;
+                }
+            }
+            if (rowN > 0 && rowBad * 10 > rowN)
+                ++badRows;
+        }
+        const double mean = n ? double(sum) / n : 999.0;
+        const double badPct = n ? 100.0 * bad / n : 100.0;
+        const bool ok = onScreen.size() == ref.size() && mean < 2.0 && badPct < 1.0;
+        out(QStringLiteral("[scroll] %1 @%2 (dpr %3): mean %4, >24 %5%, bad rows %6 -> %7")
+                .arg(tag).arg(canvas.verticalScrollBar()->value()).arg(dpr, 0, 'f', 2)
+                .arg(mean, 0, 'f', 2).arg(badPct, 0, 'f', 2).arg(badRows)
+                .arg(ok ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+        onScreen.save(dir.filePath(tag + QStringLiteral("_screen.png")));
+        ref.save(dir.filePath(tag + QStringLiteral("_ref.png")));
+        if (!ok)
+            ++failed;
+    };
+
+    compare(QStringLiteral("baseline"));
+
+    // Slow drag: one step per frame.
+    QScrollBar *vs = canvas.verticalScrollBar();
+    for (int i = 0; i < 40; ++i) {
+        vs->setValue(vs->value() + 23);
+        pump(16);
+    }
+    compare(QStringLiteral("down"));
+
+    // Fast drag with uncompressed touch input: several steps before a paint.
+    for (int i = 0; i < 30; ++i) {
+        vs->setValue(vs->value() + 41);
+        if (i % 3 == 0)
+            vs->setValue(vs->value() + 17);
+        pump(i % 2 ? 4 : 16);
+    }
+    compare(QStringLiteral("fast"));
+
+    for (int i = 0; i < 40; ++i) {
+        vs->setValue(vs->value() - 31);
+        pump(16);
+    }
+    compare(QStringLiteral("up"));
+
+    // The toolbar fades after kIdleTimeoutMs without input (a QGraphicsOpacityEffect
+    // on a child of the viewport) - the state the classroom screenshot was in.
+    if (InkToolbar *tb = canvas.toolbar())
+        pump(tb->testIdleTimeoutMs() + 800);
+    for (int i = 0; i < 40; ++i) {
+        vs->setValue(vs->value() + 29);
+        pump(16);
+    }
+    compare(QStringLiteral("idle"));
+
+    out(QStringLiteral("[scroll] %1").arg(failed == 0 ? QStringLiteral("OK")
+                                                        : QStringLiteral("FAILED")));
+    return failed == 0 ? 0 : 3;
+}
+
 // Headless ink-model self test:  pdfboard.exe --selftest-ink <file.pdf>
 // Drives the ink model without any mouse input: draw -> partial erase ->
 // undo -> redo -> clear. Guards the eraser/undo behaviour against regressions.
@@ -4889,6 +5073,7 @@ int main(int argc, char **argv)
     const int probeIdx = args.indexOf(QStringLiteral("--probe-touch"));
     const int stIdx = args.indexOf(QStringLiteral("--selftest-ink"));
     const int tileIdx = args.indexOf(QStringLiteral("--selftest-tileclip"));
+    const int scrollIdx = args.indexOf(QStringLiteral("--selftest-scroll"));
     const int logIdx = args.indexOf(QStringLiteral("--selftest-log"));
     const int uiIdx = args.indexOf(QStringLiteral("--selftest-ui"));
     const int themeIdx = args.indexOf(QStringLiteral("--selftest-theme"));
@@ -4907,6 +5092,7 @@ int main(int argc, char **argv)
         || probeIdx >= 0
         || (stIdx >= 0 && stIdx + 1 < args.size())
         || tileIdx >= 0
+        || scrollIdx >= 0
         || logIdx >= 0
         || uiIdx >= 0
         || themeIdx >= 0
@@ -4931,6 +5117,10 @@ int main(int argc, char **argv)
 
     if (tileIdx >= 0)
         return runTileClipSelfTest(tileIdx + 1 < args.size() ? args.at(tileIdx + 1)
+                                                             : QDir::tempPath());
+
+    if (scrollIdx >= 0)
+        return runScrollSelfTest(scrollIdx + 1 < args.size() ? args.at(scrollIdx + 1)
                                                              : QDir::tempPath());
 
     if (logIdx >= 0)

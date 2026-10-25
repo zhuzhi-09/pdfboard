@@ -1800,10 +1800,13 @@ void PdfCanvas::scrollContentsBy(int dx, int dy)
         return;
     }
 
-    // The scrollbar delta is opposite to the direction the content travels.
+    // dx/dy are already the content's travel (old value - new value), exactly what
+    // QWidget::scroll wants - QAbstractItemView passes them through unchanged.
+    // Negating them moved the old pixels the wrong way and painted the exposed
+    // strip on the wrong edge: stale bands after every scroll ("花屏").
     // QWidget::scroll also moves the viewport's child widgets (the island lives on
     // the viewport), so reposition it afterwards to put it back where it belongs.
-    viewport()->scroll(-dx, -dy);
+    viewport()->scroll(dx, dy);
     if (m_toolbar)
         m_toolbar->reposition();
 
