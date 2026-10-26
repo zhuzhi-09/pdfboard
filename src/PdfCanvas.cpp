@@ -3511,9 +3511,17 @@ PdfCanvas::TouchClassResult PdfCanvas::classifyTouch(const QVector<QPointF> &pts
     // 走"什么都不做"；单点必须继续落到下面的书写分支，否则关掉开关会连手指
     // 书写一起关掉。
     if (!palmEraserEnabled && cluster.size() >= kPalmStayPoints) {
-        // 开关关闭：这一簇本来会被判成掌擦，现在什么都不做 —— 不擦、不画、不缩放。
-        // 状态一并清掉，免得重新打开时还带着旧的滞回。
+        // 开关关闭时没有"掌擦"：状态一并清掉，免得重新打开时还带着旧的滞回。
         resetPalmClass(state);
+        if (cluster.size() < kPalmEnterPoints) {
+            // 2-3 点的一簇 = 并拢的两三根手指，就是双指平移/缩放。教室大屏是 4K@250%，
+            // 并拢的两指在逻辑坐标里只隔二十来像素，聚成同一簇是常态。以前这里也
+            // "什么都不做"：双指手势从未开始、书写锁没上，系统为主触点合成的鼠标
+            // 按下/抬起就在那根手指的起点和终点各留下一笔（"双指拖动随机留笔迹"）。
+            r.mode = TouchClass::Pinch;
+            return r;
+        }
+        // 4 点以上 = 整只手掌搁在屏上：什么都不做 —— 不擦、不画，也不拖动页面。
         r.mode = TouchClass::Writing;
         r.hasWritePos = false;
         return r;

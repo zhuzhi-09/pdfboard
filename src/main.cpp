@@ -64,6 +64,7 @@
 #include <QPdfWriter>
 #include <QPageSize>
 #include <QPointF>
+#include <QPointingDevice>
 #include <QScrollArea>
 #include <QScrollBar>
 #include <QSettings>
@@ -73,6 +74,7 @@
 #include <QString>
 #include <QStringList>
 #include <QToolButton>
+#include <QTouchEvent>
 #include <QTranslator>
 #include <QLibraryInfo>
 #include <QLocale>
@@ -1545,14 +1547,47 @@ static int runScrollSelfTest(const QString &outDir)
     compare(QStringLiteral("up"));
 
     // The toolbar fades after kIdleTimeoutMs without input (a QGraphicsOpacityEffect
-    // on a child of the viewport) - the state the classroom screenshot was in.
-    if (InkToolbar *tb = canvas.toolbar())
-        pump(tb->testIdleTimeoutMs() + 800);
+    // on a child of the viewport) - the state the classroom panel is in while the
+    // teacher drags the page, since only a press ON the island wakes it. The 5 s
+    // timer lives in MainWindow, so a bare canvas has to be faded explicitly
+    // (waiting here used to test nothing: the island never faded).
+    if (InkToolbar *tb = canvas.toolbar()) {
+        tb->setIdleFaded(true);
+        pump(InkToolbar::kIdleFadeMs + 200);
+    }
     for (int i = 0; i < 40; ++i) {
         vs->setValue(vs->value() + 29);
         pump(16);
     }
     compare(QStringLiteral("idle"));
+
+    // ...and while it is fading: the classroom log shows the painter conflict
+    // exactly when the fade starts.
+    if (InkToolbar *tb = canvas.toolbar()) {
+        tb->setIdleFaded(false);
+        pump(InkToolbar::kIdleFadeMs + 200);
+        tb->setIdleFaded(true);
+    }
+    for (int i = 0; i < 30; ++i) {
+        vs->setValue(vs->value() - 27);
+        pump(10);
+    }
+    compare(QStringLiteral("fading"));
+
+    // Even steps: at a fractional DPR (the classroom panel runs at 2.5) an odd
+    // logical step is a half device pixel, which Qt refuses to blit and repaints
+    // whole - so the odd steps above never exercised the blit there. A finger
+    // drag mixes both.
+    for (int i = 0; i < 40; ++i) {
+        vs->setValue(vs->value() + (i % 3 == 2 ? 6 : 2 * (5 + i % 7)));
+        pump(i % 2 ? 4 : 12);
+    }
+    compare(QStringLiteral("even"));
+    for (int i = 0; i < 40; ++i) {
+        vs->setValue(vs->value() - (i % 4 == 0 ? 3 : 2 * (4 + i % 5)));
+        pump(i % 2 ? 4 : 12);
+    }
+    compare(QStringLiteral("mixed"));
 
     // The eraser ring is screen-space: the blit carries its pixels along, and a
     // ring left behind at (dx, dy) used to stay until the pointer moved again.
@@ -4724,6 +4759,77 @@ static int runImageSelfTest()
                     QVector<QPointF>{QPointF(420, 360)}, oneState,
                     /*palmEraserEnabled=*/false);
                 check("switch: off, one finger still writes", int(rOne.hasWritePos), 1);
+
+                // Two fingers held together (a two-finger pan on a 4K panel at 250 %:
+                // ~20 logical px apart) form ONE cluster. With the switch off that
+                // cluster must be the two-finger gesture, not "nothing" - "nothing"
+                // left the ink lock off, and the system's trailing mouse events then
+                // drew at the finger's start and end (classroom log, 1.15.0).
+                for (const QVector<QPointF> &fingers :
+                     { QVector<QPointF>{ QPointF(400, 300), QPointF(421, 304) },
+                       QVector<QPointF>{ QPointF(400, 300), QPointF(418, 296), QPointF(436, 302) } }) {
+                    PdfCanvas::TouchClassState pairState;
+                    const PdfCanvas::TouchClassResult rPair = PdfCanvas::classifyTouch(
+                        fingers, pairState, /*palmEraserEnabled=*/false);
+                    check(fingers.size() == 2 ? "switch: off, two fingers together pinch"
+                                              : "switch: off, three fingers together pinch",
+                          int(rPair.mode == PdfCanvas::TouchClass::Pinch), 1);
+                }
+                // ...while a whole palm (4+ contacts in one cluster) still does nothing:
+                // it must neither draw nor drag the page.
+                check("switch: off, a resting palm does not pinch",
+                      int(rOff.mode != PdfCanvas::TouchClass::Pinch), 1);
+            }
+
+            // End to end through the real touch path: two fingers pan together, then
+            // the mouse events Windows synthesizes for the primary contact trail in
+            // after TouchEnd (press at the start, release at the end). No ink allowed.
+            {
+                PdfCanvas tw;
+                tw.setAttribute(Qt::WA_DontShowOnScreen, true);
+                tw.resize(900, 700);
+                tw.show();
+                QString te;
+                check("two-finger pan: canvas opens the page", int(tw.openPdf(pdfPath, &te)), 1);
+                tw.setTool(PdfCanvas::InkTool::Pen);
+                tw.setPalmEraserEnabled(false);
+                QWidget *vp = tw.viewport();
+                const QSize tv = tw.testViewportSize();
+                qreal ty = 0.3 * tv.height();
+                while (ty < tv.height() && tw.testPageAtViewportY(ty) < 0)
+                    ty += 10.0;
+                const QPointF a0(0.45 * tv.width(), ty);
+                const QPointF b0 = a0 + QPointF(21, 3);
+                static QPointingDevice touchscreen(
+                    QStringLiteral("selftest touchscreen"), 4242,
+                    QInputDevice::DeviceType::TouchScreen, QPointingDevice::PointerType::Finger,
+                    QInputDevice::Capability::Position, 10, 0);
+                auto sendTouch = [&](QEvent::Type type, const QPointF &a, const QPointF &b,
+                                     QEventPoint::State state) {
+                    const QList<QEventPoint> points{
+                        QEventPoint(1, state, a, vp->mapToGlobal(a)),
+                        QEventPoint(2, state, b, vp->mapToGlobal(b)) };
+                    QTouchEvent ev(type, &touchscreen, Qt::NoModifier, points);
+                    QApplication::sendEvent(vp, &ev);
+                };
+                auto sendMouse = [&](QEvent::Type type, const QPointF &p, Qt::MouseButtons held) {
+                    QMouseEvent ev(type, p, vp->mapToGlobal(p), Qt::LeftButton, held,
+                                   Qt::NoModifier);
+                    QApplication::sendEvent(vp, &ev);
+                };
+                const int before = tw.strokeCount();
+                sendTouch(QEvent::TouchBegin, a0, b0, QEventPoint::State::Pressed);
+                QPointF a = a0;
+                for (int i = 0; i < 12; ++i) {
+                    a += QPointF(0, 14);
+                    sendTouch(QEvent::TouchUpdate, a, a + (b0 - a0), QEventPoint::State::Updated);
+                }
+                sendTouch(QEvent::TouchEnd, a, a + (b0 - a0), QEventPoint::State::Released);
+                sendMouse(QEvent::MouseButtonPress, a0, Qt::LeftButton);
+                sendMouse(QEvent::MouseMove, (a0 + a) / 2.0, Qt::LeftButton);
+                sendMouse(QEvent::MouseButtonRelease, a, Qt::NoButton);
+                check("two-finger pan: no ink at the finger's start or end",
+                      tw.strokeCount() - before, 0);
             }
 
             // 关掉时正压在掌擦上 -> 必须立刻收手，不能卡在掌擦状态
