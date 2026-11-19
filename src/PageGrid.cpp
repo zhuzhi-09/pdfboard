@@ -11,8 +11,6 @@
 #include <QEvent>
 #include <QFontMetrics>
 #include <QFrame>
-#include <QGraphicsDropShadowEffect>
-#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QLabel>
@@ -23,6 +21,8 @@
 #include <QScrollBar>
 #include <QShowEvent>
 #include <QTimer>
+
+#include <utility>
 #include <QVBoxLayout>
 #include <QtAlgorithms>
 #include <QtMath>
@@ -102,7 +102,7 @@ QString cardSheet(const Theme::Palette &c, const Theme::Metrics &m)
 
 }   // namespace
 
-// One tile of the grid. The raster is requested from the owner inside
+// One tile of the grid. The raster is requested from the owner (and rendered off the UI thread) inside
 // paintEvent, i.e. only for the cells the viewport really exposes - that is what
 // keeps opening a long document instant.
 class PageGrid::PageCell : public QAbstractButton
@@ -214,8 +214,19 @@ protected:
                                sheet.center().y() - fit.height() / 2.0,
                                fit.width(), fit.height()),
                         img);
+        } else if (!m_owner->m_thumbFailed.contains(m_page)) {
+            // Its raster is on the way: a blank sheet of the page's own shape, so the
+            // grid looks complete at once and the content simply fades into place.
+            QSizeF fit = m_owner->m_canvas ? m_owner->m_canvas->pagePointSize(m_page) : QSizeF();
+            if (fit.isEmpty())
+                fit = sheet.size();
+            fit.scale(sheet.size(), Qt::KeepAspectRatio);
+            p.fillRect(QRectF(sheet.center().x() - fit.width() / 2.0,
+                              sheet.center().y() - fit.height() / 2.0,
+                              fit.width(), fit.height()),
+                       Theme::light().paper);
         } else {
-            // No raster available (no document): a quiet glyph, not a hole.
+            // No raster available: a quiet glyph, not a hole.
             const int g = qMax(12, int(sheet.width() * 0.42));
             IconPainter::paintGlyph(p, IconPainter::Glyph::Pages,
                                     QRectF(sheet.center().x() - g / 2.0,
@@ -302,13 +313,6 @@ void PageGrid::buildUi()
     m_card->setObjectName(QStringLiteral("pageGridCard"));
     m_card->setAttribute(Qt::WA_StyledBackground, true);
     m_card->setStyleSheet(cardSheet(pal, m));
-    m_glow = new QGraphicsDropShadowEffect(m_card);
-    m_glow->setBlurRadius(m.shadowBlur);
-    m_glow->setOffset(0.0, m.shadowOffsetY);
-    QColor shadow = pal.shadow;
-    shadow.setAlpha(Theme::ChromeShadowAlpha);
-    m_glow->setColor(shadow);
-    m_card->setGraphicsEffect(m_glow);
     outer->addWidget(m_card);
 
     const int pad = m.chipPad + Theme::Space1;
@@ -356,10 +360,9 @@ void PageGrid::buildUi()
 
     m_gridHost = new QWidget;
     m_gridHost->setAutoFillBackground(false);
-    m_grid = new QGridLayout(m_gridHost);
-    m_grid->setContentsMargins(0, 0, 0, 0);
-    m_grid->setSpacing(m.gap);
     m_scroll->setWidget(m_gridHost);
+    connect(m_scroll->verticalScrollBar(), &QScrollBar::valueChanged,
+            this, [this] { showNearbyCells(); });
 
     content->addWidget(m_scroll, 0, Qt::AlignHCenter);
 
@@ -367,6 +370,8 @@ void PageGrid::buildUi()
 
     if (m_canvas)
         connect(m_canvas, &PdfCanvas::pageChanged, this, &PageGrid::onCanvasPageChanged);
+    if (m_canvas)
+        connect(m_canvas, &PdfCanvas::thumbnailRendered, this, &PageGrid::onThumbnailRendered);
     if (qApp)
         qApp->installEventFilter(this);
 }
@@ -387,11 +392,6 @@ void PageGrid::applyTheme()
     const Theme::Palette &pal = Theme::light();
     if (m_card)
         m_card->setStyleSheet(cardSheet(pal, m_metrics));
-    if (m_glow) {
-        QColor shadow = pal.shadow;
-        shadow.setAlpha(Theme::ChromeShadowAlpha);
-        m_glow->setColor(shadow);
-    }
     refreshGlyph();
     for (PageCell *cell : m_cells)
         cell->update();   // the tiles read Theme::light() themselves
@@ -403,15 +403,13 @@ void PageGrid::open()
     if (!m_canvas || m_canvas->pageCount() <= 0)
         return;
 
-    // One probe render: the page the canvas is on is the cell the picker opens
-    // on, so its raster is needed a moment later anyway. It also tells the tiles
-    // the document's real aspect ratio, which keeps the grid square for anything
-    // that is not A4.
+    // The page the canvas is on tells the tiles the document's real aspect ratio,
+    // which keeps the grid square for anything that is not A4.
     if (!m_aspectKnown) {
         const int page = qBound(0, m_canvas->currentPage(), m_canvas->pageCount() - 1);
-        const QImage probe = thumbnailFor(page);
-        if (!probe.isNull() && probe.width() > 0) {
-            m_thumbAspect = qreal(probe.height()) / qreal(probe.width());
+        const QSizeF pt = m_canvas->pagePointSize(page);
+        if (!pt.isEmpty()) {
+            m_thumbAspect = pt.height() / pt.width();
             m_aspectKnown = true;
         }
     }
@@ -433,6 +431,35 @@ void PageGrid::invalidateThumbnails()
     m_thumbs.clear();
     m_thumbLru.clear();
     m_thumbBytes = 0;
+    m_thumbQueue.clear();
+    m_thumbInFlight.clear();     // what still arrives belongs to the old state: ignored
+    m_thumbFailed.clear();
+}
+
+// The card's shadow, painted as a few soft layers in the room outer margins leave. A
+// QGraphicsDropShadowEffect recomposites the WHOLE card, blur included, for any change
+// inside it: about 110 ms per thumbnail arriving at DPR 2.5. This only touches the
+// dirty rect, which a tile update does not extend past the tile.
+void PageGrid::paintEvent(QPaintEvent *)
+{
+    if (!m_card)
+        return;
+    QColor shadow = Theme::light().shadow;
+    const QRectF card(m_card->geometry());
+    const qreal room = m_metrics.shadowRoom;
+    const qreal radius = qMax(int(Theme::RadiusPopover), m_metrics.radiusChip + 2);
+    QPainter p(this);
+    p.setRenderHint(QPainter::Antialiasing, true);
+    p.setPen(Qt::NoPen);
+    constexpr int kLayers = 6;
+    for (int i = kLayers; i >= 1; --i) {
+        const qreal grow = room * i / kLayers;
+        shadow.setAlpha(Theme::ChromeShadowAlpha / kLayers);
+        p.setBrush(shadow);
+        const qreal dy = qMin<qreal>(m_metrics.shadowOffsetY, room - grow);
+        p.drawRoundedRect(card.adjusted(-grow, -grow + dy, grow, grow + dy),
+                          radius + grow, radius + grow);
+    }
 }
 
 void PageGrid::showEvent(QShowEvent *e)
@@ -497,10 +524,12 @@ bool PageGrid::eventFilter(QObject *watched, QEvent *e)
 void PageGrid::onCanvasPageChanged(int page, int count)
 {
     const QString path = m_canvas ? m_canvas->pdfPath() : QString();
-    if (count != int(m_cells.size()) || path != m_docPath) {
+    const int serial = m_canvas ? m_canvas->documentSerial() : -1;
+    if (count != int(m_cells.size()) || path != m_docPath || serial != m_docSerial) {
         // A different document (same page count included) must never show a
         // thumbnail of the previous file.
         m_docPath = path;
+        m_docSerial = serial;
         m_thumbAspect = 297.0 / 210.0;
         m_aspectKnown = false;
         invalidateThumbnails();
@@ -521,16 +550,13 @@ void PageGrid::refreshPages(int count)
     if (count == int(m_cells.size()))
         return;
 
-    // Take the items out first: deleting a layout item does not delete the
-    // widget it wrapped, so the cells can simply be destroyed afterwards.
-    while (QLayoutItem *item = m_grid->takeAt(0))
-        delete item;
     qDeleteAll(m_cells);
     m_cells.clear();
 
     m_cells.reserve(count);
     for (int i = 0; i < count; ++i) {
         auto *cell = new PageCell(this, i, m_gridHost);
+        cell->hide();   // explicit: otherwise showing the host shows them all (see showNearbyCells)
         connect(cell, &QAbstractButton::clicked, this, [this, cell] {
             if (m_canvas)
                 m_canvas->goToPage(cell->page());
@@ -555,8 +581,7 @@ void PageGrid::updateCellSize()
     m_cellSize = cell;
     for (PageCell *c : m_cells)
         c->setFixedSize(m_cellSize);
-    if (m_grid)
-        m_grid->invalidate();
+    m_columns = 0;                  // force the next re-flow
     if (isVisible())
         applyGeometry();
 }
@@ -613,20 +638,41 @@ void PageGrid::applyGeometry()
     raise();
 }
 
+// Every tile has the same size, so its place is a multiplication. A QGridLayout took
+// about 4 ms per tile here (640 ms for 150 pages, on the UI thread, as the grid opened).
 void PageGrid::layoutCells(int columns)
 {
-    if (!m_grid || columns == m_columns)
+    if (!m_gridHost || columns <= 0 || columns == m_columns)
         return;
-
-    // Re-flow the existing widgets for the new column count.
-    while (QLayoutItem *item = m_grid->takeAt(0))
-        delete item;
     m_columns = columns;
+
+    const int gap = m_metrics.gap;
+    const int stepX = m_cellSize.width() + gap;
+    const int stepY = m_cellSize.height() + gap;
+    const int rows = (int(m_cells.size()) + columns - 1) / columns;
+    m_gridHost->setFixedSize(qMax(0, columns * stepX - gap), qMax(0, rows * stepY - gap));
     for (int i = 0; i < m_cells.size(); ++i) {
-        m_grid->addWidget(m_cells.at(i), i / columns, i % columns,
-                          Qt::AlignTop | Qt::AlignHCenter);
+        m_cells.at(i)->move((i % columns) * stepX, (i / columns) * stepY);
     }
-    m_grid->activate();
+    showNearbyCells();
+}
+
+// A tile becomes a visible widget only when the scroll position comes near it: showing
+// one makes Qt polish it through the card's style sheet, about 2 ms each, which is
+// what opening a long document would otherwise pay for every page at once.
+void PageGrid::showNearbyCells()
+{
+    if (!m_scroll || m_columns <= 0 || m_cells.isEmpty())
+        return;
+    const int stepY = m_cellSize.height() + m_metrics.gap;
+    const int top = m_scroll->verticalScrollBar()->value();
+    const int firstRow = qMax(0, top / stepY - 1);
+    const int lastRow = (top + m_scroll->height()) / stepY + 1;
+    const int last = qMin(int(m_cells.size()), (lastRow + 1) * m_columns);
+    for (int i = firstRow * m_columns; i < last; ++i) {
+        if (m_cells.at(i)->isHidden())
+            m_cells.at(i)->show();
+    }
 }
 
 void PageGrid::syncCurrent(bool centerOnCurrent)
@@ -656,26 +702,90 @@ QImage PageGrid::thumbnailFor(int page)
         touchThumbLru(page);
         return it.value();
     }
-    if (!m_canvas)
+    if (!m_canvas || m_thumbFailed.contains(page))
         return {};
 
-    // Rendering happens here and only here: a tile calls this from its paint
-    // event, so a cell that never became visible is never rasterized.
-    QImage img = m_canvas->pageThumbnail(page, QSize(int(qRound(m_thumbW * m_dpr)), 0));
-    if (img.isNull())
-        return {};
+    // A tile calls this from its paint event, so a cell that never became visible is
+    // never rasterized. Nothing renders here: a page full of pictures takes tens of
+    // milliseconds, and a screenful of them froze the UI as the grid opened.
+    if (!m_thumbQueue.contains(page)) {
+        bool inFlight = false;
+        for (int requested : std::as_const(m_thumbInFlight))
+            inFlight = inFlight || requested == page;
+        if (!inFlight)
+            m_thumbQueue.append(page);
+    }
+    if (!m_thumbPumpScheduled) {
+        m_thumbPumpScheduled = true;
+        QTimer::singleShot(0, this, [this] {
+            m_thumbPumpScheduled = false;
+            requestNextThumbnails();
+        });
+    }
+    return {};
+}
 
-    img.setDevicePixelRatio(m_dpr);
-    // The raster carries alpha (a PDF page brings no background of its own), so it
-    // must be laid on paper-white here - otherwise the tile shows the dark "well"
-    // behind it, which is exactly how the thumbnails lost their white paper in
-    // dark mode. Done once, at cache time, instead of on every repaint.
-    img = onPaper(img, Theme::light().paper);
-    m_thumbs.insert(page, img);
-    m_thumbLru.append(page);
-    m_thumbBytes += img.sizeInBytes();
-    trimThumbnails();
-    return img;
+bool PageGrid::cellExposed(int page) const
+{
+    const PageCell *cell = m_cells.value(page, nullptr);
+    return cell && isVisible() && !cell->visibleRegion().isEmpty();
+}
+
+// PDFium has one global lock, so a long worker queue would also hold up the page
+// under the grid. Two in flight keep the worker busy without building a backlog, and
+// a page that scrolled away by the time its turn comes is dropped: if it comes back,
+// its paint asks again.
+void PageGrid::requestNextThumbnails()
+{
+    constexpr int kMaxInFlight = 2;
+    while (m_thumbInFlight.size() < kMaxInFlight && !m_thumbQueue.isEmpty()) {
+        const int page = m_thumbQueue.takeFirst();
+        if (!cellExposed(page) || m_thumbs.contains(page))
+            continue;
+        const quint64 id = m_canvas->requestThumbnail(page, QSize(int(qRound(m_thumbW * m_dpr)), 0));
+        if (id == 0)
+            m_thumbFailed.append(page);
+        else
+            m_thumbInFlight.insert(id, page);
+    }
+}
+
+void PageGrid::onThumbnailRendered(quint64 requestId, const QImage &image)
+{
+    const auto it = m_thumbInFlight.constFind(requestId);
+    if (it == m_thumbInFlight.constEnd())
+        return;                     // from before invalidateThumbnails()
+    const int page = it.value();
+    m_thumbInFlight.erase(it);
+
+    if (image.isNull()) {
+        m_thumbFailed.append(page);
+    } else {
+        QImage img = image;
+        img.setDevicePixelRatio(m_dpr);
+        // The raster carries alpha (a PDF page brings no background of its own), so it
+        // must be laid on paper-white here - otherwise the tile shows the dark "well"
+        // behind it, which is exactly how the thumbnails lost their white paper in
+        // dark mode. Done once, at cache time, instead of on every repaint.
+        img = onPaper(img, Theme::light().paper);
+        m_thumbs.insert(page, img);
+        m_thumbLru.append(page);
+        m_thumbBytes += img.sizeInBytes();
+        trimThumbnails();
+    }
+    if (PageCell *cell = m_cells.value(page, nullptr))
+        cell->update();
+    requestNextThumbnails();
+}
+
+int PageGrid::testExposedWithoutThumbnail() const
+{
+    int blank = 0;
+    for (int page = 0; page < m_cells.size(); ++page) {
+        if (cellExposed(page) && !m_thumbs.contains(page) && !m_thumbFailed.contains(page))
+            ++blank;
+    }
+    return blank;
 }
 
 void PageGrid::touchThumbLru(int page)
@@ -686,11 +796,19 @@ void PageGrid::touchThumbLru(int page)
 
 void PageGrid::trimThumbnails()
 {
-    // Evict least recently used first, and never the entry that was just added.
-    while (m_thumbLru.size() > 1
-           && (m_thumbLru.size() > kMaxThumbEntries || m_thumbBytes > kThumbBudgetBytes)) {
-        const int oldest = m_thumbLru.takeFirst();
-        m_thumbBytes -= m_thumbs.value(oldest).sizeInBytes();
-        m_thumbs.remove(oldest);
+    // Evict least recently used first, and never the entry that was just added nor a
+    // tile on screen: at DPR 2.5 the budget holds about 20 thumbnails, fewer than a tall
+    // grid shows, and evicting a visible one would make it blank -> render -> evict
+    // forever now that its replacement arrives from the worker.
+    for (int i = 0; i < m_thumbLru.size() - 1
+                    && (m_thumbLru.size() > kMaxThumbEntries || m_thumbBytes > kThumbBudgetBytes);) {
+        const int page = m_thumbLru.at(i);
+        if (cellExposed(page)) {
+            ++i;
+            continue;
+        }
+        m_thumbBytes -= m_thumbs.value(page).sizeInBytes();
+        m_thumbs.remove(page);
+        m_thumbLru.removeAt(i);
     }
 }

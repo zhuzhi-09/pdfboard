@@ -11,8 +11,6 @@
 
 class PdfCanvas;
 class QFrame;
-class QGraphicsDropShadowEffect;
-class QGridLayout;
 class QLabel;
 class QScrollArea;
 
@@ -26,11 +24,11 @@ class QScrollArea;
 // that ignores the grid itself and the toolbar), on Esc, or when a page is
 // picked.
 //
-// Thumbnails are rendered lazily: a tile asks for its raster while it is being
-// painted, so a 300 page document opens instantly and only the cells the
-// viewport really exposes are rasterized. Rasters live in a bounded LRU (entry
-// count + byte budget), and the whole cache is dropped when the document
-// changes so a new file can never show a stale page.
+// Thumbnails are rendered lazily and off the UI thread: a tile that has no raster
+// yet paints a blank sheet and asks for one, so a 300 page document opens instantly
+// and only the cells the viewport really exposes are rasterized. Rasters live in a
+// bounded LRU (entry count + byte budget), and the whole cache is dropped when the
+// document changes so a new file can never show a stale page.
 class PageGrid : public QWidget
 {
     Q_OBJECT
@@ -50,7 +48,15 @@ public:
     // Re-applies the card sheet, shadow and header glyph after a theme change.
     void applyTheme();
 
+    // Self-test / benchmark hooks.
+    QImage testThumbnail(int page) const { return m_thumbs.value(page); }
+    int    testThumbnailCount() const { return int(m_thumbs.size()); }
+    int    testCellCount() const { return int(m_cells.size()); }
+    int    testExposedWithoutThumbnail() const;   // cells still showing a blank sheet
+    bool   testThumbnailsBusy() const { return !m_thumbQueue.isEmpty() || !m_thumbInFlight.isEmpty(); }
+
 protected:
+    void paintEvent(QPaintEvent *e) override;
     void showEvent(QShowEvent *e) override;
     void changeEvent(QEvent *e) override;
     bool eventFilter(QObject *watched, QEvent *e) override;   // dismiss + resize
@@ -65,8 +71,12 @@ private:
     void updateCellSize();              // tile box for the current aspect ratio
     void applyGeometry();               // width / height / columns / placement
     void layoutCells(int columns);      // re-flow the tiles for a column count
+    void showNearbyCells();             // tiles become widgets as they come near
     void syncCurrent(bool centerOnCurrent);
-    QImage thumbnailFor(int page);      // cache-aware raster for one tile
+    QImage thumbnailFor(int page);      // the cached raster, or null + a request
+    void requestNextThumbnails();       // hands queued pages to the worker
+    void onThumbnailRendered(quint64 requestId, const QImage &image);
+    bool cellExposed(int page) const;
     void touchThumbLru(int page);
     void trimThumbnails();
 
@@ -76,13 +86,11 @@ private:
     QWidget   *m_toolbar = nullptr;     // clicks here must not dismiss the grid
 
     QFrame      *m_card     = nullptr;
-    QGraphicsDropShadowEffect *m_glow = nullptr;
     QLabel      *m_glyph    = nullptr;
     QLabel      *m_title    = nullptr;
     QLabel      *m_count    = nullptr;
     QScrollArea *m_scroll   = nullptr;
     QWidget     *m_gridHost = nullptr;
-    QGridLayout *m_grid     = nullptr;
     QVector<PageCell *> m_cells;
 
     // Tile metrics, all derived from the font (see Theme::metrics), so the grid
@@ -102,8 +110,13 @@ private:
     bool    m_aspectKnown = false;
     qreal   m_dpr         = 1.0;
     QString m_docPath;
+    int     m_docSerial   = -1;
 
     QHash<int, QImage> m_thumbs;        // page -> raster, kept at device pixels
     QVector<int>       m_thumbLru;      // least recent first
     qint64 m_thumbBytes = 0;
+    QVector<int>        m_thumbQueue;     // pages asked for by a paint, oldest first
+    QHash<quint64, int> m_thumbInFlight;  // request id -> page; cleared = result ignored
+    QVector<int>        m_thumbFailed;    // pages that rendered to nothing: not retried
+    bool m_thumbPumpScheduled = false;
 };

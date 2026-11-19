@@ -13,6 +13,7 @@
 #include "InkToolbar.h"
 #include "InputProbe.h"
 #include "MemProbe.h"
+#include "PageGrid.h"
 #include "PaperBase.h"
 #include "PdfCanvas.h"
 #include "PdfExport.h"
@@ -822,6 +823,129 @@ static int runBench(const QString &path)
     return 0;
 }
 
+// Opening cost benchmark:  pdfboard.exe --bench-open <file.pdf>
+//
+// What a teacher feels as "a big file is slow": load + page table, the first paint,
+// and the first paint of every page reached while scrolling. The size matches the
+// classroom panel (3470x1780 device px). The last block compares rendering a visible
+// area tile by tile with rendering it once.
+static int runOpenBench(const QString &path)
+{
+    out(QStringLiteral("[open] %1").arg(path));
+    QElapsedTimer t;
+    {
+        QPdfDocument doc;
+        t.start();
+        if (doc.load(path) != QPdfDocument::Error::None)
+            return 2;
+        const qint64 loadMs = t.restart();
+        const int pc = doc.pageCount();
+        for (int i = 0; i < pc; ++i)
+            doc.pagePointSize(i);
+        out(QStringLiteral("[open] load %1 ms | %2 page sizes %3 ms")
+                .arg(loadMs).arg(pc).arg(t.elapsed()));
+
+        // One visible area of a page at the classroom size: 7 x 4 tiles. Every page of
+        // the set of four layouts, rendered both ways.
+        const QSize dev(3470, 4910);
+        const QRect area(0, 0, 7 * 512 > dev.width() ? dev.width() : 7 * 512, 4 * 512);
+        for (int page = 0; page < qMin(pc, 4); ++page) {
+            t.restart();
+            for (int ty = 0; ty < 4; ++ty) {
+                for (int tx = 0; tx * 512 < area.width(); ++tx) {
+                    const int tw = qMin(512, area.width() - tx * 512);
+                    QPdfDocumentRenderOptions opt;
+                    opt.setScaledSize(dev);
+                    opt.setScaledClipRect(QRect(tx * 512, ty * 512, tw + 1, 513));
+                    doc.render(page, QSize(tw, 512), opt);
+                }
+            }
+            const qint64 tiled = t.restart();
+            QPdfDocumentRenderOptions opt;
+            opt.setScaledSize(dev);
+            opt.setScaledClipRect(QRect(area.x(), area.y(), area.width() + 1, area.height() + 1));
+            doc.render(page, area.size(), opt);
+            out(QStringLiteral("[open] page %1, visible area: tile by tile %2 ms | at once %3 ms")
+                    .arg(page).arg(tiled).arg(t.elapsed()));
+        }
+    }
+
+    const QSize size(3470, 1780);
+    PdfCanvas canvas;
+    canvas.setAttribute(Qt::WA_DontShowOnScreen, true);
+    canvas.resize(size);
+    canvas.show();
+    PageGrid grid(&canvas, canvas.toolbar());   // built with the toolbar, before any file
+    QString err;
+    t.restart();
+    if (!canvas.openPdf(path, &err))
+        return 2;
+    out(QStringLiteral("[open] openPdf %1 ms").arg(t.elapsed()));
+
+    QImage frame(size, QImage::Format_ARGB32_Premultiplied);
+    auto paint = [&]() {
+        QElapsedTimer pt;
+        pt.start();
+        QPainter p(&frame);
+        canvas.paintForViewport(p);
+        return pt.elapsed();
+    };
+    out(QStringLiteral("[open] first paint %1 ms").arg(paint()));
+
+    // A screenful of the page grid (cells are painted on demand, on the UI thread).
+    t.restart();
+    for (int page = 0; page < qMin(canvas.pageCount(), 24); ++page)
+        canvas.pageThumbnail(page, QSize(264, 0));
+    out(QStringLiteral("[open] 24 thumbnails rendered synchronously %1 ms").arg(t.elapsed()));
+
+    // The page grid: what the UI thread pays to open it, and when it has filled in.
+    {
+        t.restart();
+        grid.open();
+        const qint64 openMs = t.elapsed();
+        grid.grab();
+        const qint64 uiMs = t.elapsed();
+        out(QStringLiteral("[open] page grid: open() %1 ms | first paint %2 ms")
+                .arg(openMs).arg(uiMs - openMs));
+        grid.grab();
+        out(QStringLiteral("[open] page grid: a repaint %1 ms").arg(t.elapsed() - uiMs));
+        while ((grid.testThumbnailsBusy() || grid.testExposedWithoutThumbnail() > 0)
+               && t.elapsed() < 30000) {
+            QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+            grid.grab();
+        }
+        out(QStringLiteral("[open] page grid: open %1 ms on the UI thread | %2 thumbnails in %3 ms")
+                .arg(uiMs).arg(grid.testThumbnailCount()).arg(t.elapsed()));
+        grid.close();
+        t.restart();
+        grid.open();
+        out(QStringLiteral("[open] page grid: opening it again %1 ms").arg(t.elapsed()));
+        grid.close();
+    }
+
+    // Walk the document one viewport at a time: every stop is a first paint.
+    QVector<qint64> stops;
+    QScrollBar *vs = canvas.verticalScrollBar();
+    while (vs->value() < vs->maximum()) {
+        vs->setValue(vs->value() + canvas.viewport()->height());
+        stops.append(paint());
+    }
+    std::sort(stops.begin(), stops.end());
+    if (!stops.isEmpty()) {
+        qint64 sum = 0;
+        for (qint64 v : stops)
+            sum += v;
+        out(QStringLiteral("[open] walking %1 stops: median %2 ms | p90 %3 ms | max %4 ms | total %5 s")
+                .arg(stops.size()).arg(stops.at(stops.size() / 2))
+                .arg(stops.at(stops.size() * 9 / 10)).arg(stops.last())
+                .arg(sum / 1000.0, 0, 'f', 1));
+    }
+    const MemInfo m = currentMemInfo();
+    out(QStringLiteral("[open] memory after the walk: WS %1 MB | Private %2 MB")
+            .arg(m.workingSetMB, 0, 'f', 0).arg(m.privateMB, 0, 'f', 0));
+    return 0;
+}
+
 // Headless paint-cost benchmark:  pdfboard.exe --bench-paint <file.pdf>
 //
 // The two paints that decide handwriting latency are (a) one live sample - a small
@@ -1093,10 +1217,21 @@ static int runTileClipSelfTest(const QString &outDir)
             const QSize vs = canvas.viewport()->size();
             QImage shot(vs, QImage::Format_ARGB32);
             shot.fill(Qt::white);
+            const int rendersBefore = canvas.testRenderCalls();
             {
                 QPainter p(&shot);
                 canvas.paintForViewport(p);
             }
+            // One PDFium render per paint, however many tiles are missing: rendering
+            // tile by tile decodes the page's pictures once per tile (3-6x the cost).
+            const int renders = canvas.testRenderCalls() - rendersBefore;
+            const int tiles = canvas.testCachedTileCount(0);
+            const bool batched = renders == 1 && tiles >= 4;
+            out(QStringLiteral("[tileclip] cold paint: %1 tiles from %2 render(s) -> %3")
+                    .arg(tiles).arg(renders)
+                    .arg(batched ? QStringLiteral("PASS") : QStringLiteral("FAIL")));
+            if (!batched)
+                ++failed;
             const QRectF pr = canvas.testPageRect(0);
             bool canvasOk = !pr.isEmpty();
             auto checkCell = [&](int cx, int cy) {
@@ -1545,6 +1680,45 @@ static int runScrollSelfTest(const QString &outDir)
         pump(16);
     }
     compare(QStringLiteral("up"));
+
+    // Kinetic scrolling: a quick flick keeps gliding after the finger lifts and slows down
+    // on its own; a finger that rested before lifting does not glide; a touch catches it.
+    {
+        auto checkFling = [&](const QString &what, bool ok, const QString &detail) {
+            out(QStringLiteral("[scroll] %1: %2 -> %3").arg(what, detail,
+                                                           ok ? QStringLiteral("PASS")
+                                                              : QStringLiteral("FAIL")));
+            if (!ok)
+                ++failed;
+        };
+        vs->setValue(200);
+        pump(100);
+        canvas.testFingerPanRelease(QPointF(0, -30), 8, 16);
+        const int released = vs->value();
+        const bool started = canvas.testFlinging();
+        QElapsedTimer t;
+        t.start();
+        while (canvas.testFlinging() && t.elapsed() < 4000)
+            pump(16);
+        checkFling(QStringLiteral("flick glides on"),
+                   started && vs->value() - released > 300 && !canvas.testFlinging(),
+                   QStringLiteral("released @%1, came to rest @%2 after %3 ms")
+                       .arg(released).arg(vs->value()).arg(t.elapsed()));
+        compare(QStringLiteral("fling"));
+
+        canvas.testFingerPanRelease(QPointF(0, 30), 8, 16, /*waitMs=*/120);
+        checkFling(QStringLiteral("rested finger does not glide"), !canvas.testFlinging(),
+                   QStringLiteral("flinging %1").arg(canvas.testFlinging() ? 1 : 0));
+
+        canvas.testFingerPanRelease(QPointF(0, 30), 8, 16);
+        pump(60);
+        canvas.testTouchDown();
+        const int caught = vs->value();
+        pump(300);
+        checkFling(QStringLiteral("touch catches the glide"),
+                   !canvas.testFlinging() && vs->value() == caught,
+                   QStringLiteral("caught @%1, now @%2").arg(caught).arg(vs->value()));
+    }
 
     // The toolbar fades after kIdleTimeoutMs without input (a QGraphicsOpacityEffect
     // on a child of the viewport) - the state the classroom panel is in while the
@@ -3107,6 +3281,79 @@ static int runUiSelfTest()
             }
         }
         Theme::Motion::setReduced(savedReduced);
+    }
+
+    // Page grid: opening it renders nothing on the UI thread, the blank sheets fill in
+    // from the worker, and a result in flight never lands in the next document.
+    {
+        auto makePdf = [](const QString &name, const QColor &color) {
+            const QString path = QDir(QDir::tempPath()).filePath(name);
+            QPdfWriter w(path);
+            w.setPageSize(QPageSize(QPageSize::A4));
+            QPainter p(&w);
+            for (int i = 0; i < 12; ++i) {
+                if (i > 0)
+                    w.newPage();
+                p.fillRect(QRect(0, 0, w.width(), w.height()), color);
+            }
+            p.end();
+            return path;
+        };
+        const QString redPdf = makePdf(QStringLiteral("pdfboard-grid-red.pdf"), QColor(220, 30, 30));
+        const QString bluePdf = makePdf(QStringLiteral("pdfboard-grid-blue.pdf"), QColor(30, 30, 220));
+
+        PdfCanvas canvas;
+        canvas.setAttribute(Qt::WA_DontShowOnScreen, true);
+        canvas.resize(1400, 900);
+        canvas.show();
+        PageGrid grid(&canvas, canvas.toolbar());   // built with the toolbar, before any file
+        QString err;
+        check("grid: document opens", canvas.openPdf(redPdf, &err) ? 1 : 0, 1);
+        auto settle = [&] {
+            QElapsedTimer t;
+            t.start();
+            do {
+                QCoreApplication::processEvents(QEventLoop::AllEvents, 5);
+                grid.grab();            // offscreen: this is what drives the cell paints
+            } while ((grid.testThumbnailsBusy() || grid.testExposedWithoutThumbnail() > 0)
+                     && t.elapsed() < 10000);
+        };
+        auto centreIs = [&](int page, const QColor &want) {
+            const QImage img = grid.testThumbnail(page);
+            if (img.isNull())
+                return false;
+            const QColor got = img.pixelColor(img.width() / 2, img.height() / 2);
+            return qAbs(got.red() - want.red()) < 40 && qAbs(got.blue() - want.blue()) < 40;
+        };
+
+        canvas.testRenderCallsReset();
+        grid.open();
+        grid.grab();
+        check("grid: open and first paint render nothing synchronously",
+              grid.testThumbnailCount(), 0);
+        check("grid: and the UI thread did not call PDFium", canvas.testRenderCalls(), 0);
+        settle();
+        check("grid: no blank sheet remains", grid.testExposedWithoutThumbnail(), 0);
+        check("grid: every page has a tile", grid.testCellCount(), 12);
+        check("grid: thumbnails arrived", grid.testThumbnailCount() > 0 ? 1 : 0, 1);
+        check("grid: thumbnail shows the page", centreIs(0, QColor(220, 30, 30)) ? 1 : 0, 1);
+        if (QDir(QStringLiteral("D:/dev/tmp")).exists())
+            canvas.grab().save(QStringLiteral("D:/dev/tmp/page-grid.png"));
+
+        // Same page count, other document, with requests still in flight.
+        grid.invalidateThumbnails();
+        grid.grab();
+        QCoreApplication::processEvents(QEventLoop::AllEvents, 1);
+        check("grid: requests are in flight", grid.testThumbnailsBusy() ? 1 : 0, 1);
+        check("grid: next document opens", canvas.openPdf(bluePdf, &err) ? 1 : 0, 1);
+        grid.open();
+        settle();
+        check("grid: no thumbnail of the previous document",
+              (grid.testThumbnailCount() > 0 && centreIs(0, QColor(30, 30, 220))) ? 1 : 0, 1);
+        grid.close();
+        canvas.closePdf();
+        QFile::remove(redPdf);
+        QFile::remove(bluePdf);
     }
 
     failed += runTabStripSelfTest();
@@ -5578,6 +5825,7 @@ int main(int argc, char **argv)
                           .arg(scr->devicePixelRatio()));
     const int benchIdx = args.indexOf(QStringLiteral("--bench"));
     const int paintBenchIdx = args.indexOf(QStringLiteral("--bench-paint"));
+    const int openBenchIdx = args.indexOf(QStringLiteral("--bench-open"));
     const int probeIdx = args.indexOf(QStringLiteral("--probe-touch"));
     const int stIdx = args.indexOf(QStringLiteral("--selftest-ink"));
     const int tileIdx = args.indexOf(QStringLiteral("--selftest-tileclip"));
@@ -5600,6 +5848,7 @@ int main(int argc, char **argv)
     // redirected, otherwise we would clobber the caller's capture.
     if ((benchIdx >= 0 && benchIdx + 1 < args.size())
         || (paintBenchIdx >= 0 && paintBenchIdx + 1 < args.size())
+        || (openBenchIdx >= 0 && openBenchIdx + 1 < args.size())
         || probeIdx >= 0
         || (stIdx >= 0 && stIdx + 1 < args.size())
         || tileIdx >= 0
@@ -5622,6 +5871,9 @@ int main(int argc, char **argv)
 
     if (benchIdx >= 0 && benchIdx + 1 < args.size())
         return runBench(args.at(benchIdx + 1));
+
+    if (openBenchIdx >= 0 && openBenchIdx + 1 < args.size())
+        return runOpenBench(args.at(openBenchIdx + 1));
 
     if (paintBenchIdx >= 0 && paintBenchIdx + 1 < args.size())
         return runPaintBench(args.at(paintBenchIdx + 1));

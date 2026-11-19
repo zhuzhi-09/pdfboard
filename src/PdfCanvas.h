@@ -5,6 +5,7 @@
 
 #include <QAbstractScrollArea>
 #include <QColor>
+#include <QElapsedTimer>
 #include <QHash>
 #include <QImage>
 #include <QPixmap>
@@ -87,6 +88,11 @@ public:
     // Returns a null image when the page or document is unavailable. This is a
     // side path: it does not touch the whole-page render cache or stats.
     QImage pageThumbnail(int page, const QSize &size) const;
+    // The same raster from the worker thread, for the page grid: returns a request id
+    // (0 = no document) and thumbnailRendered() delivers the result. A result never
+    // crosses a document: openPdf / closePdf drop what is in flight.
+    quint64 requestThumbnail(int page, const QSize &size);
+    int     documentSerial() const { return m_documentSerial; }
 
     void goToPage(int index);
     void nextPage();                    // scroll to next page
@@ -227,6 +233,8 @@ public:
     // async on and pumps the event loop to prove QPdfPageRenderer delivers.
     void testForceAsyncTiles(bool on) { m_forceAsyncTiles = on; }
     int  testCachedTileCount(int page) const;
+    int  testRenderCalls() const { return m_renderCalls; }   // PDFium renders on the UI thread
+    void testRenderCallsReset() { m_renderCalls = 0; }
     QSize testRasterDeviceSize(int page) const;
     // 静态橡皮大小：设置/读取，供自测断言"更大的档真的擦掉更多墨"以及
     // "大小随文档走、切工具/缩放不重置"。
@@ -273,6 +281,11 @@ public:
     void   testPinchBegin(const QPointF &a, const QPointF &b);
     void   testPinchFrame(const QPointF &a1, const QPointF &b1);
     void   testPinchEnd();
+    // Kinetic scrolling: a finger pan of `steps` (one per frameMs), then the fingers lift.
+    // waitMs is how long the finger rested before lifting.
+    void   testFingerPanRelease(const QPointF &step, int steps, int frameMs, int waitMs = 0);
+    void   testTouchDown();                // a new TouchBegin (catches a glide)
+    bool   testFlinging() const;
     // The eraser end of a stylus (QTabletEvent::pointerType() == Eraser) must erase the stroke
     // instead of drawing ink; this drives that exact path without a tablet attached.
     void   testEraserTailStroke(const QPointF &from, const QPointF &to);
@@ -283,6 +296,7 @@ public:
     void   clearCurrentPage();          // page under the viewport, undoable
 
 signals:
+    void thumbnailRendered(quint64 requestId, const QImage &image);
     void pageChanged(int page, int count);
     // Emitted whenever the zoom settles at a new value (pinch, Ctrl+wheel,
     // Ctrl+±, 适配宽度 or the status-bar zoom control). The status bar follows it.
@@ -365,23 +379,28 @@ private:
         QImage preview;                 // low-res underlay for pinch / stale zoom
         qint64 bytes = 0;
     };
-    // A tile requested from QPdfPageRenderer's worker thread. The generation and
-    // device size are checked on arrival: a result from a previous zoom or
-    // document must be dropped, not blitted.
-    struct PendingTile {
+    // A tile range requested from QPdfPageRenderer's worker thread as one render. The
+    // generation and device size are checked on arrival: a result from a previous zoom
+    // or document must be dropped, not blitted.
+    struct PendingTiles {
         int page = 0;
-        int tx = 0;
-        int ty = 0;
+        int tx0 = 0;
+        int ty0 = 0;
+        int tx1 = 0;                    // inclusive
+        int ty1 = 0;
         int generation = 0;
         QSize deviceSize;
-        quint64 key = 0;
     };
     PageRaster &rasterFor(int page, const QSize &deviceSize);
     QImage tileAt(int page, PageRaster &pr, int tx, int ty);
     QImage previewAt(int page, PageRaster &pr);
-    void   requestTile(int page, PageRaster &pr, int tx, int ty);
+    bool   renderTiles(int page, PageRaster &pr, int tx0, int ty0, int tx1, int ty1);
+    void   storeTiles(PageRaster &pr, const QImage &block, int tx0, int ty0, int tx1, int ty1);
+    void   requestTiles(int page, PageRaster &pr, int tx0, int ty0, int tx1, int ty1);
+    quint64 pendingTileKey(int page, int tx, int ty) const;
     void   prefetchTiles(int page, PageRaster &pr,
                          int vx0, int vy0, int vx1, int vy1);
+    QSize  thumbnailSize(int page, const QSize &size) const;
     void   onTileRendered(int page, const QSize &size, const QImage &image,
                           quint64 requestId);
     void   noteRender(int page, qint64 ms, const QSize &size);
@@ -455,6 +474,12 @@ private:
     // synthesized mouse events, which is what smooth fast writing needs.
     bool handleTablet(QTabletEvent *te);
     void panBy(const QPointF &delta);
+    // Kinetic scrolling (Word-style): a finger pan records what it moved, and when the
+    // fingers lift fast the page keeps gliding and slows down on its own.
+    void recordPanSample(const QPointF &delta);
+    void startFling();
+    void flingStep();
+    bool stopFling();                                // true when one was running
 
     QPdfDocument *m_doc = nullptr;
     QTimer       *m_zoomSettle = nullptr;   // re-render at full quality after a zoom
@@ -495,10 +520,13 @@ private:
     // scrolling. (Trying to fill the visible area asynchronously behind a 1/4
     // preview looked like a scrambled page on a tall document.)
     QPdfPageRenderer *m_tileRenderer = nullptr;
-    QHash<quint64, PendingTile> m_pendingTiles;    // requestId -> request
+    QHash<quint64, PendingTiles> m_pendingTiles;   // requestId -> request
+    QSet<quint64> m_pendingThumbnails;             // requests of the page grid
+    int m_documentSerial = 0;                      // bumped by openPdf / closePdf
     QSet<quint64> m_pendingTileKeys;               // dedup pending requests
     quint64 m_tileGeneration = 0;                  // bumped by invalidateRenders()
     bool m_asyncTiles = true;
+    int  m_renderCalls = 0;
     bool m_forceAsyncTiles = false;                // self test only
 
     InkModel m_ink;
@@ -574,6 +602,16 @@ private:
     QVector<QPointF> m_pinchPts;        // last two touch points
     bool    m_moveDragActive = false;   // free-move drag in progress (mouse / one finger)
     QPointF m_moveLastPos;              // previous free-move sample (viewport coords)
+    // Kinetic scrolling state (see startFling).
+    struct PanSample { qint64 ms; QPointF delta; };
+    QVector<PanSample> m_panSamples;    // finger pans of this sequence, newest last
+    QElapsedTimer m_flingClock;         // time base of the samples and the glide
+    QTimer *m_flingTimer = nullptr;
+    QPointF m_flingVelocity;            // px per ms, in pan direction (finger travel)
+    QPointF m_flingRemainder;           // sub-pixel travel not applied yet
+    qint64  m_flingLastMs = 0;
+    bool    m_flingCaught = false;      // this touch sequence stopped a glide: no ink
+    qint64  m_testClockOffset = 0;      // self test: lets samples look older
 
     QVector<InkModel> m_undoStack;      // capped snapshot stack
     QVector<InkModel> m_redoStack;

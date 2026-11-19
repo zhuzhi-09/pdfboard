@@ -36,8 +36,10 @@
 #include <QWheelEvent>
 #include <QtMath>
 #include <QAbstractNativeEventFilter>
+#include <QScopeGuard>
 
 #include <algorithm>
+#include <cmath>
 
 #ifdef Q_OS_WIN
 // After the Qt includes: windows.h defines the min/max macros.
@@ -424,6 +426,12 @@ PdfCanvas::PdfCanvas(QWidget *parent)
         m_touchInkBlocked = false;
     });
 
+    m_flingClock.start();
+    m_flingTimer = new QTimer(this);
+    m_flingTimer->setTimerType(Qt::PreciseTimer);
+    m_flingTimer->setInterval(16);
+    connect(m_flingTimer, &QTimer::timeout, this, &PdfCanvas::flingStep);
+
     // Page tiles are rendered on a worker thread. The UI paints the low-res
     // preview first, so opening a page or settling a zoom no longer freezes for
     // the whole tile set (the 50-100 ms cold paint measured in docs 2.87).
@@ -432,7 +440,10 @@ PdfCanvas::PdfCanvas(QWidget *parent)
     connect(m_tileRenderer, &QPdfPageRenderer::pageRendered, this,
             [this](int page, QSize size, const QImage &image,
                    QPdfDocumentRenderOptions, quint64 requestId) {
-                onTileRendered(page, size, image, requestId);
+                if (m_pendingThumbnails.remove(requestId))
+                    emit thumbnailRendered(requestId, image);
+                else
+                    onTileRendered(page, size, image, requestId);
             });
 
     // The classroom-whiteboard style floating toolbar lives on top of the page
@@ -496,6 +507,8 @@ bool PdfCanvas::openPdf(const QString &path, QString *errorOut)
         delete m_doc;
         m_doc = nullptr;
     }
+    m_pendingThumbnails.clear();
+    ++m_documentSerial;
     m_doc = new QPdfDocument(this);
     const QPdfDocument::Error err = m_doc->load(path);
     if (err != QPdfDocument::Error::None) {
@@ -542,6 +555,9 @@ bool PdfCanvas::openPdf(const QString &path, QString *errorOut)
 
 void PdfCanvas::closePdf()
 {
+    stopFling();
+    m_pendingThumbnails.clear();
+    ++m_documentSerial;
     if (m_tileRenderer)
         m_tileRenderer->setDocument(nullptr);
     if (m_doc) {
@@ -787,33 +803,64 @@ PdfCanvas::PageRaster &PdfCanvas::rasterFor(int page, const QSize &deviceSize)
     return ref;
 }
 
-// One 512x512 DEVICE-pixel tile at the page's current 1:1 resolution. The clip is
-// expressed in the SCALED page space (QPdfDocumentRenderOptions::setScaledSize),
-// and the returned image is exactly the clip, so the tile can be blitted 1:1.
-QImage PdfCanvas::tileAt(int page, PageRaster &pr, int tx, int ty)
+// Pixel rectangle of an inclusive tile range, clamped to the page.
+static QRect tileRangePixels(const QSize &page, int tileSize, int tx0, int ty0, int tx1, int ty1)
+{
+    const int x0 = tx0 * tileSize;
+    const int y0 = ty0 * tileSize;
+    return QRect(x0, y0, qMin((tx1 + 1) * tileSize, page.width()) - x0,
+                 qMin((ty1 + 1) * tileSize, page.height()) - y0);
+}
+
+// Options that render exactly `area` of the page scaled to `deviceSize`, 1:1. The clip
+// is expressed in the SCALED page space (QPdfDocumentRenderOptions::setScaledSize) and
+// the returned image is exactly the clip. QPdfDocument builds its matrix from
+// clip.right()/bottom() (inclusive), so a clip of exactly W pixels would render at
+// (W-1)/W of the requested scale - each tile would shrink by ~0.2 % and leave a seam.
+// One extra pixel on the far edge makes the matrix exactly 1:1; the output stays W x H.
+static QPdfDocumentRenderOptions tileRenderOptions(const QSize &deviceSize, const QRect &area)
+{
+    QPdfDocumentRenderOptions opt;
+    opt.setScaledSize(deviceSize);
+    opt.setScaledClipRect(QRect(area.x(), area.y(), area.width() + 1, area.height() + 1));
+    return opt;
+}
+
+// Cuts a rendered tile range into its tiles. Tiles that exist already are kept.
+void PdfCanvas::storeTiles(PageRaster &pr, const QImage &block,
+                           int tx0, int ty0, int tx1, int ty1)
+{
+    const qreal dpr = qMax<qreal>(1.0, viewport() ? viewport()->devicePixelRatioF() : 1.0);
+    for (int ty = ty0; ty <= ty1; ++ty) {
+        for (int tx = tx0; tx <= tx1; ++tx) {
+            QImage &slot = pr.tiles[ty * pr.cols + tx];
+            if (!slot.isNull())
+                continue;                  // a concurrent render won the race
+            const QRect px = tileRangePixels(pr.deviceSize, kTilePx, tx, ty, tx, ty);
+            // copy() detaches: a tile must not pin the whole block in memory. Tagged
+            // with the screen ratio, its logical size is exactly the rect it is drawn
+            // into (no resampling at 1:1).
+            slot = block.copy(px.translated(-(tx0 * kTilePx), -(ty0 * kTilePx)));
+            slot.setDevicePixelRatio(dpr);
+            const qint64 bytes = slot.sizeInBytes();
+            pr.bytes += bytes;
+            m_rasterBytes += bytes;
+            InputProbe::instance().addRender();
+        }
+    }
+}
+
+// Renders an inclusive tile range with ONE PDFium call. Rendering tile by tile costs
+// 3-6x as much on a page with pictures or long paths: every render() loads the page
+// again and PDFium's decoded images die with it, so one JPEG was decoded once per tile
+// (a visible 4K area: 166-504 ms tile by tile, 50-83 ms at once - docs 2.95).
+bool PdfCanvas::renderTiles(int page, PageRaster &pr, int tx0, int ty0, int tx1, int ty1)
 {
     if (!m_doc || page < 0 || page >= m_doc->pageCount())
-        return {};
-    if (tx < 0 || tx >= pr.cols || ty < 0 || ty >= pr.rows)
-        return {};
-    const int idx = ty * pr.cols + tx;
-    if (!pr.tiles.at(idx).isNull())
-        return pr.tiles.at(idx);
-
-    const int x0 = tx * kTilePx;
-    const int y0 = ty * kTilePx;
-    const int tw = qMin(kTilePx, pr.deviceSize.width() - x0);
-    const int th = qMin(kTilePx, pr.deviceSize.height() - y0);
-    if (tw <= 0 || th <= 0)
-        return {};
-
-    QPdfDocumentRenderOptions opt;
-    opt.setScaledSize(pr.deviceSize);
-    // QPdfDocument builds its matrix from clip.right()/bottom() (inclusive), so a
-    // clip of exactly tw pixels would render at (tw-1)/tw of the requested scale -
-    // each tile would shrink by ~0.2 % and leave a seam. One extra pixel on the far
-    // edge makes the matrix exactly 1:1; the output image stays tw x th.
-    opt.setScaledClipRect(QRect(x0, y0, tw + 1, th + 1));
+        return false;
+    const QRect area = tileRangePixels(pr.deviceSize, kTilePx, tx0, ty0, tx1, ty1);
+    if (area.isEmpty())
+        return false;
 
     QElapsedTimer t;
     t.start();
@@ -825,19 +872,24 @@ QImage PdfCanvas::tileAt(int page, PageRaster &pr, int tx, int ty)
         CrashLog::breadcrumb("render-nested",
                              QStringLiteral("渲染嵌套第 %1 层（第 %2 页）")
                                  .arg(renderDepth).arg(page + 1));
-    QImage img = m_doc->render(page, QSize(tw, th), opt);
+    ++m_renderCalls;
+    const QImage img = m_doc->render(page, area.size(), tileRenderOptions(pr.deviceSize, area));
     --renderDepth;
-    InputProbe::instance().addRender();
     if (img.isNull())
-        return {};
-    // Tag the tile with the screen ratio: its logical size is then tw/dpr, which
-    // is exactly the logical rect it is drawn into (no resampling at 1:1).
-    img.setDevicePixelRatio(qMax<qreal>(1.0, viewport() ? viewport()->devicePixelRatioF() : 1.0));
-    pr.tiles[idx] = img;
-    const qint64 bytes = img.sizeInBytes();
-    pr.bytes += bytes;
-    m_rasterBytes += bytes;
+        return false;
+    storeTiles(pr, img, tx0, ty0, tx1, ty1);
     noteRender(page, t.elapsed(), img.size());
+    return true;
+}
+
+// One tile on demand: the fallback when a batched render could not produce it.
+QImage PdfCanvas::tileAt(int page, PageRaster &pr, int tx, int ty)
+{
+    if (tx < 0 || tx >= pr.cols || ty < 0 || ty >= pr.rows)
+        return {};
+    const int idx = ty * pr.cols + tx;
+    if (pr.tiles.at(idx).isNull() && !renderTiles(page, pr, tx, ty, tx, ty))
+        return {};
     return pr.tiles.at(idx);
 }
 
@@ -874,72 +926,70 @@ QImage PdfCanvas::previewAt(int page, PageRaster &pr)
     return pr.preview;
 }
 
-// Hands one tile to the worker. The key dedups repeated paints while the result
-// is in flight, and the generation stamp lets onTileRendered() drop anything
-// that belongs to a previous zoom or document.
-void PdfCanvas::requestTile(int page, PageRaster &pr, int tx, int ty)
+quint64 PdfCanvas::pendingTileKey(int page, int tx, int ty) const
+{
+    return (quint64(m_tileGeneration & 0xffff) << 48) | (quint64(page & 0xffff) << 32)
+           | (quint64(tx & 0xffff) << 16) | quint64(ty & 0xffff);
+}
+
+// Hands a tile range to the worker as ONE render (see renderTiles). The range shrinks
+// to the tiles still needed; the per-tile keys dedup repeated paints while the result
+// is in flight, and the generation stamp lets onTileRendered() drop anything that
+// belongs to a previous zoom or document.
+void PdfCanvas::requestTiles(int page, PageRaster &pr, int tx0, int ty0, int tx1, int ty1)
 {
     if (!m_tileRenderer || !m_doc)
         return;
-    if (tx < 0 || tx >= pr.cols || ty < 0 || ty >= pr.rows)
+    int x0 = pr.cols, y0 = pr.rows, x1 = -1, y1 = -1;
+    for (int ty = qMax(0, ty0); ty <= qMin(ty1, pr.rows - 1); ++ty) {
+        for (int tx = qMax(0, tx0); tx <= qMin(tx1, pr.cols - 1); ++tx) {
+            if (!pr.tiles.at(ty * pr.cols + tx).isNull()
+                || m_pendingTileKeys.contains(pendingTileKey(page, tx, ty)))
+                continue;
+            x0 = qMin(x0, tx);
+            y0 = qMin(y0, ty);
+            x1 = qMax(x1, tx);
+            y1 = qMax(y1, ty);
+        }
+    }
+    if (x1 < 0)
         return;
-    if (!pr.tiles.at(ty * pr.cols + tx).isNull())
-        return;
-
-    const int x0 = tx * kTilePx;
-    const int y0 = ty * kTilePx;
-    const int tw = qMin(kTilePx, pr.deviceSize.width() - x0);
-    const int th = qMin(kTilePx, pr.deviceSize.height() - y0);
-    if (tw <= 0 || th <= 0)
-        return;
-    // A burst of scroll steps must not queue an unbounded backlog; the next
+    // PDFium has one global lock: everything queued here can hold up the UI thread's
+    // next render, and a burst of scroll steps must not build a backlog. The next
     // paint simply asks again for whatever is still missing.
-    if (m_pendingTiles.size() >= 64)
+    if (m_pendingTiles.size() >= 4)
         return;
 
-    const quint64 key = (quint64(m_tileGeneration & 0xffff) << 48)
-                        | (quint64(page & 0xffff) << 32)
-                        | (quint64(tx & 0xff) << 8) | quint64(ty & 0xff);
-    if (m_pendingTileKeys.contains(key))
-        return;
-
-    QPdfDocumentRenderOptions opt;
-    opt.setScaledSize(pr.deviceSize);
-    // Same inclusive-edge correction as tileAt(): +1 pixel on the far side.
-    opt.setScaledClipRect(QRect(x0, y0, tw + 1, th + 1));
-    const quint64 id = m_tileRenderer->requestPage(page, QSize(tw, th), opt);
+    const QRect area = tileRangePixels(pr.deviceSize, kTilePx, x0, y0, x1, y1);
+    const quint64 id = m_tileRenderer->requestPage(page, area.size(),
+                                                   tileRenderOptions(pr.deviceSize, area));
     if (!id || m_pendingTiles.contains(id))
         return;                     // the renderer deduped to a tracked request
-    m_pendingTiles.insert(id, PendingTile{page, tx, ty, int(m_tileGeneration),
-                                          pr.deviceSize, key});
-    m_pendingTileKeys.insert(key);
+    m_pendingTiles.insert(id, PendingTiles{page, x0, y0, x1, y1, int(m_tileGeneration),
+                                           pr.deviceSize});
+    for (int ty = y0; ty <= y1; ++ty) {
+        for (int tx = x0; tx <= x1; ++tx)
+            m_pendingTileKeys.insert(pendingTileKey(page, tx, ty));
+    }
 }
 
 // Warm the tiles just outside the visible range. The visible range itself is
 // rendered synchronously, so the page is always sharp; this only makes the next
-// scroll cheaper. The budget keeps the worker queue short.
+// scroll cheaper. One render per side, so the worker decodes the page once for each.
 void PdfCanvas::prefetchTiles(int page, PageRaster &pr,
                               int vx0, int vy0, int vx1, int vy1)
 {
-    if (!m_tileRenderer || !m_doc)
-        return;
     constexpr int kMargin = 2;
-    constexpr int kBudget = 16;
     const int x0 = qMax(0, vx0 - kMargin);
     const int x1 = qMin(pr.cols - 1, vx1 + kMargin);
-    const int y0 = qMax(0, vy0 - kMargin);
-    const int y1 = qMin(pr.rows - 1, vy1 + kMargin);
-    int budget = kBudget;
-    for (int ty = y0; ty <= y1 && budget > 0; ++ty) {
-        for (int tx = x0; tx <= x1 && budget > 0; ++tx) {
-            if (tx >= vx0 && tx <= vx1 && ty >= vy0 && ty <= vy1)
-                continue;
-            if (!pr.tiles.at(ty * pr.cols + tx).isNull())
-                continue;
-            requestTile(page, pr, tx, ty);
-            --budget;
-        }
-    }
+    if (vy1 < pr.rows - 1)
+        requestTiles(page, pr, x0, vy1 + 1, x1, vy1 + kMargin);   // below: reading direction
+    if (vy0 > 0)
+        requestTiles(page, pr, x0, vy0 - kMargin, x1, vy0 - 1);   // above
+    if (vx1 < pr.cols - 1)
+        requestTiles(page, pr, vx1 + 1, vy0, x1, vy1);            // right (zoomed in)
+    if (vx0 > 0)
+        requestTiles(page, pr, x0, vy0, vx0 - 1, vy1);            // left
 }
 
 void PdfCanvas::onTileRendered(int page, const QSize &size, const QImage &image,
@@ -948,47 +998,38 @@ void PdfCanvas::onTileRendered(int page, const QSize &size, const QImage &image,
     const auto it = m_pendingTiles.find(requestId);
     if (it == m_pendingTiles.end())
         return;                     // invalidated (old zoom/document) while in flight
-    const PendingTile req = it.value();
+    const PendingTiles req = it.value();
     m_pendingTiles.erase(it);
-    m_pendingTileKeys.remove(req.key);
 
     if (req.generation != int(m_tileGeneration))
         return;
+    for (int ty = req.ty0; ty <= req.ty1; ++ty) {
+        for (int tx = req.tx0; tx <= req.tx1; ++tx)
+            m_pendingTileKeys.remove(pendingTileKey(page, tx, ty));
+    }
     const auto rit = m_rasters.find(page);
     if (rit == m_rasters.end())
         return;
     PageRaster &pr = rit.value();
     if (pr.deviceSize != req.deviceSize
-        || req.tx < 0 || req.tx >= pr.cols || req.ty < 0 || req.ty >= pr.rows)
+        || req.tx0 < 0 || req.tx1 >= pr.cols || req.ty0 < 0 || req.ty1 >= pr.rows)
         return;
-    const int idx = req.ty * pr.cols + req.tx;
-    if (!pr.tiles.at(idx).isNull())
-        return;                     // a synchronous render won the race
     if (image.isNull() || size.isEmpty() || image.size() != size)
         return;
 
-    QImage tile = image;
-    tile.setDevicePixelRatio(qMax<qreal>(1.0, viewport() ? viewport()->devicePixelRatioF() : 1.0));
-    pr.tiles[idx] = tile;
-    const qint64 bytes = tile.sizeInBytes();
-    pr.bytes += bytes;
-    m_rasterBytes += bytes;
-    InputProbe::instance().addRender();
+    storeTiles(pr, image, req.tx0, req.ty0, req.tx1, req.ty1);
 
-    // Repaint just this tile where it currently is. If the page scrolled away in
-    // the meantime the rect is off-screen and Qt discards the update; the tile
-    // stays cached for when it comes back.
+    // Repaint the range where it currently is. If the page scrolled away in the
+    // meantime the rect is off-screen and Qt discards the update; the tiles stay
+    // cached for when it comes back.
     const QRectF r = pageRectInViewport(page);
     if (!r.isEmpty()) {
-        const int x0 = req.tx * kTilePx;
-        const int y0 = req.ty * kTilePx;
-        const int tw = qMin(kTilePx, pr.deviceSize.width() - x0);
-        const int th = qMin(kTilePx, pr.deviceSize.height() - y0);
+        const QRect px = tileRangePixels(pr.deviceSize, kTilePx, req.tx0, req.ty0, req.tx1, req.ty1);
         const QRectF target(
-            r.left() + qreal(x0) / pr.deviceSize.width() * r.width(),
-            r.top()  + qreal(y0) / pr.deviceSize.height() * r.height(),
-            qreal(tw) / pr.deviceSize.width() * r.width(),
-            qreal(th) / pr.deviceSize.height() * r.height());
+            r.left() + qreal(px.x()) / pr.deviceSize.width() * r.width(),
+            r.top()  + qreal(px.y()) / pr.deviceSize.height() * r.height(),
+            qreal(px.width()) / pr.deviceSize.width() * r.width(),
+            qreal(px.height()) / pr.deviceSize.height() * r.height());
         viewport()->update(target.toAlignedRect().adjusted(-1, -1, 1, 1));
     }
 }
@@ -1052,15 +1093,23 @@ void PdfCanvas::drawPageRaster(QPainter &p, int page, const QRectF &r)
     const int tx1 = qBound(0, qMax(devX0, devX1 - 1) / kTilePx, pr.cols - 1);
     const int ty1 = qBound(0, qMax(devY0, devY1 - 1) / kTilePx, pr.rows - 1);
 
-    bool missing = false;
-    for (int ty = ty0; ty <= ty1 && !missing; ++ty) {
+    // The bounding range of the missing tiles.
+    int missX0 = pr.cols, missY0 = pr.rows, missX1 = -1, missY1 = -1;
+    for (int ty = ty0; ty <= ty1; ++ty) {
         for (int tx = tx0; tx <= tx1; ++tx) {
             if (pr.tiles.at(ty * pr.cols + tx).isNull()) {
-                missing = true;
-                break;
+                missX0 = qMin(missX0, tx);
+                missY0 = qMin(missY0, ty);
+                missX1 = qMax(missX1, tx);
+                missY1 = qMax(missY1, ty);
             }
         }
     }
+    const bool missing = missX1 >= 0;
+
+    // Fresh tiles: render everything this paint needs at once (see renderTiles).
+    if (!stale && missing)
+        renderTiles(page, pr, missX0, missY0, missX1, missY1);
 
     // Previous-scale tiles (pinch / pending settle): fill the gaps with the
     // preview instead of blocking the UI thread on 30+ stale tiles.
@@ -1170,6 +1219,11 @@ QImage PdfCanvas::pageThumbnail(int page, const QSize &size) const
     if (!m_doc || page < 0 || page >= m_doc->pageCount())
         return {};
 
+    return m_doc->render(page, thumbnailSize(page, size));
+}
+
+QSize PdfCanvas::thumbnailSize(int page, const QSize &size) const
+{
     const QSizeF pt = m_doc->pagePointSize(page);
     int w = size.width() > 0 ? size.width() : int(qRound(pt.width()));
     w = qBound(1, w, 2048);
@@ -1180,8 +1234,17 @@ QImage PdfCanvas::pageThumbnail(int page, const QSize &size) const
     if (pt.width() > 0.0)
         h = int(qRound(qreal(w) * pt.height() / pt.width()));
     h = qBound(1, h, 4096);
+    return QSize(w, h);
+}
 
-    return m_doc->render(page, QSize(w, h));
+quint64 PdfCanvas::requestThumbnail(int page, const QSize &size)
+{
+    if (!m_tileRenderer || !m_doc || page < 0 || page >= m_doc->pageCount())
+        return 0;
+    const quint64 id = m_tileRenderer->requestPage(page, thumbnailSize(page, size));
+    if (id)
+        m_pendingThumbnails.insert(id);
+    return id;
 }
 
 void PdfCanvas::trimRasters()
@@ -1842,6 +1905,7 @@ int PdfCanvas::pageAtViewportPos(const QPointF &viewportPos) const
 
 void PdfCanvas::cancelGesture()
 {
+    stopFling();
     setDrawing(false);
     m_erasing     = false;
     m_erasePushed = false;
@@ -2606,6 +2670,8 @@ bool PdfCanvas::freePanTo(const QPointF &viewportPos)
     if (!delta.isNull()) {
         m_moveLastPos += QPointF(delta);
         panBy(QPointF(delta));
+        if (m_touchActive)
+            recordPanSample(QPointF(delta));   // a finger glides on release; the mouse not
     }
     return true;
 }
@@ -2616,6 +2682,100 @@ void PdfCanvas::panBy(const QPointF &delta)
     horizontalScrollBar()->setValue(int(horizontalScrollBar()->value() - delta.x()));
 }
 
+// --- kinetic scrolling ------------------------------------------------------------
+// Word on a touch screen keeps the page moving after a quick flick and lets it slow down
+// on its own; without it a long document took one drag per screen. The release speed is
+// the finger's travel over its last ~100 ms, so a finger that stopped before lifting
+// (the teacher held the page where they wanted it) does not glide at all.
+constexpr qint64 kFlingWindowMs   = 100;     // samples that make up the release speed
+constexpr qint64 kFlingStaleMs    = 60;      // finger resting this long = no glide
+constexpr qreal  kFlingMinSpeed   = 0.25;    // px/ms (250 px/s): slower is a placement
+constexpr qreal  kFlingMaxSpeed   = 8.0;     // px/ms: one ghost frame cannot launch it
+constexpr qreal  kFlingTauMs      = 400.0;   // speed decays as exp(-t/tau); glide = v*tau
+constexpr qreal  kFlingStopSpeed  = 0.02;    // px/ms: below this it has stopped
+constexpr qreal  kFlingAxisLock   = 0.5;     // the minor axis below this share is dropped
+
+void PdfCanvas::recordPanSample(const QPointF &delta)
+{
+    const qint64 now = m_flingClock.elapsed() + m_testClockOffset;
+    m_panSamples.append({now, delta});
+    // Only the last window matters; keep the vector short on a long drag.
+    while (m_panSamples.size() > 2 && now - m_panSamples.first().ms > kFlingWindowMs * 2)
+        m_panSamples.removeFirst();
+}
+
+void PdfCanvas::startFling()
+{
+    const qint64 now = m_flingClock.elapsed() + m_testClockOffset;
+    QVector<PanSample> recent;
+    for (const PanSample &s : std::as_const(m_panSamples)) {
+        if (now - s.ms <= kFlingWindowMs)
+            recent.append(s);
+    }
+    m_panSamples.clear();
+    if (recent.size() < 2 || now - recent.last().ms > kFlingStaleMs)
+        return;
+    // The first sample only marks when the window starts: its travel happened before it.
+    QPointF travel;
+    for (int i = 1; i < recent.size(); ++i)
+        travel += recent.at(i).delta;
+    const qreal spanMs = qMax<qreal>(8.0, qreal(recent.last().ms - recent.first().ms));
+    QPointF v = travel / spanMs;
+    if (qAbs(v.x()) < qAbs(v.y()) * kFlingAxisLock)
+        v.setX(0.0);
+    else if (qAbs(v.y()) < qAbs(v.x()) * kFlingAxisLock)
+        v.setY(0.0);
+    const qreal speed = std::hypot(v.x(), v.y());
+    if (speed < kFlingMinSpeed)
+        return;
+    if (speed > kFlingMaxSpeed)
+        v *= kFlingMaxSpeed / speed;
+    m_flingVelocity = v;
+    m_flingRemainder = QPointF();
+    m_flingLastMs = m_flingClock.elapsed();
+    m_flingTimer->start();
+    if (AppLog::isEnabled())
+        AppLog::write(QStringLiteral("view"), QStringLiteral("惯性滚动：%1,%2 px/s")
+                                                  .arg(int(v.x() * 1000)).arg(int(v.y() * 1000)));
+}
+
+void PdfCanvas::flingStep()
+{
+    const qint64 now = m_flingClock.elapsed();
+    const qreal dt = qBound<qreal>(1.0, qreal(now - m_flingLastMs), 50.0);
+    m_flingLastMs = now;
+    // Exact distance of an exponential decay over dt, so a late timer does not slow it.
+    const qreal decay = std::exp(-dt / kFlingTauMs);
+    const QPointF travel = m_flingVelocity * kFlingTauMs * (1.0 - decay) + m_flingRemainder;
+    m_flingVelocity *= decay;
+    const QPointF step(std::trunc(travel.x()), std::trunc(travel.y()));
+    m_flingRemainder = travel - step;
+    if (!step.isNull()) {
+        QScrollBar *vs = verticalScrollBar();
+        QScrollBar *hs = horizontalScrollBar();
+        const int v0 = vs->value();
+        const int h0 = hs->value();
+        panBy(step);
+        // Ran into the end of the document on an axis: that axis is done.
+        if (step.y() != 0.0 && vs->value() == v0)
+            m_flingVelocity.setY(0.0);
+        if (step.x() != 0.0 && hs->value() == h0)
+            m_flingVelocity.setX(0.0);
+    }
+    if (std::hypot(m_flingVelocity.x(), m_flingVelocity.y()) < kFlingStopSpeed)
+        stopFling();
+}
+
+bool PdfCanvas::stopFling()
+{
+    if (!m_flingTimer || !m_flingTimer->isActive())
+        return false;
+    m_flingTimer->stop();
+    m_flingVelocity = QPointF();
+    m_flingRemainder = QPointF();
+    return true;
+}
+
 void PdfCanvas::mousePressEvent(QMouseEvent *e)
 {
     m_strokeFromTouch = false;       // a real mouse: taps are dots (see endInput)
@@ -2624,6 +2784,7 @@ void PdfCanvas::mousePressEvent(QMouseEvent *e)
         QAbstractScrollArea::mousePressEvent(e);
         return;
     }
+    stopFling();
     if (e->button() != Qt::LeftButton) {
         // Right / middle click: nothing on the page uses them, and a held finger is
         // delivered as a right click (see CanvasMessageFilter).
@@ -2832,11 +2993,14 @@ void PdfCanvas::importInk(const QJsonObject &obj)
 
 QSizeF PdfCanvas::pagePointSize(int page) const
 {
-    return m_doc ? m_doc->pagePointSize(page) : QSizeF();
+    // From the table built at open: asking PDFium takes its global lock, which a page
+    // grid painting its tiles would otherwise wait for behind every worker render.
+    return m_pageSizes.value(page);
 }
 
 void PdfCanvas::goToPage(int index)
 {
+    stopFling();                       // a page jump must not be carried on by a glide
     if (m_geom.isEmpty())
         return;
     index = qBound(0, index, int(m_geom.size()) - 1);
@@ -2861,6 +3025,7 @@ void PdfCanvas::setFitWidth(bool on)
 
 void PdfCanvas::applyZoom(qreal targetZoom, const QPointF &anchor, bool immediate)
 {
+    stopFling();                       // a glide is in content px of the old zoom
     // Re-entry counter for the WHOLE call (a guard object, not a counter around the log
     // line: incrementing and decrementing around a single statement always reads 1).
     // A stack overflow means something is nesting, and this breadcrumb names it.
@@ -3063,6 +3228,7 @@ bool PdfCanvas::handleWheel(QWheelEvent *we)
                          .arg(we->modifiers().testFlag(Qt::ControlModifier) ? 1 : 0));
         return true;                   // swallow: never zoom or scroll under a finger
     }
+    stopFling();                       // a real wheel takes over from a glide
 
     const int dy = we->angleDelta().y();
     if (dy == 0 || !we->modifiers().testFlag(Qt::ControlModifier))
@@ -3102,6 +3268,7 @@ bool PdfCanvas::handleTablet(QTabletEvent *te)
     const QPointF pos = te->position();    // viewport coordinates
     switch (te->type()) {
     case QEvent::TabletPress:
+        stopFling();
         if (m_touchInkBlocked)
             return true;                   // a gesture owns the input
         m_touchInkBlocked = true;          // swallow the synthesized mice
@@ -3199,8 +3366,10 @@ void PdfCanvas::applyPinchFrame(const QPointF &a1, const QPointF &b1)
                           m_pinchPanSmooth.y() - m_pinchPanApplied.y());
     if (qAbs(pending.x()) >= kPinchPanDeadZonePx || qAbs(pending.y()) >= kPinchPanDeadZonePx) {
         const QPointF step(qRound(pending.x()), qRound(pending.y()));
-        if (!step.isNull())
+        if (!step.isNull()) {
             panBy(step);
+            recordPanSample(step);
+        }
         // The remainder is dropped on purpose: keeping it would let the noise accumulate
         // again, which is exactly the drift this dead zone exists to remove.
         m_pinchPanApplied = m_pinchPanSmooth;
@@ -3220,6 +3389,7 @@ void PdfCanvas::applyPinchFrame(const QPointF &a1, const QPointF &b1)
             // Anchor at the SMOOTHED centroid: anchoring at the raw one injects its jitter
             // into every zoom step, which is half of what shakes the page.
             zoomAt(stepScale, m_pinchCentroidSmooth);
+            m_panSamples.clear();      // a pinch that zoomed lands where it is: no glide
             // Record what was actually achieved (applyZoom clamps at the zoom limits) so the
             // next step stays relative to reality instead of accumulating an error.
             if (before > 0.0)
@@ -3593,6 +3763,17 @@ bool PdfCanvas::handleTouch(QTouchEvent *te)
         m_palmSequence = false;
         m_sequenceWrote = false;
     }
+    // Kinetic scrolling: a finger landing on a gliding page stops it (and, like Word,
+    // that touch only catches the page - it does not write); lifting after a quick pan
+    // sets it gliding. Released points carry no travel, so the order does not matter.
+    if (te->type() == QEvent::TouchBegin) {
+        m_flingCaught = stopFling();
+        m_panSamples.clear();
+    }
+    const auto flingOnRelease = qScopeGuard([this, te] {
+        if (te->type() == QEvent::TouchEnd)
+            startFling();
+    });
 
     // Free move pans the view, so it works on a blank canvas too.
     if (m_tool != InkTool::Move && (!m_doc || m_geom.isEmpty()))
@@ -3778,6 +3959,10 @@ bool PdfCanvas::handleTouch(QTouchEvent *te)
                 m_moveLastPos = cls.writePos;
                 return true;
             }
+            if (m_flingCaught) {
+                m_touchInkBlocked = true;  // released with the rest of the sequence
+                return true;
+            }
             // Eraser tool + a panel that reports contact size: the wipe follows the
             // contact (Seewo-style adaptive eraser). The selected step is the floor.
             qreal eraseRadius = -1.0;
@@ -3849,6 +4034,32 @@ void PdfCanvas::testTouchBegin(const QPointF &viewportPos)
 void PdfCanvas::testTouchMove(const QPointF &viewportPos) { moveInputTo(viewportPos); }
 
 void PdfCanvas::testTouchCancel() { endCancelledTouch(); }
+
+void PdfCanvas::testFingerPanRelease(const QPointF &step, int steps, int frameMs, int waitMs)
+{
+    // Mirrors handleTouch: TouchBegin clears the samples, every pan frame records one,
+    // TouchEnd starts the glide. The frame times are simulated on the sample clock, so
+    // the speed does not depend on how fast the test machine runs.
+    stopFling();
+    m_panSamples.clear();
+    m_testClockOffset = -qint64(steps) * frameMs - waitMs;
+    for (int i = 0; i < steps; ++i) {
+        m_testClockOffset += frameMs;
+        panBy(step);
+        recordPanSample(step);
+    }
+    m_testClockOffset += waitMs;
+    startFling();
+    m_testClockOffset = 0;
+}
+
+void PdfCanvas::testTouchDown()
+{
+    m_flingCaught = stopFling();
+    m_panSamples.clear();
+}
+
+bool PdfCanvas::testFlinging() const { return m_flingTimer && m_flingTimer->isActive(); }
 
 void PdfCanvas::testTouchEnd()
 {
